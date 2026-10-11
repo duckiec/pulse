@@ -44,6 +44,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-11 | ADL-0009 | Documentation surface expanded from 6 to 7 Essential Vibe Coding Files (ROADMAP.md added) | AGENTS.md |
 | 2026-10-11 | ADL-0010 | Move 0 bootstrap: `pulse` module path, GitHub Actions CI, toolchain bootstrap script, race-detector cgo exception | go.mod, .github/, scripts/ |
 | 2026-10-11 | ADL-0011 | Move 1 lexer land: 32-byte Token, iter.Seq stream, lexState table, golden corpus discipline | internal/ast, testdata/ |
+| 2026-10-11 | ADL-0013 | Ponytail always-on at project level; agent skills moved global→project; AGENTS.md §4.8 amendment | AGENTS.md, .opencode/ (ignored) |
 
 ---
 
@@ -292,6 +293,46 @@ complete (AGENTS.md §4.7).
   sequences; `FuzzLexer` (22 seeds) proves termination and span sanity.
 - **Refs:** internal/ast/{token.go,lexer.go}; internal/ast/*_test.go;
   testdata/http/**; TASKS.md P1.3.7–P1.3.11; ARCHITECTURE.md §3/§4
+
+## ADL-0013 — Ponytail always-on at project level; agent skills relocated global→project
+
+- **Date:** 2026-10-11
+- **Status:** ACCEPTED
+- **Context:** The maintainer requested Ponytail run always-on, and the previously
+  installed agent skills were not visible because they had been placed in the
+  global `~/.config/opencode/skills/` directory, which this OpenCode deployment
+  does not auto-discover. Ponytail's injected ruleset ("the best code is the
+  code you never wrote", `shortcut:` markers, aggressive cutting) can conflict
+  with Pulse's evidence-heavy gates if left unreconciled.
+- **Decision:**
+  1. Skills live at **project level** `pulse/.opencode/skills/` (auto-discovered
+     per OpenCode docs); the global skills directory was removed entirely.
+     Installed set: 51 skills — ponytail's 6, mattpocock's 27 (engineering +
+     productivity catalog; deprecated/in-progress/misc excluded), firecrawl's 18
+     (core + build, **skills only, no MCP wiring** — no `FIRECRAWL_API_KEY`, no
+     cloud MCP server registered; invoking them remains an explicit act).
+  2. Ponytail runs **always-on** at project level via `.opencode/plugins/`
+     (auto-loaded; pure Node built-ins, zero npm dependencies) plus its six
+     slash commands in `.opencode/command/`. Level control: `/ponytail
+     [lite|full|ultra|off]`, default `full`.
+  3. **AGENTS.md §4.8** fixes precedence: where the injected ruleset and
+     AGENTS.md conflict, AGENTS.md wins; the never-cut table names the CGO-free
+     matrix, zero-alloc gates, Mutation Rule, fail-closed handling, zero-trust
+     secrets, stdout hygiene, doc-sync, and honest dispositions as beyond the
+     chopping block; `shortcut:` markers may defer implementation choices only,
+     never a gate, test, or doc update.
+  4. `.opencode/` is **git-ignored**: the Pulse repository carries source and the
+     seven Essential Vibe Coding Files only, never vendored third-party
+     instruction packs. This is reversible with one .gitignore line if the
+     maintainer prefers committing the vendored set.
+- **Consequences:** Agents in this repo now receive both AGENTS.md and the
+  ponytail ruleset every turn; skills are visible at project level after a
+  session restart. Update path: `~/.local/share/opencode-skill-src/`
+  (`install-skills.sh`, `install-firecrawl.sh`, `move-to-project.sh`, pinned
+  clones of all three repos). Firecrawl skills present but inert — running them
+  is a cloud act and requires the user to supply credentials out-of-band.
+- **Refs:** AGENTS.md §4.8; .gitignore; ~/.local/share/opencode-skill-src/*;
+  TASKS.md (no execution-task change — environment tooling only)
 
 ---
 

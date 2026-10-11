@@ -316,6 +316,55 @@ following:
 If any box cannot be checked, the task is NOT done — report the specific blocker rather
 than shipping a green facade.
 
+### 4.8 Always-On Ruleset: Ponytail Integration
+
+**Ponytail** (`DietrichGebert/ponytail`, MIT) is installed at the project level
+(`.opencode/plugins/` + `.opencode/command/`) and injects its ruleset into every
+turn at the active level (default `full`; switch with `/ponytail [lite|full|ultra|off]`).
+Its premise — the smallest change that fully solves the task, reuse before
+writing, the standard library before dependencies — is *aligned* with this
+document. It is permitted as the default implementation lens under one
+non-negotiable precedence rule.
+
+**Precedence.** Where Ponytail and this document conflict, **this document
+wins** (preamble, restated here because the ruleset arrives as injected
+context). Ponytail's own rule — "lazy, not negligent: trust-boundary
+validation, data-loss handling, security, and accessibility are never on the
+chopping block" — is extended by name with Pulse's gates, which are **never
+on the chopping block**:
+
+| Never-cut item | Section |
+|---|---|
+| `CGO_ENABLED=0` builds on every target | §2.1 |
+| Zero-allocation invariants and their benchmark gates (G-alloc) | §2.7, §4.7 |
+| The Mutation Rule and red→green evidence for every fix | §4.2 |
+| Fail-closed error handling and semantic exit codes | §4.4 |
+| Zero-trust secrets, redaction, no plaintext on disk | §3.4, §4.3 |
+| Transport segregation (MCP stdout hygiene) | §3.3 |
+| Documentation state synchronization (TASKS.md / MEMORY.md / ARCHITECTURE.md updates) | §4.6 |
+| Honest test dispositions (PASSED / FAILED / BLOCKED / NOT RUN) | §4.5 |
+
+**Rules of engagement:**
+
+1. **Cut implementations, never gates.** A Ponytail finding of the form
+   "delete this / simplify this" is actionable only when the target is not in
+   the never-cut table. `/ponytail-review` and `/ponytail-audit` findings that
+   touch a gate item are rejected at review.
+2. **`shortcut:` comments defer implementation choices only.** A `shortcut:`
+   marker must never defer a gate, a test, a redaction path, or a
+   documentation update; such a marker is itself a §4.6/§4.7 violation.
+3. **The gates are the floor, not the target.** Meeting every AGENTS.md
+   obligation with the smallest sufficient code is the intended outcome —
+   Ponytail's discipline applies *inside* the evidence, not instead of it.
+4. **Level discipline.** Run `/ponytail off` when a task is gate-dominated
+   (arena/allocator work, doc-sync batches); the choice is per-session and
+   needs no record.
+5. **Provenance.** Source checkout: `~/.local/share/opencode-skill-src/ponytail`
+   (pinned clone; updated by `install-skills.sh` in that directory); the vendored
+   copy in `.opencode/` is git-ignored — the repository stays the seven
+   Essential Vibe Coding Files plus Pulse source, never vendored third-party
+   instruction packs. Restore procedure: MEMORY.md ADL-0013.
+
 ---
 
 ## 5. Enforcement

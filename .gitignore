@@ -10,3 +10,7 @@ coverage.txt
 
 # Local state (never committed; secrets never touch disk by design)
 .pulse/
+
+# Agent-environment vendoring (ponytail plugin + third-party skills).
+# Restore with the installers in ~/.local/share/opencode-skill-src/ (MEMORY.md ADL-0013).
+.opencode/
