@@ -1,0 +1,6 @@
+### Users collection
+# @name list-users
+GET https://api.example.com/users HTTP/1.1
+Accept: application/json
+
+###

@@ -1,0 +1,4 @@
+GET https://api.example.com/x
+
+{"a": 1}
+trailing garbage here

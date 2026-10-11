@@ -1,0 +1,14 @@
+@base = https://api.example.com
+@token = fixture-value
+
+# @name create-user
+POST {{base}}/users HTTP/1.1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "{{username}}",
+  "role": "admin"
+}
+
+###

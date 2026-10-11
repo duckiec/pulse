@@ -1,0 +1,17 @@
+@host = http://localhost:8080
+
+### Health check
+# @name health
+GET {{host}}/health HTTP/1.1
+
+###
+
+### Raw body
+# @name raw-create
+POST {{host}}/notes HTTP/1.1
+Content-Type: text/plain
+
+line one of the raw body
+line two of the raw body
+
+###

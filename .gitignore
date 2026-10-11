@@ -1,0 +1,12 @@
+# Build outputs
+/pulse
+/pulse.exe
+/bin/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# Local state (never committed; secrets never touch disk by design)
+.pulse/

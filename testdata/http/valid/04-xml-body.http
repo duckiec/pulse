@@ -1,0 +1,12 @@
+# @name xml-upload
+POST https://api.example.com/upload HTTP/1.1
+Content-Type: application/xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<order id="42">
+  <!-- a comment with <angle> brackets -->
+  <item sku="A1">Widget</item>
+  <meta/>
+</order>
+
+###

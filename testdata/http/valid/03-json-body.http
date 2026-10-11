@@ -1,0 +1,10 @@
+# @name nested-json
+POST https://api.example.com/items HTTP/1.1
+Content-Type: application/json
+
+{
+  "filter": {"tags": ["a", "b"], "note": "brace } inside string"},
+  "limit": 10
+}
+
+###

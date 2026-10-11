@@ -1,0 +1,7 @@
+# Sanctioned third-party dependencies (AGENTS.md §2.2, ARCHITECTURE.md §7).
+# One module path per line; a trailing '/' makes the entry a prefix match
+# (e.g. golang.org/x/ admits every x/ submodule). Everything else must be
+# stdlib. Enforced by: bash scripts/ci/banned-import-audit.sh
+
+golang.org/x/term
+golang.org/x/sys
