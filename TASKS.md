@@ -174,3 +174,5 @@ routing to a spec-conformant JSON-RPC stdio server via `mark3labs/mcp-go`.
 |---|---|---|---|
 | 2026-10-11 | Scaffolding: 6 Essential Vibe Coding Files created | DONE | Initial commit (this file) |
 | 2026-10-11 | ROADMAP.md authored (4 goals, X.X.X); doc surface expanded to 7 files (ADL-0008/0009) | DONE | Companion commit to roadmap |
+| 2026-10-11 | Move 0: bootstrap + enforcement harness (ADL-0010) | DONE | 4/4 CGO-free matrix; tidy no-op; audit; mutation + planted-import red→green proofs |
+| 2026-10-11 | Move 1: .http lexer (ADL-0011) | DONE | 32-byte Token asserted; 0 B/op bench gate; fuzz termination; 9-fixture golden corpus; race detector green |
