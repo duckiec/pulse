@@ -45,6 +45,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-11 | ADL-0010 | Move 0 bootstrap: `pulse` module path, GitHub Actions CI, toolchain bootstrap script, race-detector cgo exception | go.mod, .github/, scripts/ |
 | 2026-10-11 | ADL-0011 | Move 1 lexer land: 32-byte Token, iter.Seq stream, lexState table, golden corpus discipline | internal/ast, testdata/ |
 | 2026-10-11 | ADL-0013 | Ponytail always-on at project level; agent skills moved global→project; AGENTS.md §4.8 amendment | AGENTS.md, .opencode/ (ignored) |
+| 2026-10-12 | ADL-0014 | Option A: ponytail plugin vendor fix — full checkout at `.opencode/ponytail/`, absolute plugins path, package.json shim | AGENTS.md, .gitignore |
 
 ---
 
@@ -333,6 +334,56 @@ complete (AGENTS.md §4.7).
   is a cloud act and requires the user to supply credentials out-of-band.
 - **Refs:** AGENTS.md §4.8; .gitignore; ~/.local/share/opencode-skill-src/*;
   TASKS.md (no execution-task change — environment tooling only)
+
+## ADL-0014 — Option A: ponytail plugin vendor fix (silent load failure corrected)
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED (supersedes the plugin-install half of ADL-0013)
+- **Context:** The "always-on" plugin installed under ADL-0013 was **silently
+  failing to load**. Two independent defects, both invisible to the syntax-only
+  verification originally performed (`node --check`):
+  1. **`require()` path resolution.** `ponytail.mjs` resolves its shared
+     instruction/config builders via `require('../../hooks/ponytail-instructions')`
+     and `require('../../hooks/ponytail-config')` — paths that only exist inside
+     a *full* ponytail checkout. The partial copy at `.opencode/plugins/` had
+     no `hooks/` sibling, so the plugin threw
+     `MODULE_NOT_FOUND: Cannot find module '../../hooks/ponytail-instructions'`
+     at load (log: `level=WARN message="failed to load plugin"` at
+     2026-10-11T22:28:54 and 2026-10-12T00:27:13). OpenCode degrades silently —
+     the session runs normally with no ruleset.
+  2. **Doubled-UNC path resolution.** Moving to the vendored full checkout with
+     a *relative* plugins entry (`".opencode/ponytail/.opencode/plugins"`)
+     exposed a second failure: OpenCode's directory-plugin loader runs an
+     `npm install` step and built the malformed path
+     `\\wsl.localhost\FedoraLinux-44\FedoraLinux-44\home\duckie\pulse\...`
+     (distro name doubled) → `ENOENT package.json`.
+- **Decision (Option A):**
+  1. The **full ponytail checkout** is vendored at `pulse/.opencode/ponytail/`
+     (git-ignored), so every relative path inside the plugin — `../../hooks`,
+     `../../skills`, `../command` — resolves inside the vendored tree.
+  2. `pulse/opencode.json` (git-ignored) registers the plugin with an
+     **absolute path** (`/home/duckie/pulse/.opencode/ponytail/.opencode/plugins`),
+     which sidesteps the doubled-UNC relative-resolution bug.
+  3. A minimal **`package.json` shim** (`main: index.js`, `type: module`,
+     no dependencies) was added inside the vendored plugins dir because the
+     directory-plugin loader performs an npm-install step requiring one; upstream
+     omits it because npm consumers load the package root instead.
+  4. The broken partial `.opencode/plugins/` copy was **deleted**, and the six
+     project-level ponytail skill/command duplicates were **removed** — the
+     plugin now registers its own skills and commands from the vendored tree
+     (45 non-ponytail skills remain at `.opencode/skills/`).
+- **Consequences:** Verified end-to-end, not by syntax check:
+  (a) smoke test — module loads, context hook registers, 6 skills + 6 commands
+  register, 2859-byte ruleset injected at default mode; (b) server log —
+  `msg="loading plugin" id=/home/duckie/pulse/.opencode/ponytail/.opencode/plugins`
+  with watchers on `index.js` and `ponytail.mjs`, and **zero** plugin-load
+  failures after the fix; (c) functional probe — the live model reports
+  "Ponytail is injected at **full** level". Lesson recorded: verify *runtime*
+  require graphs, never just syntax. `opencode.json` is git-ignored alongside
+  `.opencode/` because a committed config pointing into ignored vendored
+  tooling would dangle for fresh clones.
+- **Refs:** .opencode/ponytail/**; opencode.json; AGENTS.md §4.8; ADL-0013;
+  ~/.local/share/opencode-skill-src/{vendor-option-a,finalize-option-a,run-smoke,log-evidence}.sh
 
 ---
 

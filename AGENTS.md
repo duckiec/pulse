@@ -359,11 +359,17 @@ on the chopping block**:
 4. **Level discipline.** Run `/ponytail off` when a task is gate-dominated
    (arena/allocator work, doc-sync batches); the choice is per-session and
    needs no record.
-5. **Provenance.** Source checkout: `~/.local/share/opencode-skill-src/ponytail`
-   (pinned clone; updated by `install-skills.sh` in that directory); the vendored
-   copy in `.opencode/` is git-ignored — the repository stays the seven
-   Essential Vibe Coding Files plus Pulse source, never vendored third-party
-   instruction packs. Restore procedure: MEMORY.md ADL-0013.
+5. **Provenance.** The full ponytail checkout is vendored at
+   `.opencode/ponytail/` (so the plugin's `../../hooks`, `../../skills`, and
+   `../command` relative paths resolve inside the tree), and `opencode.json`
+   registers it by **absolute path** (relative entries hit a doubled-UNC
+   resolution bug on this WSL workspace; see MEMORY.md ADL-0014). Both are
+   git-ignored — the repository stays the seven Essential Vibe Coding Files
+   plus Pulse source, never vendored third-party instruction packs. Pinned
+   upstream source and the install/verify scripts live at
+   `~/.local/share/opencode-skill-src/`; restore procedure: MEMORY.md
+   ADL-0013/ADL-0014. A plugin that loads syntax-clean can still fail at
+   runtime: verify the require graph, not just `node --check`.
 
 ---
 
