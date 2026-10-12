@@ -196,6 +196,37 @@ still returns no document, because a file with any diagnostic has no valid AST.
 A violated *parser* invariant (a count/fill disagreement) is reported as an
 internal error with no file position, never as a user-facing diagnostic.
 
+**Implementation status:** implemented and gated (Move 3). Streaming gate:
+`BenchmarkStreamSteadyState` at 0 allocs/op; memory ceiling proven invariant at
+66 in-flight chunks across 1 MB/10 MB/100 MB payloads; leak gate shows
+goroutines and fds returning to baseline after 8 cancelled runs. See MEMORY.md
+ADL-0016.
+
+**Exact geometry (MEMORY.md ADL-0016).** `chunkSize = 32 KiB`,
+`chunkChannelCap = 64`, so the queue holds **2 097 152 B (2 MiB)**. A chunk is
+live from checkout until the consumer recycles it, so the true worst case is
+64 queued + 1 being filled + 1 held by the dispatcher = **66 chunks =
+2 162 688 B = 2.0625 MiB** (`inFlightBytes`). That figure — not a flat "2 MiB" —
+is what the tests assert, and it is independent of payload size.
+
+**Sink contract.** `Run(ctx, req, sink) RunHandle` returns no error: success,
+transport failure, and cancellation all arrive through the sink, so there is one
+place to observe results. `Sink.Chunk` is called from the dispatch goroutine and
+**transfers ownership**: a sink that keeps the bytes must copy them, or call
+`Chunk.Recycle()`. `Recycle` is idempotent (a double recycle is counted and
+ignored rather than corrupting the pool). Exactly one terminal callback per run
+(`Done` **or** `Failed`), and never a chunk after it.
+
+**Teardown budget bounds aborts, not success.** Cleanup runs on
+`context.WithoutCancel(ctx)` so a user interrupt cannot abort it. On abort the
+dispatcher recycles instead of delivering, and the 50 ms budget applies. On
+success the engine waits for the drain with no budget — capping it would mean
+discarding chunks already promised to the sink, violating "no frame dropped".
+
+**Interpolation fails closed.** With no `Resolver` bound, a `{{var}}` aborts the
+run before the request is issued (`ErrUnresolved`); a resolver error is fatal.
+A literal `{{var}}` is never sent to a real endpoint.
+
 ## 5. Zero-Blocking I/O Model (`internal/engine`)
 
 The required behavior: stream a **50MB+ JSON response** without dropping a single
@@ -223,11 +254,11 @@ UI goroutine                       MCP handler (streams summary + cites offsets)
 | # | Invariant | Enforcement |
 |---|---|---|
 | 1 | The Bubble Tea thread never performs network I/O, disk reads, or blocking syscalls | `testing/synctest` audit + CI lint; AGENTS.md §3.2 |
-| 2 | Reader goroutines are the only socket owners; they block on channel send under backpressure, never the UI | Design by construction (channel direction) |
-| 3 | Buffers come from a global `sync.Pool` (`cap` 32KiB, reset-on-recycle); zero allocs in steady state | `-benchmem` gate on streaming benchmark |
-| 4 | Memory ceiling = 64 × 32KiB (channel) + in-flight chunks — independent of response size | Stress test with 100MB payload |
-| 5 | Context cancellation (user interrupt `Ctrl+C`, MCP timeout) unwinds in ≤50ms via `context.WithoutCancel` teardown goroutines | Cancellation test |
-| 6 | The checksum/tee mirror never blocks consumption — it is a passive sink on the read path | Benchmarks show tee adds <2% throughput |
+| 2 | Reader goroutines are the only socket owners; they block on channel send under backpressure, never the UI | Design by construction (channel direction); proven by the gated-consumer ceiling gate |
+| 3 | Buffers come from a global `sync.Pool` (fixed 32 KiB, reset-on-recycle); zero allocs in steady state | `BenchmarkStreamSteadyState` at 0 allocs/op, gated in CI |
+| 4 | Memory ceiling = 66 × 32 KiB (2 162 688 B) — independent of response size | `TestMemoryCeilingInvariant` across 1 MB/10 MB/100 MB |
+| 5 | Context cancellation unwinds in ≤50ms via `context.WithoutCancel` teardown | `TestCancellationNoLeak` (8 cancels, goroutine + fd accounting) |
+| 6 | The checksum/tee mirror never blocks consumption — it is a passive sink on the read path | `sha256` cannot fail or block; digest verified against a reference run |
 
 ### 5.3 Backpressure & frame budget
 
@@ -279,6 +310,13 @@ Sensitive headers (`Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie
 `X-Api-Key`) and all vault-sourced values are replaced with `[REDACTED]` before any
 output reaches stderr, the UI, or the SQLite store. Redaction is applied at the
 single output chokepoint (`internal/secrets.Redact`), not per-call-site.
+
+The engine implements this at its own boundary today (Move 3): response headers
+are copied and redacted before they reach a `RunResult`, and URL userinfo is
+stripped from both the recorded URL and any `net/http` transport error. When
+`internal/secrets` lands, `secrets.Redact` becomes the chokepoint and the
+engine's copy is replaced by it — the engine-side redaction is a working
+placeholder, not a competing policy.
 
 ## 7. Sanctioned Third-Party Dependencies (Stdlib-First Exceptions)
 

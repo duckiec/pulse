@@ -70,9 +70,16 @@ AST and persists structured history to SQLite — with no UI and no network.
 - [x] P1.3.16 Corpus-driven defects fixed by the parser (all covered by goldens): (a) the lexer's central newline check leaked a spurious `TokNewline` inside JSON/XML bodies, corrupting every body-bearing fixture (fixed by restricting the check to line-oriented states); (b) a bodyless request swallowed the following `###`, so request-scoped `@var`/`# @assert` ranges anchored to the wrong request (fixed by one-token `unget`); (c) variable/assert scoping was anchored at request creation instead of at the block separator
 
 ### 1.4 Engine Core
-- [ ] P1.4.1 `internal/engine`: request execution over `net/http` with in-memory AST types
-- [ ] P1.4.2 Request construction from AST (method, URL template, headers, body) with interpolation hooks left unbound (Phase 2 provides the resolver)
-- [ ] P1.4.3 Structured run results: status, timing, sizes, response SHA-256 (fed by the tee mirror)
+- [x] P1.4.1 `internal/engine`: request execution over `net/http` with in-memory AST types — `engine.go` (AST→`*http.Request`, `Engine.Run(ctx, req, sink) RunHandle`, redacted `RunResult`)
+- [x] P1.4.2 Request construction from AST (method, URL template, headers, body) with interpolation hooks left unbound (Phase 2 provides the resolver) — `Resolver` interface + `ErrUnresolved`; an unbound `{{var}}` **fails closed before any byte reaches the network** (`TestUnresolvedInterpolationFailsClosed`)
+- [x] P1.4.3 Structured run results: status, timing, sizes, response SHA-256 (fed by the tee mirror) — `RunResult{Method,URL,Status,Proto,Header,Bytes,Digest,Elapsed}`, digest verified against an independent reference (`TestDigestMatchesReference`)
+- [x] P1.4.4 Streaming pipeline: `io.TeeReader` → SHA-256 mirror + bounded `chan *Chunk` (cap 64) → dispatch goroutine → `Sink`; 32 KiB pooled chunks with one-way ownership (`stream.go`)
+- [x] P1.4.5 Memory ceiling gate: `TestMemoryCeilingInvariant` proves the in-flight chunk count saturates at exactly 66 (2 162 688 B = 64×32 KiB + reader + dispatcher) for 1 MB/10 MB/100 MB payloads, and is invariant across a 10× payload change
+- [x] P1.4.6 Zero-allocation gate: `BenchmarkStreamSteadyState` at `0 allocs/op` streaming 16 MiB (512 chunks/op) through the pooled pipeline (~1.4 GB/s), enforced by `scripts/ci/test-gates.sh`
+- [x] P1.4.7 Leak gate: `TestCancellationNoLeak` cancels 8 runs mid-stream; asserts teardown ≤ 50 ms, goroutines 6→3, fds 11→9, and exactly one terminal callback per run
+- [x] P1.4.8 Teardown uses `context.WithoutCancel` so a user interrupt cannot abort cleanup; the budget bounds the **abort** unwind only, never a successful drain (dropping delivered chunks would violate "no frame dropped")
+- [x] P1.4.9 Redaction: `Authorization`/`Proxy-Authorization`/`Cookie`/`Set-Cookie`/`X-Api-Key` response headers and URL userinfo never leave the engine (`TestRedaction`, `TestRedactURLStripsUserinfo`)
+- [x] P1.4.10 Mutation evidence: `scripts/mutation-proof-engine.sh` breaks the queue cap, the chunk size, and the pool recycle, showing red → restore → green
 
 **Phase 1 exit criteria:** `go build ./...` clean with `CGO_ENABLED=0`; AST benchmarks at zero allocs; parse-failure tests prove fail-closed diagnostics with red→green evidence (AGENTS.md §4.2); store schema audited secret-free; Phase 1 completion logged in MEMORY.md with an ADL entry.
 

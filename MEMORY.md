@@ -48,6 +48,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-12 | ADL-0014 | Option A: ponytail plugin vendor fix — full checkout at `.opencode/ponytail/`, absolute plugins path, package.json shim | AGENTS.md, .gitignore |
 | 2026-10-12 | ADL-0012 | Move 2 parser land: bump-arena memory strategy (8-byte alignment, retained blocks, GC-visible root) and the fail-closed `(nil, err)` parse contract | internal/ast/arena.go, internal/ast/parser.go, testdata/, scripts/ |
 | 2026-10-12 | ADL-0015 | Canonical upstream established: `origin` = https://github.com/duckiec/pulse.git, branch `main`; local history rebased onto the upstream AGPL-3.0 initial commit (no force-push) | AGENTS.md §1, ARCHITECTURE.md header |
+| 2026-10-12 | ADL-0016 | Move 3 engine land: 32 KiB × 64-slot streaming geometry, 2.0625 MiB in-flight ceiling, Sink ownership contract, abort-only teardown budget | internal/engine/, ROADMAP.md §1.2.1/§1.2.3 |
 
 ---
 
@@ -517,6 +518,85 @@ complete (AGENTS.md §4.7).
   entry does not change it.
 - **Refs:** `git remote -v` (origin); AGENTS.md §1; ARCHITECTURE.md header;
   TASKS.md §0 bootstrap state
+
+---
+
+## ADL-0016 — The streaming geometry, the 2 MiB ceiling, and the Sink contract
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Move 3 had to stream a 50 MB+ response without dropping a frame,
+  without unbounded memory, and without ever blocking a caller or a UI thread.
+  Three numbers decide all of it, and every other design choice follows from
+  them.
+- **Decision — the geometry (ROADMAP.md §1.2.3–1.2.4):**
+  1. **`chunkSize = 32 << 10` (32 KiB).** Every pooled buffer is exactly one
+     chunk; a read is `io.ReadFull` into that buffer, so *buffer count bounds
+     bytes exactly* — no fractional tail, no size-class rounding.
+  2. **`chunkChannelCap = 64`, giving a 2 MiB resident queue.** 64 × 32 KiB =
+     2 097 152 B.
+  3. **The true in-flight ceiling is `maxInFlightChunks = 66`, not 64.** A
+     chunk is live from the moment the reader checks it out until the consumer
+     recycles it, so the worst case is *64 queued + 1 being filled + 1 held by
+     the dispatcher* = **2 162 688 B = 2.0625 MiB**. The honest number is
+     recorded in the code as `inFlightBytes` and asserted by the gate; claiming
+     a flat "2 MiB" would have been off by 64 KiB. 64 slots is the queue; 66 is
+     the memory.
+  4. **This is independent of payload size, and that is the claim the gate
+     proves.** `TestMemoryCeilingInvariant` stalls the consumer completely (a
+     `gatedSink` blocked on a channel, modelling a frozen UI) across 1 MB,
+     10 MB, and 100 MB bodies, and asserts the in-flight count pins at exactly
+     66 for the two payloads large enough to saturate — a **10× payload
+     increase moves the peak by zero chunks**. The 1 MB case pins at 33 instead,
+     because a 32-chunk body physically cannot fill a 64-slot queue; the test
+     asserts that exact arithmetic rather than pretending it saturated.
+- **Decision — the Sink contract:**
+  1. **Chunk ownership is one-way:** engine → `Sink.Chunk` → `Chunk.Recycle()`
+     → pool. The engine never reads a buffer after handing it off. A sink that
+     wants the bytes past the call must copy them.
+  2. **`Recycle` is idempotent.** A double recycle is *counted* and ignored
+     rather than pushing the same buffer into the pool twice — which would hand
+     one buffer to two concurrent readers, the silent corruption ROADMAP.md
+     §1.2.3 warns about. Counting keeps it observable in tests without making a
+     consumer bug crash the UI. A white-box test poisons recycled buffers to
+     catch any use-after-recycle (`TestSinkOwnsEveryChunk`).
+  3. **Exactly one terminal callback per run**, `Done` or `Failed`, never both,
+     and never a chunk after it — both asserted.
+  4. **Interface revised (AGENTS.md §4.6, ROADMAP.md is the scope authority).**
+     `Run` returns `RunHandle`, **not** `(*RunHandle, error)`: every outcome
+     arrives through the sink, so there is exactly one place to observe results
+     and a caller cannot silently ignore a return value. ROADMAP.md §1.2.1 was
+     updated in the same commit to match; §1.2.3's unused 8 KiB SSE constant was
+     annotated as deferred to the SSE transport (Goal 2), its only consumer.
+- **Decision — teardown budget bounds aborts only:**
+  - Teardown runs on `context.WithoutCancel(ctx)` with its own 50 ms deadline,
+    so a user interrupt mid-stream cannot abort cleanup.
+  - **The 50 ms budget applies to the abort path only.** On success the engine
+    waits for the dispatcher with *no* budget: every chunk already promised to
+    the sink must be delivered, and how long a consumer takes is the consumer's
+    business. Capping a successful drain would mean discarding delivered data —
+    a direct violation of "stream without dropping a single frame". On abort the
+    dispatcher recycles instead of delivering, so the unwind is the engine's own
+    work and is genuinely bounded. (Measured: the original always-bounded version
+    failed its own gate at 33–50 ms of pure sink drain time.)
+- **Decision — interpolation fails closed:** with no `Resolver` bound, a
+  `{{var}}` anywhere in target, header, or body aborts the run *before the
+  request is issued* (`ErrUnresolved`). Sending a literal `{{var}}` to a real
+  endpoint would silently corrupt the request. A resolver error is likewise
+  fatal; there is no empty-string fallback (AGENTS.md §4.3).
+- **Consequences:** `BenchmarkStreamSteadyState` reports **0 allocs/op** for a
+  16 MiB body (512 chunks/op) at ~1.4 GB/s, gated in CI. The residual non-zero
+  `B/op` is `sync.Pool`'s own internal queue growth (`poolChain.pushHead`),
+  bounded and one-time — which is exactly why the gate decides on `allocs/op`
+  rather than on an averaged byte count. The leak gate shows goroutines 6→3 and
+  fds 11→9 across 8 cancelled runs. Mutation proof
+  (`scripts/mutation-proof-engine.sh`): widening the queue to 100 000 spikes
+  in-flight to **104 chunks (3 407 872 B)** at 10 MB and **201 chunks
+  (6 586 368 B)** at 100 MB; shrinking the chunk to 4 KiB breaks the geometry
+  assertion; dropping `chunkPool.Put` yields **1105 allocs/op**.
+- **Refs:** internal/engine/engine.go; internal/engine/stream.go;
+  internal/engine/engine_test.go; scripts/mutation-proof-engine.sh;
+  scripts/ci/test-gates.sh; TASKS.md P1.4.1–P1.4.10; ROADMAP.md §1.2.1/§1.2.3
 
 ---
 

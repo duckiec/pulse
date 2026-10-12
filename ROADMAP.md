@@ -300,18 +300,24 @@ substrate that makes spillage structurally impossible, not merely discouraged.
 - **Contract:**
   ```go
   type Engine interface {
-      Run(ctx context.Context, req *ast.Request, sink Sink) (*RunHandle, error)
+      Run(ctx context.Context, req *ast.Request, sink Sink) RunHandle
   }
   type Sink interface {
-      Chunk(*Chunk)      // called from reader goroutine only
+      Chunk(*Chunk)      // called from the dispatch goroutine only
       Done(*RunResult)   // terminal, exactly once
-      Failed(error)
+      Failed(error)      // terminal, exactly once, mutually exclusive with Done
   }
   type RunHandle struct{ cancel context.CancelFunc; done chan struct{} }
   ```
+  `Run` returns no error: every outcome — success, transport failure, or user
+  cancellation — is delivered through the sink, so a caller has exactly one place
+  to observe results and cannot accidentally ignore one. `RunHandle` exposes
+  `Cancel`, `Done() <-chan struct{}`, `Wait`, and `WaitTimeout`.
   The Bubble Tea side: `func fetch(r *ast.Request) tea.Cmd` spawns the goroutine and
   returns `tea.Msg` values (`chunkMsg`, `runDoneMsg`, `runFailedMsg`); `Update`
   mutates the model only; `View` performs no I/O and no time reads.
+  *(Signature revised in Move 3: the contract originally read `(*RunHandle, error)`.
+  See MEMORY.md ADL-0016 §interface.)*
 - **Challenge:** The engine's `Sink` callbacks run on the engine goroutine while the
   model is owned by the UI goroutine. Hand-off is exclusively via channel-sent
   messages (bubbletea's `Msg` channel already provides the memory barrier); the
@@ -355,6 +361,11 @@ substrate that makes spillage structurally impossible, not merely discouraged.
   Recycle rule: the consumer returns `*Chunk.Buf` to the pool after the bytes have
   been rendered/copied (`chunkPool.Put(c.Buf)`); the UI emits a recycle message per
   rendered batch; the engine never reuses a buffer it has handed off.
+  *(Implemented in Move 3 as `chunkSize = 32 << 10`; the 8 KiB SSE constant is
+  deferred to the SSE transport in Goal 2, which is its only consumer. `Chunk`
+  additionally carries `Recycle()`/`Released()`/`Bytes()`, and a double `Recycle`
+  is counted and ignored rather than corrupting the pool — see MEMORY.md
+  ADL-0016 §ownership.)*
 - **Challenge:** Pool discipline is the GC-spike defense: any double-Put or
   use-after-Put corrupts data *silently*. The design makes this structurally safe:
   ownership transfer is one-way (engine → UI), `Chunk` is heap-allocated once per
