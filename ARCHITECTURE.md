@@ -202,6 +202,20 @@ internal error with no file position, never as a user-facing diagnostic.
 goroutines and fds returning to baseline after 8 cancelled runs. See MEMORY.md
 ADL-0016.
 
+**Persistent transports (Move 5).** `Stream` unifies HTTP/SSE/WS/gRPC behind
+`Read`/`Write`/`Close`/`SetDeadline`/`Kind`; read-only transports return
+`ErrWriteUnsupported` rather than faking a write. `StreamManager` owns the
+lifecycle — `Idle → Connecting → Streaming ⇄ Connecting (reconnect) → Closed` —
+and exposes `Attempts()` and `LastEventID()`.
+
+The **resume token is owned by the manager, not the parser**: the parser is
+rebuilt per connection, the token must not be. Reconnect replays
+`Last-Event-ID` with full-jitter backoff (500 ms → 30 s). An idle expiry maps to
+the documented retryable `ErrIdle`; oversize framing and a non-2xx status are
+terminal. Events are coalesced and dispatched at most once per 16 ms frame
+through the same 32 KiB pooled channel, so the 2 MiB ceiling is unchanged and an
+event flood cannot lock the UI. See MEMORY.md ADL-0018.
+
 **Exact geometry (MEMORY.md ADL-0016).** `chunkSize = 32 KiB`,
 `chunkChannelCap = 64`, so the queue holds **2 097 152 B (2 MiB)**. A chunk is
 live from checkout until the consumer recycles it, so the true worst case is
@@ -259,6 +273,9 @@ UI goroutine                       MCP handler (streams summary + cites offsets)
 | 4 | Memory ceiling = 66 × 32 KiB (2 162 688 B) — independent of response size | `TestMemoryCeilingInvariant` across 1 MB/10 MB/100 MB |
 | 5 | Context cancellation unwinds in ≤50ms via `context.WithoutCancel` teardown | `TestCancellationNoLeak` (8 cancels, goroutine + fd accounting) |
 | 6 | The checksum/tee mirror never blocks consumption — it is a passive sink on the read path | `sha256` cannot fail or block; digest verified against a reference run |
+| 7 | A persistent stream reconnects and replays `Last-Event-ID` from the manager-owned token | `TestReconnectReplaysLastEventID` (connection dropped mid-stream) |
+| 8 | Stream events are repainted per frame, never per event | Frame-coalescing gate: 500 events dispatch in far fewer than 500 chunks |
+| 9 | Telemetry is never the reason a request fails | eBPF probes return a disposition (`available`/`blocked`/`not-built`) with a reason; httptrace timings stand alone |
 
 ### 5.3 Backpressure & frame budget
 

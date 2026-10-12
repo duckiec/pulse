@@ -127,6 +127,18 @@ AST and persists structured history to SQLite — with no UI and no network.
 **Goal:** A 60-FPS terminal UI that renders a 50MB+ streaming response without
 blocking the UI thread.
 
+### 3.0 Streaming Transports & Telemetry (Move 5 — landed ahead of the UI)
+- [x] P3.0.1 Unified `Stream` interface (`Read`/`Write`/`Close`/`SetDeadline`/`Kind`) with `StreamKind` HTTP|SSE|WS|GRPC; read-only transports return `ErrWriteUnsupported` rather than pretending to accept writes
+- [x] P3.0.2 `StreamManager` lifecycle: `Idle → Connecting → Streaming ⇄ Connecting (reconnect) → Closed`, with `Attempts()` and `LastEventID()` observable and `Close()` idempotent
+- [x] P3.0.3 SSE parser: resumable state machine over a bounded line buffer (1 MiB cap, fails closed with `ErrOversizeLine`); `Feed` returns `iter.Seq[Event]` from a pre-bound closure, comments counted as heartbeats, id/name interned so a steady flood allocates nothing
+- [x] P3.0.4 Reconnect + resume: `Last-Event-ID` retained on the **manager** (not the per-connection parser) and replayed on every attempt; full-jitter backoff 500 ms → 30 s; idle expiry maps to the documented retryable `ErrIdle`
+- [x] P3.0.5 Frame-aligned dispatch: events are coalesced and pushed to the Sink at most once per 16 ms frame through the 32 KiB pooled-chunk channel, so an event flood cannot lock the UI
+- [x] P3.0.6 Per-read deadline renewal on the live connection (captured via `httptrace.GotConn`), renewed on every read and on every heartbeat; a silent server surfaces as `ErrIdle` instead of wedging
+- [x] P3.0.7 `TelemetryReport`: typed httptrace phases (DNS/connect/TLS/wrote/first-byte/got-conn) with monotonic stamps, bounded 512-point ring, lock-guarded `Snapshot()` for concurrent readers
+- [x] P3.0.8 eBPF architecture behind strict build tags; absent privileges or a default build report `BLOCKED`/`not-built` **with a reason** and the request proceeds on httptrace timings alone — never a silent fallback
+- [x] P3.0.9 Reconnect gate (`TestReconnectReplaysLastEventID`): connection dropped mid-stream, client reconnects and the server observes `Last-Event-ID: evt-2`
+- [x] P3.0.10 Mutation evidence: `scripts/mutation-proof-stream.sh` breaks resume-token retention, idle retryability, frame coalescing, and telemetry recording — red → restore → green
+
 ### 3.1 UI Skeleton & Design System
 - [ ] P3.1.1 `internal/ui`: Elm skeleton (Model/Msg/Update/View) with central keymap struct (DESIGN_SYSTEM.md §5)
 - [ ] P3.1.2 Layout engine: header/tree/main/status/footer at all breakpoints (≥120, 100–119, 80–99, <80 refuse)

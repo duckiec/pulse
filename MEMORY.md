@@ -50,6 +50,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-12 | ADL-0015 | Canonical upstream established: `origin` = https://github.com/duckiec/pulse.git, branch `main`; local history rebased onto the upstream AGPL-3.0 initial commit (no force-push) | AGENTS.md §1, ARCHITECTURE.md header |
 | 2026-10-12 | ADL-0016 | Move 3 engine land: 32 KiB × 64-slot streaming geometry, 2.0625 MiB in-flight ceiling, Sink ownership contract, abort-only teardown budget | internal/engine/, ROADMAP.md §1.2.1/§1.2.3 |
 | 2026-10-12 | ADL-0017 | Move 4: modernc.org/sqlite as the sole driver, `PRAGMA secure_delete=ON` verified behaviourally, runtime `sqlite_master` schema audit, and the two-layer redaction chokepoint | internal/secrets/, internal/store/, internal/engine/stream.go |
+| 2026-10-12 | ADL-0018 | Move 5: StreamManager lifecycle states, resume-token ownership, frame-aligned dispatch, and the httptrace→eBPF fallback degradation policy | internal/engine/sse.go, sse_parser.go, telemetry*.go |
 
 ---
 
@@ -686,6 +687,78 @@ complete (AGENTS.md §4.7).
   backend_windows,backend_other}.go; internal/store/sqlite.go;
   internal/engine/{engine,stream}.go; scripts/mutation-proof-secrets.sh;
   TASKS.md P2.1.1–P2.4.4 and the Goal 1 status note; ROADMAP.md §1.4.1
+
+---
+
+## ADL-0018 — Stream lifecycle states, resume-token ownership, and telemetry degradation
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Move 5 opened Goal 2 with two capabilities that must not damage
+  the contracts Goal 1 already proved: a **persistent** transport that
+  reconnects forever, and microsecond telemetry. Both add failure modes that a
+  one-shot request/response never had — a stream that outlives its connection,
+  and instrumentation that must never be the reason a request fails.
+- **Decision — the connection lifecycle (ROADMAP.md §2.1.2/§2.1.6):**
+  - **States:** `Idle → Connecting → Streaming ⇄ Connecting (reconnect) →
+    Closed`. Exposed on the `StreamManager` interface, with `Attempts()` and
+    `LastEventID()` observable and `Close()` idempotent. The manager owns the
+    state machine; the UI observes it and never drives it ("backoff state lives
+    in the run handle, not in the model").
+  - **The resume token lives on the MANAGER, not on the parser.** The parser is
+    rebuilt for every connection attempt; the token must not be. Ownership is the
+    whole design: `m.setID(ev.ID)` writes the manager's token, and reconnect
+    reads it. Wiping it on disconnect is the mutation the reconnect gate exists
+    to catch, and it is caught (`Last-Event-ID on reconnect = "", want "evt-2"`).
+  - **Idle expiry maps to the documented `ErrIdle`.** An `os.ErrDeadlineExceeded`
+    from the read deadline is translated to `ErrIdle` before it leaves the pump.
+    Without that mapping a silent server surfaced as an opaque transport error
+    and was retried for the *wrong reason* — the retry worked by accident rather
+    than by contract. `ErrIdle` is retryable; oversize framing and a non-2xx
+    status are terminal (retrying a refused endpoint only hammers it).
+  - **Full-jitter backoff** 500 ms → 30 s, doubling per attempt.
+- **Decision — frame-aligned dispatch (ROADMAP.md §2.1.5):**
+  - Events are coalesced into the existing 32 KiB pooled-chunk channel and
+    dispatched at most once per 16 ms frame. The 2 MiB in-flight ceiling from
+    ADL-0016 is unchanged — SSE reuses the same pool and the same channel
+    discipline rather than introducing a second buffering regime.
+  - Frames are **re-serialized** from parsed events (`id:`/`event:`/`data:`), so
+    a coalesced frame is faithful in content while being canonical in spelling.
+- **Decision — telemetry degradation (ROADMAP.md §2.3):**
+  - `httptrace` phases are recorded on Go's monotonic clock into a pre-allocated
+    512-point ring; overflow drops the oldest point rather than growing, because
+    telemetry must never become the allocation that breaks a request.
+  - **The eBPF path is an architecture, not a dependency.** `cilium/ebpf` is NOT
+    added: the default build must not require clang/bpftool, a kernel
+    capability, or a privilege the user may not have (ARCHITECTURE.md §7 keeps
+    it out of the default build). The default build reports a disposition:
+    `available` / `blocked` / `not-built`, **always with a reason**. On Linux the
+    reason is derived from `/proc/sys/kernel/unprivileged_bpf_disabled` and
+    `CapEff` (CAP_BPF bit 39, CAP_SYS_ADMIN bit 21); elsewhere it is "eBPF is a
+    Linux facility".
+  - **Degradation is explicit and the request never fails because of it.**
+    `ProbeEBPF()` is a cached, side-effect-free probe; `Load()` returns a
+    disposition rather than a fatal error. A BLOCKED run falls back to the
+    httptrace timings *and says so* — never a silent fallback masquerading as
+    precision (AGENTS.md §4.5).
+  - **Reports are read through `Snapshot()`.** Trace hooks fire on
+    runtime-internal goroutines, so a consumer reading `Total` while the
+    transport finalizes the report is a data race (found by `-race`, fixed by
+    making the report copy-out, not by avoiding concurrent reads).
+- **Consequences:** reconnect gate green — the client reconnects after a
+  mid-stream drop and the server observes `Last-Event-ID: evt-2`; the resume
+  token also survives a parser rebuild; frame coalescing proven by dispatching
+  far fewer chunks than events (mutation shows 1849 chunks for 500 events when
+  the gate is bypassed). Defects the gates caught: the parser sliced
+  `p.buf[:i]` instead of `p.buf[start:i]`, so every line was parsed from the
+  start of the buffer and each field value swallowed the lines before it (which
+  produced a malformed `Last-Event-ID` and an unparseable header); the parser
+  dispatched on every line instead of on a blank line; and `ErrIdle` was
+  documented but never produced.
+- **Refs:** internal/engine/sse.go; internal/engine/sse_parser.go;
+  internal/engine/telemetry.go; internal/engine/telemetry_ebpf{,_linux,_other}.go;
+  internal/engine/stream_test.go; internal/engine/telemetry_test.go;
+  scripts/mutation-proof-stream.sh; TASKS.md P3.0.1–P3.0.10; ROADMAP.md §2.1/§2.3
 
 ---
 
