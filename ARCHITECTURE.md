@@ -6,9 +6,11 @@
 | Product | Pulse |
 | Version | 1.0.0-draft |
 | Status | Authoritative |
+| Canonical upstream | `https://github.com/duckiec/pulse.git` (branch `main`) — the database of record for Pulse's history |
+| License | AGPL-3.0 (root `LICENSE`, from the upstream initial commit) |
 | Governed by | `AGENTS.md` |
 | Extended by | `ROADMAP.md` (Goals 2–4 introduce SSE/WebSocket/gRPC transports, eBPF telemetry, local RAG, fuzzing, wazero sandboxing, CRDT sync, and vault PKI; contracts herein reflect those goals) |
-| Last updated | 2026-10-11 |
+| Last updated | 2026-10-12 |
 
 ---
 

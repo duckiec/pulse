@@ -31,6 +31,15 @@ It replaces cloud-locked API clients with two first-class interfaces over one en
   Windows from the same source tree.
 - **Git-native.** Collections are plain-text `.http` files under standard version
   control. Git is the database of record for request definitions.
+
+- **Canonical upstream: `https://github.com/duckiec/pulse.git` on branch `main`.**
+  This remote is the canonical database of record for Pulse's history. The seven
+  Essential Vibe Coding Files at the repository root are governed by this
+  repository's history, not by any local copy, working tree, or mirror. Agents
+  MUST treat `origin/main` as the authority when the two disagree, and MUST NOT
+  force-push it (`git push --force` / `--force-with-lease`) — rewriting shared
+  history destroys the provenance the ADL ledger depends on. Recorded in
+  MEMORY.md ADL-0015.
 - **Dual-mode, strict separation.** The TUI and the MCP server share domain logic but
   never share transport channels. Mode is selected at startup and is immutable for the
   process lifetime.

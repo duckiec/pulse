@@ -47,6 +47,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-11 | ADL-0013 | Ponytail always-on at project level; agent skills moved global→project; AGENTS.md §4.8 amendment | AGENTS.md, .opencode/ (ignored) |
 | 2026-10-12 | ADL-0014 | Option A: ponytail plugin vendor fix — full checkout at `.opencode/ponytail/`, absolute plugins path, package.json shim | AGENTS.md, .gitignore |
 | 2026-10-12 | ADL-0012 | Move 2 parser land: bump-arena memory strategy (8-byte alignment, retained blocks, GC-visible root) and the fail-closed `(nil, err)` parse contract | internal/ast/arena.go, internal/ast/parser.go, testdata/, scripts/ |
+| 2026-10-12 | ADL-0015 | Canonical upstream established: `origin` = https://github.com/duckiec/pulse.git, branch `main`; local history rebased onto the upstream AGPL-3.0 initial commit (no force-push) | AGENTS.md §1, ARCHITECTURE.md header |
 
 ---
 
@@ -472,6 +473,50 @@ complete (AGENTS.md §4.7).
   internal/ast/{arena,parser,parser_bench,memory_rss_linux}_test.go;
   testdata/http/golden/ast/; scripts/mutation-proof.sh;
   scripts/ci/test-gates.sh; TASKS.md P1.3.2–P1.3.16; AGENTS.md §4.2
+
+---
+
+## ADL-0015 — Canonical upstream: `https://github.com/duckiec/pulse.git`
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Through Move 2, Pulse's history lived in a local WSL working tree
+  only. AGENTS.md declared Git "the database of record" while no remote existed
+  to back that claim, so the ADL ledger, the essential documentation surface, and
+  the executable gates were single-machine and unrecoverable.
+- **Decision:**
+  1. **`origin` is `https://github.com/duckiec/pulse.git`, branch `main`.** It is
+     the canonical database of record for Pulse's history; `origin/main` is the
+     authority whenever it disagrees with a local working tree.
+  2. **Force-push is prohibited** on this remote. The ADL ledger is an
+     append-only provenance record; rewriting shared history silently destroys
+     the evidence the Mutation Rule (§4.2) and this ledger depend on.
+  3. **Non-destructive first integration.** The upstream already held one commit
+     (`dfc9da3` "Initial commit", 661 lines) carrying a **GNU AGPL-3.0
+     `LICENSE`**, authored by the repository owner, with **no common ancestor**
+     with local history. A plain `git push` was correctly rejected as
+     non-fast-forward. Force-pushing would have satisfied the directive in
+     letter while destroying the owner's deliberate licensing decision, so the
+     five local commits were **rebased onto `origin/main`** instead
+     (`dfc9da3..3ee94a3`), preserving both the LICENSE and the full local
+     history in a linear order. No `--force` was used.
+  4. Recorded in **AGENTS.md §1** (product invariants) and the
+     **ARCHITECTURE.md** header table (canonical upstream + license rows), so
+     both the governance document and the technical document name the same
+     authority.
+- **Consequences:** Move 0–2 are on the canonical upstream and are
+  `origin/main`-tracked. Post-rebase verification: `scripts/all-gates.sh` re-run
+  green on the rebased tree before pushing (build-matrix 4/4, tidy no-op,
+  importaudit, doc-sync, both benchmark gates) — rebase changed commit hashes
+  only, never content. The local branch `backup-pre-rebase` was kept during the
+  operation and deleted once `main` was verified identical in content.
+- **Note (flagged, not decided):** the upstream license is **AGPL-3.0**, a
+  strong network copyleft. That is a deliberate owner choice and is recorded
+  here unchanged; it is recorded because AGPL's network-use clause has
+  distribution consequences worth revisiting deliberately at release time — this
+  entry does not change it.
+- **Refs:** `git remote -v` (origin); AGENTS.md §1; ARCHITECTURE.md header;
+  TASKS.md §0 bootstrap state
 
 ---
 
