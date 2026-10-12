@@ -852,6 +852,46 @@ handshakes without CGO, degrading honestly when the OS refuses.
 - eBPF path either PASSED on capable hosts or BLOCKED with stated reason — never faked.
 - `ARCHITECTURE.md` transport section and dependency registry updated; ADL appended.
 
+### 2.4.2 Goal 2 status — 2026-10-12
+
+**Goal 2 is complete, with two items explicitly NOT met.** Stating them is the
+point; counting them as passed would be the failure mode §2.4.1 exists to catch.
+
+| Gate | Status | Evidence |
+|---|---|---|
+| §2.1 SSE: unified `Stream` contract | **MET** | `TestStreamIsReadOnly`, `TestStateMachineTransitions` (Move 5, ADL-0018) |
+| §2.1.2–2.1.3 SSE lifecycle + parser | **MET** | `TestReconnectReplaysLastEventID`, `TestIdleTimeoutIsRetryable`, `TestSSEParserSplitAcrossChunks` |
+| §2.1.5 frame-aligned repaints | **MET** | `TestFrameAlignedDispatch` (mutation: 1849 chunks for 500 events) |
+| §2.1.6 reconnect + `Last-Event-ID` | **MET** | `TestReconnectReplaysLastEventID` — server observes `Last-Event-ID: evt-2` |
+| §2.1.4 WebSocket client | **DEFERRED** | Not started. `Stream` carries the `KindWS` slot and the read-only write refusal, but no RFC 6455 client exists. |
+| §2.2.1 gRPC transport | **MET** | `TestReflectionGateResolvesAndRendersJSON`, `TestServerStreamingDeliversEveryMessageThroughTheSink`, `TestClientStreamingIsRejectedBeforeDialing` |
+| §2.2.2 dynamic reflection | **MET** | `TestReflectionDescriptorMatchesTheWireProtocol`, `TestReflectionUnavailableFallsBackToLocalDescriptors`, `TestReflectionUnavailableWithNoFallbackFailsClosed` |
+| §2.2.3 JSON ↔ protobuf mapping | **MET** | `TestTypeMismatchFailsCleanly` (+ nested and repeated paths), `TestValidQuotedNumberForInt64IsAccepted`, `TestUnknownFieldIsRejectedByDefault` |
+| §2.3 telemetry + eBPF degradation | **MET** | `TestEBPFDegradesToBlocked` (disposition always carries a reason), `TestTelemetryDegradesWithoutBreakingTheRequest` |
+| G-frame (p99 `View` < 16 ms) | **NOT MET** | Carried forward from Goal 1. It is a property of the Bubble Tea render loop, which does not exist until Phase 3.1. Measuring it today would mean measuring nothing. |
+| G-mut on every fix | **MET** | `scripts/mutation-proof.sh` (M1–M2), `mutation-proof-secrets.sh` (M6a–M9), `mutation-proof-stream.sh` (M10–M13), `mutation-proof-grpc.sh` (M14–M18) |
+
+**Contract changes made during implementation** (all recorded in MEMORY.md):
+
+- §2.2.1's `OpenGRPC(ctx, target) (*grpcConn, error)` was superseded by the
+  `ProtocolEngine` interface plus `GRPCEngine.Run(ctx, *ast.Request, Sink)`
+  (ADL-0019). The original signature implied a separate pipeline returning its
+  own connection type, which would have defeated the unification §2.1.1 asked
+  for. gRPC output goes through the **same** `Sink` as REST.
+- §2.2.1's "client-streaming / bidi → requires engine Write path" is resolved by
+  **refusal**: they return `ErrUnsupportedMethod` before dialing. §2.2.4's
+  rationale ("no silent degradation") takes precedence over a partial
+  implementation.
+- §2.2.1's "frame-decode unit tests including compressed-flag rejection" are
+  **superseded**: `google.golang.org/grpc` owns framing, so Pulse never decodes
+  a length prefix itself. Compression negotiation is grpc-go's contract, not a
+  Pulse gate; Pulse's own binary→JSON encoder is gated instead
+  (`TestJSONStreamDoesNotMaterializeTheMessage`).
+- §2.2.2's `{file_containing_symbol: "pkg.Service/Method"}` is carried literally
+  in the descriptor but the **symbol sent is the service full name**
+  (`pkg.Service`), matching the reflection protocol: asking for a symbol that is
+  not a descriptor name returns an error rather than a file.
+
 ---
 
 # Goal 3 — AI Orchestration & Sandboxed Extensibility

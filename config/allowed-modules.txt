@@ -44,3 +44,29 @@ github.com/google/uuid
 github.com/mattn/go-isatty
 github.com/ncruces/go-strftime
 github.com/remyoudompheng/bigfft
+
+# --- Move 6: gRPC + dynamic protobuf reflection (MEMORY.md ADL-0019) ---------
+#
+# google.golang.org/protobuf — the protobuf RUNTIME: protoreflect, dynamicpb,
+# protodesc, protoregistry, protojson. Required because Move 6's mandate is that
+# Pulse be COMPLETELY DYNAMIC: no service schema is compiled into the binary, so
+# messages are built at runtime from descriptors fetched over the wire. This is
+# the stdlib's own protobuf support and is pure Go.
+google.golang.org/protobuf
+google.golang.org/protobuf/
+
+# google.golang.org/grpc — the gRPC transport (HTTP/2 framing, metadata,
+# status codes). Pure Go; the cgo resolver is not used, and CGO_ENABLED=0
+# builds the pure-Go resolver path.
+google.golang.org/grpc
+google.golang.org/grpc/
+
+# Transitive dependencies of the two modules above. golang.org/x/net carries
+# HTTP/2; genproto/googleapis/rpc carries the status protos.
+github.com/golang/protobuf
+golang.org/x/net
+golang.org/x/net/
+golang.org/x/text
+golang.org/x/text/
+google.golang.org/genproto/googleapis/rpc
+google.golang.org/genproto/googleapis/rpc/

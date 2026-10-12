@@ -84,6 +84,10 @@ type Sink interface {
 }
 
 // RunResult is the terminal, redacted summary of a completed run.
+//
+// For a gRPC run Proto is "grpc" and the gRPC-specific fields below are set;
+// the numeric Status is the mapped equivalent documented on grpcHTTPStatus, not
+// a status line the server sent.
 type RunResult struct {
 	Method     string
 	URL        string // userinfo redacted
@@ -95,6 +99,13 @@ type RunResult struct {
 	Digest     [sha256.Size]byte // SHA-256 of the full response body
 	Elapsed    time.Duration
 	Started    time.Time
+
+	// Symbol is the gRPC method address for a gRPC run ("/pkg.Svc/Method").
+	Symbol string
+	// Service is the dial authority for a gRPC run.
+	Service string
+	// Messages counts decoded protobuf messages for a server-streaming call.
+	Messages int
 }
 
 // RunHandle tracks an in-flight run. It is returned by value and is safe to
@@ -211,6 +222,21 @@ func New(doc *ast.Document, opts ...Option) *Engine {
 
 // Document returns the document this engine executes.
 func (e *Engine) Document() *ast.Document { return e.doc }
+
+// Protocol implements ProtocolEngine. The REST executor answers ProtoREST; the
+// ProtocolRouter is what dispatches, so this reports the executor's identity
+// rather than performing any negotiation.
+func (e *Engine) Protocol() ProtocolKind { return ProtoREST }
+
+// Close releases engine-owned resources. The REST executor owns only an
+// http.Client, whose idle pool is otherwise process-wide, so Close exists to
+// satisfy the ProtocolEngine contract and to give callers one uniform teardown
+// call. It is idempotent and cannot fail: failing to close an idle connection
+// has no bearing on correctness.
+func (e *Engine) Close() error {
+	e.client.CloseIdleConnections()
+	return nil
+}
 
 // Redactor returns the installed redaction chokepoint (nil when none).
 func (e *Engine) Redactor() Redactor { return e.redactor }
@@ -420,14 +446,33 @@ func (e *Engine) expandString(src string, line int32) (string, error) {
 	return string(out), nil
 }
 
-// expandBytes is the byte-oriented twin of expandString, for the request body.
+// interpolate resolves `{{name}}` spans against a resolver, failing closed when
+// none is bound (AGENTS.md §4.3: no placeholder, no empty string, no silent
+// literal).
+//
+// It is package-level rather than a method because both executors need it and
+// the resolution semantics must not be allowed to drift between wires: a REST
+// request that fails closed on an unresolved variable and a gRPC one that
+// quietly sent "{{token}}" would be two very different products.
+func interpolate(src string, r Resolver, line int32) (string, error) {
+	if !strings.Contains(src, "{{") {
+		return src, nil
+	}
+	out, err := interpolateBytes([]byte(src), r, line)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// interpolateBytes is the byte-oriented twin of interpolate, for request bodies.
 // With no interpolation it returns src itself, so a body made of arena bytes
 // reaches the transport without a copy.
-func (e *Engine) expandBytes(src []byte, line int32) ([]byte, error) {
+func interpolateBytes(src []byte, r Resolver, line int32) ([]byte, error) {
 	if !bytes.Contains(src, []byte("{{")) {
 		return src, nil
 	}
-	if e.resolver == nil {
+	if r == nil {
 		return nil, fmt.Errorf("%w: {{%s}} at line %d", ErrUnresolved, variableName(src), line)
 	}
 	var out bytes.Buffer
@@ -448,7 +493,7 @@ func (e *Engine) expandBytes(src []byte, line int32) ([]byte, error) {
 			return nil, fmt.Errorf("engine: line %d: unterminated interpolation anchor", line)
 		}
 		name := string(rest[:end])
-		val, err := e.resolver.Lookup(name)
+		val, err := r.Lookup(name)
 		if err != nil {
 			// The resolver's error may quote the secret; wrap without adding it.
 			return nil, fmt.Errorf("engine: line %d: resolve %q: %w", line, name, redactError(err))
@@ -456,6 +501,11 @@ func (e *Engine) expandBytes(src []byte, line int32) ([]byte, error) {
 		out.WriteString(val)
 		rest = rest[end+2:]
 	}
+}
+
+// expandBytes is the Engine's byte-oriented twin of expandString.
+func (e *Engine) expandBytes(src []byte, line int32) ([]byte, error) {
+	return interpolateBytes(src, e.resolver, line)
 }
 
 // variableName extracts the name from a `{{name}}...` span, for diagnostics.

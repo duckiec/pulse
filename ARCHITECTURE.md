@@ -91,7 +91,7 @@ runtime; they are the only two consumers of `internal/app`.
 | `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
 | `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport | `app` | `ui`, `engine` directly |
 | `internal/app` | Shared services: run request, list collections, history queries, variable resolution | `ast`, `engine`, `store`, `secrets` | `ui`, `mcp` |
-| `internal/engine` | `http.Client` execution, streaming, checksums, timing | `ast` (types) | `ui`, `mcp`, `store` |
+| `internal/engine` | `ProtocolEngine` executors (REST, SSE, gRPC), streaming, checksums, telemetry | `ast` (types) | `ui`, `mcp`, `store` |
 | `internal/ast` | Lexer, parser, zero-allocation AST, `iter.Seq` traversal | stdlib only | everything internal |
 | `internal/store` | SQLite schema, migrations, history persistence | stdlib + `modernc.org/sqlite` | everything internal |
 | `internal/secrets` | Keychain backends, ephemeral env, resolver chain, redaction | stdlib + sanctioned backends (§7) | everything internal |
@@ -216,6 +216,40 @@ terminal. Events are coalesced and dispatched at most once per 16 ms frame
 through the same 32 KiB pooled channel, so the 2 MiB ceiling is unchanged and an
 event flood cannot lock the UI. See MEMORY.md ADL-0018.
 
+**Binary protocols (Move 6).** `ProtocolEngine` is the execution contract every
+executor satisfies: `Protocol()`, `Run(ctx, *ast.Request, Sink) RunHandle`,
+`Close()`. Both the REST and gRPC executors take the **same AST node** and
+deliver to the **same Sink**, so a `.http` line targeting a REST endpoint and one
+targeting a gRPC method are driven by identical UI and MCP code. Compile-time
+assertions pin both executors to the interface; `ProtocolRouter` selects by
+**target scheme** (`grpc://`, `grpcs://`), never by anything a user chose, which
+is what makes the dual-mode layers genuinely protocol-agnostic. A REST-only
+build is valid and reports `ErrUnsupportedMethod` rather than handing a `grpc://`
+string to an HTTP parser.
+
+**Schemas are resolved at runtime and nothing about them is compiled in.** The
+gRPC executor fetches a method descriptor over
+`grpc.reflection.v1.ServerReflection` and builds every message with `dynamicpb`
+from the returned descriptor. Pulse's own reflection client has **no generated
+protobuf type either**: its descriptor is constructed field by field in
+`reflection_wire.go`, which is the only way to call the reflection service without
+importing grpc's generated client. `DescriptorCache` is keyed by
+(target, symbol) with strict LRU — the target is part of the key because the
+same symbol means different things on different servers, and a cross-server cache
+hit would be a silent correctness bug. A server that refuses reflection falls
+back to locally supplied descriptors; with neither source, resolution fails
+closed as `ErrNoDescriptors`. No schema is ever fetched from anywhere but the
+server the user addressed.
+
+**The binary→JSON direction streams.** Marshalling a whole message and chopping
+it into chunks would measure nothing: the 2 MiB ceiling would bind on the channel
+while the real allocation happened a moment earlier and unmeasured. The encoder
+writes through a fixed 32 KiB scratch buffer, so working memory is independent of
+message size. Byte-equality with `protojson` is explicitly not a contract —
+protojson's whitespace is unstable by design — so comparisons are on decoded
+values; well-known types (`Timestamp`, `Duration`, `Struct`, wrappers) delegate
+to protojson so their bespoke encodings stay exact. See MEMORY.md ADL-0019.
+
 **Exact geometry (MEMORY.md ADL-0016).** `chunkSize = 32 KiB`,
 `chunkChannelCap = 64`, so the queue holds **2 097 152 B (2 MiB)**. A chunk is
 live from checkout until the consumer recycles it, so the true worst case is
@@ -276,6 +310,10 @@ UI goroutine                       MCP handler (streams summary + cites offsets)
 | 7 | A persistent stream reconnects and replays `Last-Event-ID` from the manager-owned token | `TestReconnectReplaysLastEventID` (connection dropped mid-stream) |
 | 8 | Stream events are repainted per frame, never per event | Frame-coalescing gate: 500 events dispatch in far fewer than 500 chunks |
 | 9 | Telemetry is never the reason a request fails | eBPF probes return a disposition (`available`/`blocked`/`not-built`) with a reason; httptrace timings stand alone |
+| 10 | No protobuf schema is compiled into the binary | The reflection client's descriptor is hand-built and pinned field-by-field; the gate server's schema is built at runtime |
+| 11 | UI and MCP layers cannot learn the wire | `ProtocolEngine` is the only executor surface they hold; `ProtocolRouter` dispatches on target scheme |
+| 12 | The response direction never buffers a whole message | Encoder working-set high-water mark stays at one 32 KiB chunk for a 200 KB document (`TestJSONStreamDoesNotMaterializeTheMessage`) |
+| 13 | A type mismatch in a `.http` body fails with a field path, never a coercion | `*FieldTypeError` carries `filter.pageSize` / `tags[2].pageSize` and the expected kind |
 
 ### 5.3 Backpressure & frame budget
 
@@ -373,6 +411,8 @@ Every non-stdlib dependency requires an explicit entry here and a MEMORY.md ADL.
 | `github.com/google/go-cmp` (test-only) | Structural diffs for golden snapshots | No stdlib diff | G1 |
 | `github.com/BurntSushi/toml` | `pulse.toml` config parsing | No stdlib TOML | G1 |
 | `github.com/coder/websocket` | WebSocket client (RFC 6455) | No stdlib WebSocket | G2 §2.1 |
+| `google.golang.org/protobuf` | Protobuf runtime: `protoreflect`, `dynamicpb`, `protodesc`, `protojson` | Move 6 mandates fully dynamic schemas, so messages must be constructible from descriptors fetched at runtime; this is Google's own runtime, pure Go | G2 §2.2 |
+| `google.golang.org/grpc` | gRPC transport: HTTP/2 framing, metadata, status codes | No stdlib gRPC; the cgo resolver is unused and `CGO_ENABLED=0` builds the pure-Go path | G2 §2.2 |
 | `google.golang.org/grpc` + `google.golang.org/protobuf` | gRPC transport + dynamic messages | No stdlib gRPC/protobuf | G2 §2.2 |
 | `github.com/cilium/ebpf` | eBPF program loading — **build-tagged `ebpf`, not in default builds** | No stdlib eBPF | G2 §2.3 |
 | `github.com/tetratelabs/wazero` | WebAssembly runtime (interpreter mode) | No stdlib Wasm | G3 §3.4 |

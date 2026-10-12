@@ -51,6 +51,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-12 | ADL-0016 | Move 3 engine land: 32 KiB × 64-slot streaming geometry, 2.0625 MiB in-flight ceiling, Sink ownership contract, abort-only teardown budget | internal/engine/, ROADMAP.md §1.2.1/§1.2.3 |
 | 2026-10-12 | ADL-0017 | Move 4: modernc.org/sqlite as the sole driver, `PRAGMA secure_delete=ON` verified behaviourally, runtime `sqlite_master` schema audit, and the two-layer redaction chokepoint | internal/secrets/, internal/store/, internal/engine/stream.go |
 | 2026-10-12 | ADL-0018 | Move 5: StreamManager lifecycle states, resume-token ownership, frame-aligned dispatch, and the httptrace→eBPF fallback degradation policy | internal/engine/sse.go, sse_parser.go, telemetry*.go |
+| 2026-10-12 | ADL-0019 | Move 6: the ProtocolEngine abstraction, fully dynamic protobuf reflection (no generated types in the binary), and the streaming binary→JSON encoder | internal/engine/protocol.go, grpc.go, grpc_engine.go, reflect.go, reflection_wire.go, jsonstream.go |
 
 ---
 
@@ -759,6 +760,95 @@ complete (AGENTS.md §4.7).
   internal/engine/telemetry.go; internal/engine/telemetry_ebpf{,_linux,_other}.go;
   internal/engine/stream_test.go; internal/engine/telemetry_test.go;
   scripts/mutation-proof-stream.sh; TASKS.md P3.0.1–P3.0.10; ROADMAP.md §2.1/§2.3
+
+---
+
+## ADL-0019 — ProtocolEngine abstraction, fully dynamic reflection, and a streaming binary→JSON encoder
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Goal 2 required two things that pull against each other.
+  ROADMAP.md §2.2 asked for gRPC support while §2.1 had just unified every wire
+  behind one `Stream` interface — a tempting place to grow a second, gRPC-shaped
+  pipeline. And the move directive required that Pulse be **completely
+  dynamic**: no statically compiled `.pb.go` stubs. A reflection client is
+  itself a gRPC method, so the obvious implementation would import grpc's
+  generated reflection client — quietly reintroducing exactly what was banned.
+- **Decision — the abstraction (`protocol.go`, `grpc.go`):**
+  - **`ProtocolEngine` is `Protocol`/`Run`/`Close`, and nothing more.** Both
+    executors take the same `*ast.Request` and deliver to the same `Sink`.
+    "Protocol-agnostic" is enforced mechanically: compile-time assertions pin
+    both executors to the interface, and `ProtocolRouter` dispatches on the
+    TARGET SCHEME (`grpc://`, `grpcs://`) rather than on anything a user
+    selected. A REST-only build is a legitimate configuration — the router then
+    reports `ErrUnsupportedMethod` for a gRPC target instead of handing a
+    `grpc://` string to an HTTP parser.
+  - **`GRPCConfig.JSON` is a `*JSONOptions`, not a value.** `JSONOptions{}` with
+    `StrictUnknown=false` is a real configuration; collapsing it into the zero
+    value silently converted a user's request for leniency into strictness. A
+    test now pins both directions.
+- **Decision — dynamic reflection (`reflection_wire.go`, `reflect.go`):**
+  - **The reflection client's descriptor is constructed by hand, field for
+    field.** This is the only way to call the reflection service without a
+    generated stub, and it is also the sharpest edge in the codebase: a
+    hand-built descriptor has no compiler to catch a mistake.
+  - **v1 and v1alpha use DIFFERENT field numbers.** The descriptor was first
+    written with v1alpha's numbering (`file_containing_symbol = 2`) under the v1
+    package name. The server decoded field 2 as `host`, found no oneof case set,
+    and answered `invalid MessageRequest: <nil>` — an error naming neither the
+    field nor the cause, traceable to nothing. Fixed to the v1 numbering
+    (`host = 1`, oneof fields 3–7) and pinned field-by-field by
+    `TestReflectionDescriptorMatchesTheWireProtocol`.
+  - **Descriptors are requested by SERVICE and the transitive closure is
+    assembled locally**, because protojson cannot resolve a message whose file
+    imports others and a single-file answer fails later as an unrelated
+    "unknown type" error. A missing import is reported **by name**, up front.
+  - **`DescriptorCache` is keyed by (target, symbol) and strictly LRU.** The
+    key includes the target because the same symbol means different things on
+    different servers, and a cross-server cache hit would be a silent
+    correctness bug rather than a visible one.
+  - **Reflection is attempted first, local descriptors second, and failure is
+    explicit.** Pulse never fetches a schema from anywhere but the server the
+    user asked about.
+- **Decision — JSON ↔ protobuf mapping (`reflect.go`):**
+  - **Strict by default, with a structured error.** `*FieldTypeError` carries the
+    dotted field path (`filter.pageSize`, `tags[2].pageSize`), the expected
+    kind, and the JSON type that arrived. protojson rejects the same payloads;
+    what it cannot supply is a machine-readable path for a UI to point at.
+  - **protojson's 64-bit-as-string rule is honoured exactly.** A quoted number is
+    legal for int64/uint64/sint64/fixed64/sfixed64 and rejected for 32-bit
+    kinds, with an error that says WHY — otherwise `"limit": "3"` looks like an
+    arbitrary rule rather than a consequence of protobuf's number model.
+- **Decision — the binary→JSON direction streams (`jsonstream.go`):**
+  - **Marshalling the whole message and then chopping it into chunks was
+    rejected.** That measures nothing: the 2 MiB ceiling would bind on the
+    channel while the real allocation happened a moment earlier and unmeasured,
+    so a 100 MB message would drive the heap by 100 MB no matter how carefully
+    the transport is bounded. The encoder writes through a fixed 32 KiB scratch
+    buffer, and `TestJSONStreamDoesNotMaterializeTheMessage` asserts the
+    high-water mark directly.
+  - **Byte-equality with protojson is explicitly NOT a contract.** protojson
+    emits unstable whitespace by design; the streaming encoder emits compact
+    JSON with identical values, field names, and ordering. Tests compare decoded
+    values, never bytes.
+  - **Well-known types delegate to protojson.** Timestamp, Duration, Struct and
+    the wrapper types have bespoke JSON forms; reimplementing them would buy
+    nothing and risk being approximately rather than exactly right.
+  - **String quoting is hand-written because `strconv.AppendQuote` emits Go
+    escapes (`\x00`) that are not valid JSON.** Invalid UTF-8 becomes U+FFFD so
+    the document stays decodable.
+- **Consequences:** 25 gRPC/reflection gates green, `-race` clean, five mutation
+  boundaries red→green. The reflection gate runs against a `grpc.NewServer`
+  whose schema is built at runtime — if a generated stub were load-bearing, that
+  server would not be callable at all. Client-streaming and bidi are refused
+  before dialing (`ErrUnsupportedMethod`): half-supporting them is the failure
+  mode ROADMAP.md §2.2.1 named.
+- **Refs:** internal/engine/protocol.go; internal/engine/grpc.go (router);
+  internal/engine/grpc_engine.go; internal/engine/reflect.go;
+  internal/engine/reflection_wire.go; internal/engine/jsonstream.go;
+  internal/engine/dynamic.go; internal/engine/grpc_test.go;
+  internal/engine/jsonstream_test.go; scripts/mutation-proof-grpc.sh;
+  TASKS.md P3.0b.1–P3.0b.12; ROADMAP.md §2.2
 
 ---
 

@@ -139,6 +139,23 @@ blocking the UI thread.
 - [x] P3.0.9 Reconnect gate (`TestReconnectReplaysLastEventID`): connection dropped mid-stream, client reconnects and the server observes `Last-Event-ID: evt-2`
 - [x] P3.0.10 Mutation evidence: `scripts/mutation-proof-stream.sh` breaks resume-token retention, idle retryability, frame coalescing, and telemetry recording — red → restore → green
 
+### 3.0b Binary Protocols: gRPC & Dynamic Protobuf Reflection (Move 6 — Goal 2 close)
+
+- [x] P3.0b.1 `ProtocolEngine` interface (`Protocol`/`Run`/`Close`) satisfied by both executors, with compile-time assertions; `ProtocolRouter` dispatches by TARGET SCHEME (`grpc://`, `grpcs://`), so no UI or MCP layer can learn the wire
+- [x] P3.0b.2 gRPC executor accepting the SAME `*ast.Request` and delivering to the SAME `Sink` as REST — one run pipeline, two wires
+- [x] P3.0b.3 Dynamic schema resolution over `grpc.reflection.v1.ServerReflection` with NO generated protobuf types anywhere in the binary: the reflection client's own descriptor is hand-constructed, field-for-field, against the v1 schema
+- [x] P3.0b.4 `DescriptorCache` keyed by (target, symbol) with strict LRU eviction and cross-target namespacing; missing imports are reported by name instead of surfacing as an unrelated "unknown type" error later
+- [x] P3.0b.5 Offline fallback: descriptors supplied locally resolve a method whose server refuses reflection, with no network fetch (Pulse is offline-first)
+- [x] P3.0b.6 JSON→binary mapping with a structured `*FieldTypeError` carrying the field path (`filter.pageSize`, `tags[2].pageSize`) and the expected kind; strict unknown-field rejection by default
+- [x] P3.0b.7 protojson's 64-bit-as-string rule honoured exactly: a quoted number is legal for int64/uint64/fixed64/sint64 and rejected for 32-bit kinds, with an error that explains why
+- [x] P3.0b.8 STREAMING binary→JSON encoder: working set stays at one 32 KiB chunk regardless of message size, so the 2 MiB in-flight ceiling from ADL-0016 actually binds; well-known types delegate to protojson so their encodings stay exact
+- [x] P3.0b.9 Method-shape guard: client-streaming and bidi return `ErrUnsupportedMethod` BEFORE dialing — no silent degradation; non-2xx/unimplemented surfaces as `*RPCStatusError` carrying both the gRPC code and the mapped numeric status
+- [x] P3.0b.10 Reflection gate (`TestReflectionGateResolvesAndRendersJSON`) against a local `grpc.NewServer` with `reflection.Register` whose schema is built entirely at runtime — JSON in, correctly-rendered JSON out
+- [x] P3.0b.11 Reflection-descriptor gate (`TestReflectionDescriptorMatchesTheWireProtocol`) pinning every field number, written after v1alpha's numbering shipped by mistake under the v1 package name
+- [x] P3.0b.12 Mutation evidence: `scripts/mutation-proof-grpc.sh` breaks type coercion, the reflection oneof, encoder streaming, cache eviction, and the method-shape guard — red → restore → green
+
+**GOAL 2 STATUS: COMPLETE.** ROADMAP.md §2.1 (SSE + stream lifecycle; WebSocket §2.1.4 remains deferred), §2.2 (gRPC with dynamic reflection) and §2.3 (telemetry with explicit eBPF degradation) are implemented and gated. Every gate has red→green evidence. **G-frame is still NOT MET** — carried forward from Goal 1 to Phase 3.1, because the frame budget is a property of the Bubble Tea render loop, which does not exist yet; it is stated as unmet rather than quietly counted as passed.
+
 ### 3.1 UI Skeleton & Design System
 - [ ] P3.1.1 `internal/ui`: Elm skeleton (Model/Msg/Update/View) with central keymap struct (DESIGN_SYSTEM.md §5)
 - [ ] P3.1.2 Layout engine: header/tree/main/status/footer at all breakpoints (≥120, 100–119, 80–99, <80 refuse)
