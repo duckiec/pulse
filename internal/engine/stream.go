@@ -210,6 +210,12 @@ func (e *Engine) sendFinal(ctx context.Context, chunks chan *Chunk) error {
 
 // dispatch delivers queued chunks to the sink, serially, until the queue is
 // closed. It always closes dispatched exactly once.
+//
+// This is the inbound redaction chokepoint: a response body chunk is scrubbed
+// HERE, before the sink can render it or any code can persist it. A server that
+// echoes a token back into an error body is scrubbed at the point of delivery,
+// in the buffer the engine already owns — so scrubbing costs no extra copy and
+// does not disturb the 2 MiB ceiling.
 func (e *Engine) dispatch(ctx context.Context, chunks chan *Chunk, sink Sink, dispatched chan<- struct{}) {
 	defer close(dispatched)
 	for c := range chunks {
@@ -219,6 +225,17 @@ func (e *Engine) dispatch(ctx context.Context, chunks chan *Chunk, sink Sink, di
 			drainChunks.Add(1)
 			c.Recycle()
 			continue
+		}
+		if scrub, ok := e.redactor.(interface {
+			ScrubBytes([]byte) (int, int)
+		}); ok && c.Buf != nil {
+			// In place: the engine owns this buffer until the sink returns it,
+			// and a copy would defeat the memory ceiling. Scrubbing shrinks the
+			// payload, so the chunk length is updated to match — otherwise the
+			// sink would read stale bytes past the redacted text.
+			if n, _ := scrub.ScrubBytes((*c.Buf)[:c.N]); n != c.N {
+				c.N = n
+			}
 		}
 		sink.Chunk(c)
 	}

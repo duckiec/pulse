@@ -5,6 +5,8 @@
 
 golang.org/x/term
 golang.org/x/sys
+golang.org/x/sys/
+golang.org/x/sys/windows
 
 # go-cmp is a TEST-ONLY dependency (cmp.Diff). It has no standard-library
 # equivalent for structural diffs, and it never appears in the shipped binary:
@@ -14,3 +16,31 @@ golang.org/x/sys
 # the trailing-'/' prefix form (checked against import paths).
 github.com/google/go-cmp
 github.com/google/go-cmp/
+
+# --- Move 4: secrets + storage (MEMORY.md ADL-0017) -------------------------
+#
+# github.com/godbus/dbus/v5 — the Secret Service D-Bus protocol in pure Go.
+# Required because libsecret is cgo and AGENTS.md §2.1 mandates CGO_ENABLED=0.
+github.com/godbus/dbus/v5
+github.com/godbus/dbus/v5/
+
+# modernc.org/sqlite — the ONLY sanctioned SQLite driver. Pure Go; mattn/go-sqlite3
+# is permanently banned (AGENTS.md §2.4).
+modernc.org/sqlite
+modernc.org/sqlite/
+
+# modernc.org/sqlite's own pure-Go dependencies (libc shims, math, allocator).
+# They are transitive and cannot be audited separately.
+modernc.org/libc
+modernc.org/libc/
+modernc.org/mathutil
+modernc.org/mathutil/
+modernc.org/memory
+modernc.org/memory/
+
+# Transitive dependencies of the two modules above.
+github.com/dustin/go-humanize
+github.com/google/uuid
+github.com/mattn/go-isatty
+github.com/ncruces/go-strftime
+github.com/remyoudompheng/bigfft

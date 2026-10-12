@@ -138,6 +138,28 @@ func (h RunHandle) WaitTimeout(d time.Duration) error {
 	}
 }
 
+// Redactor scrubs resolved secrets and sensitive header values from anything on
+// its way to a Sink, a store, or a user (AGENTS.md §3.4).
+//
+// The engine defines this interface rather than importing internal/secrets:
+// ARCHITECTURE.md §3.1 keeps domain packages siblings, so the concrete
+// implementation is injected by internal/app. A nil Redactor is legal and means
+// "no value scrubbing configured" — header-name redaction still applies.
+type Redactor interface {
+	// String returns s with every registered secret replaced.
+	String(s string) string
+	// Headers returns a redacted COPY of h.
+	Headers(h http.Header) http.Header
+	// Error returns err with any secret in its message replaced, preserving
+	// errors.Is/As through Unwrap.
+	Error(err error) error
+}
+
+// WithRedactor installs the redaction chokepoint. Every outbound request header
+// and every inbound response payload is piped through it before it can reach a
+// Sink or the store.
+func WithRedactor(r Redactor) Option { return func(e *Engine) { e.redactor = r } }
+
 // Option configures an Engine.
 type Option func(*Engine)
 
@@ -168,6 +190,7 @@ type Engine struct {
 	client         *http.Client
 	timeout        time.Duration
 	resolver       Resolver
+	redactor       Redactor
 	userAgent      string
 	teardownBudget time.Duration
 }
@@ -188,6 +211,25 @@ func New(doc *ast.Document, opts ...Option) *Engine {
 
 // Document returns the document this engine executes.
 func (e *Engine) Document() *ast.Document { return e.doc }
+
+// Redactor returns the installed redaction chokepoint (nil when none).
+func (e *Engine) Redactor() Redactor { return e.redactor }
+
+// scrub pipes a string through the redaction chokepoint.
+func (e *Engine) scrub(s string) string {
+	if e.redactor == nil {
+		return s
+	}
+	return e.redactor.String(s)
+}
+
+// scrubErr pipes an error's message through the redaction chokepoint.
+func (e *Engine) scrubErr(err error) error {
+	if e.redactor == nil {
+		return err
+	}
+	return e.redactor.Error(err)
+}
 
 // Run starts req and streams its response to sink. It returns immediately with
 // a handle; every outcome — success, transport failure, or cancellation — is
@@ -225,19 +267,26 @@ func (e *Engine) execute(ctx context.Context, req *ast.Request, sink Sink, h Run
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		// net/http embeds the full URL in transport errors, so redact before
-		// the message can reach a UI or a log (AGENTS.md §3.4).
-		sink.Failed(redactError(err))
+		// net/http embeds the full URL in transport errors, so scrub for both
+		// credentials and resolved secrets before the message can reach a UI or
+		// a log (AGENTS.md §3.4).
+		sink.Failed(e.scrubErr(redactError(err)))
 		return
 	}
 
+	// The response header map is copied and redacted before it can reach a
+	// Sink or the store; the transport keeps the original.
+	respHeader := redactHeaders(resp.Header)
+	if e.redactor != nil {
+		respHeader = e.redactor.Headers(respHeader)
+	}
 	res := &RunResult{
 		Method:     httpReq.Method,
 		URL:        redactURL(httpReq.URL.String()),
 		Status:     resp.StatusCode,
 		StatusText: resp.Status,
 		Proto:      resp.Proto,
-		Header:     redactHeaders(resp.Header),
+		Header:     respHeader,
 		Started:    time.Now(),
 	}
 
@@ -289,7 +338,7 @@ func (e *Engine) execute(ctx context.Context, req *ast.Request, sink Sink, h Run
 	res.Elapsed = time.Since(res.Started)
 	switch {
 	case streamErr != nil:
-		sink.Failed(redactError(streamErr))
+		sink.Failed(e.scrubErr(redactError(streamErr)))
 	case ctx.Err() != nil:
 		sink.Failed(fmt.Errorf("engine: run cancelled: %w", ctx.Err()))
 	default:
@@ -344,6 +393,12 @@ func (e *Engine) buildRequest(ctx context.Context, ar *ast.Request) (*http.Reque
 		}
 		// Set, not Add: an AST header is a single field line, and a repeated
 		// name in one line is a source defect rather than two fields.
+		//
+		// NOTE: the value on the wire is the REAL resolved secret — that is
+		// what the endpoint expects, and redacting it here would send
+		// "[REDACTED]" to the server and break authentication. Redaction is
+		// applied to diagnostic COPIES only (RunResult, errors, store rows),
+		// never to the outbound request (AGENTS.md §3.4).
 		httpReq.Header.Set(name, val)
 	}
 	if body != nil {

@@ -49,6 +49,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-12 | ADL-0012 | Move 2 parser land: bump-arena memory strategy (8-byte alignment, retained blocks, GC-visible root) and the fail-closed `(nil, err)` parse contract | internal/ast/arena.go, internal/ast/parser.go, testdata/, scripts/ |
 | 2026-10-12 | ADL-0015 | Canonical upstream established: `origin` = https://github.com/duckiec/pulse.git, branch `main`; local history rebased onto the upstream AGPL-3.0 initial commit (no force-push) | AGENTS.md §1, ARCHITECTURE.md header |
 | 2026-10-12 | ADL-0016 | Move 3 engine land: 32 KiB × 64-slot streaming geometry, 2.0625 MiB in-flight ceiling, Sink ownership contract, abort-only teardown budget | internal/engine/, ROADMAP.md §1.2.1/§1.2.3 |
+| 2026-10-12 | ADL-0017 | Move 4: modernc.org/sqlite as the sole driver, `PRAGMA secure_delete=ON` verified behaviourally, runtime `sqlite_master` schema audit, and the two-layer redaction chokepoint | internal/secrets/, internal/store/, internal/engine/stream.go |
 
 ---
 
@@ -597,6 +598,94 @@ complete (AGENTS.md §4.7).
 - **Refs:** internal/engine/engine.go; internal/engine/stream.go;
   internal/engine/engine_test.go; scripts/mutation-proof-engine.sh;
   scripts/ci/test-gates.sh; TASKS.md P1.4.1–P1.4.10; ROADMAP.md §1.2.1/§1.2.3
+
+---
+
+## ADL-0017 — Zero-trust storage, `secure_delete`, and the redaction chokepoint
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Move 4 closed Phase 2. Two guarantees had to become mechanical
+  rather than aspirational: *no secret ever reaches the database file*, and *no
+  resolved secret ever reaches a Sink, a log, or a UI*. Both are easy to state
+  and easy to erode, so each is enforced by code that fails loudly.
+- **Decision — the SQLite driver:**
+  - **`modernc.org/sqlite` is the only driver.** It is the sole implementation
+    sanctioned by AGENTS.md §2.4 and ARCHITECTURE.md §7; `mattn/go-sqlite3` stays
+    permanently banned because it requires cgo and the CGO_ENABLED=0 mandate is
+    absolute. It brings `modernc.org/libc`, `mathutil`, and `memory` as
+    transitive pure-Go dependencies, allowlisted explicitly so the import audit
+    stays meaningful rather than being widened to a prefix that would admit
+    anything.
+- **Decision — `PRAGMA secure_delete=ON`:**
+  - Set in the DSN **and verified at open** (`verifySecureDelete` reads the
+    pragma back and fails if it is not 1). Trusting that a DSN was honoured is
+    how a security control silently stops existing.
+  - Verified **behaviourally**, not just by flag:
+    `TestSecureDeleteZeroesDeletedRows` writes a marker, deletes the row,
+    vacuums, then reads the raw database file and asserts the marker is gone.
+    Without the pragma SQLite leaves deleted content in free cells, recoverable
+    with a hex editor — so a flag assertion alone would have proved nothing.
+- **Decision — the schema is the enforcement mechanism:**
+  - The schema has **no column that could hold a header value or an auth body**:
+    no header/auth/token/cookie column, and no request/response body column at
+    all. History stores metadata and the response SHA-256 only.
+  - `store.AuditSchema` runs on **every `Open`** (not only in tests), parsing the
+    live `sqlite_master` DDL rather than a copy of the constant, so a future
+    migration cannot quietly widen the schema without the tool refusing to
+    start. Matching is **normalized** — lowercased with `_`, `-`, `.` removed —
+    because `api_key` would otherwise slip past a rule that only knows `apikey`
+    (this was a real gap, caught by the test's positive control).
+  - `InsertHistory` refuses any row whose error text still contains a `{{...}}`
+    anchor: a surviving anchor means an unresolved secret is one bug away from a
+    secret.
+- **Decision — the redaction chokepoint is two layers:**
+  1. **Name-based:** the values of `Authorization`, `Proxy-Authorization`,
+     `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token`, `X-Session-Token`,
+     `X-Csrf-Token`, `Proxy-Authorization-Basic`, `WWW-Authenticate` are always
+     replaced.
+  2. **Value-based:** every secret is registered with the redactor **the instant
+     it is resolved, before it is returned**, and is then scrubbed wherever it
+     turns up — a JSON error body, a URL, an error string. Name-based rules alone
+     do not help when a server echoes the token back into a 200 response.
+  - **Injection, not import.** `internal/engine` defines a `Redactor` interface
+    and `internal/app` supplies `secrets.Redactor`. ARCHITECTURE.md §3.1 keeps
+    domain packages as siblings; importing secrets into the engine would have
+    created a sibling dependency. The engine uses it at three points: response
+    headers, response **body chunks** (in place, inside the dispatch goroutine,
+    before the Sink sees them), and errors.
+  - **Outbound requests are deliberately NOT scrubbed.** The real secret must
+    reach the server; redacting it would send `[REDACTED]` as the credential and
+    break authentication while looking correct in every other test.
+    `TestOutboundSecretStillReachesTheServer` guards exactly this.
+- **Decision — the tracked-secret list is memory-bound by dropping, not evicting:**
+  Capped at 256 entries, longest-first so overlapping secrets scrub whole. On
+  overflow new registrations are **dropped and counted**, never evicted: evicting
+  could remove the secret currently in use and let it leak. Values under 4 bytes
+  are never tracked (scrubbing "ab" would corrupt ordinary text). Values shorter
+  than the 10-byte placeholder cannot be replaced in the fixed-size streaming
+  buffer, so the in-place path **skips and counts** them rather than running off
+  the end; the allocating paths still cover them.
+- **Consequences:** 26 secrets/store tests plus 4 engine redaction tests. The
+  keychain dispositions are stated honestly: **linux/amd64 BLOCKED** (this WSL
+  host has a session bus but no Secret Service daemon — the test emits
+  `BLOCKED: secret-service-dbus backend unavailable...` and skips); **darwin and
+  windows NOT RUN** (no host; both backends cross-compile CGO-free, which the
+  4-target build matrix proves). No test fakes a pass. Mutation proof
+  (`scripts/mutation-proof-secrets.sh`): stopping the allocating redactor leaks
+  `AKIA-EXAMPLE-SECRET-9f3a2b` to the sink; stopping the in-place streaming scrub
+  leaks `sk-live-EXAMPLE-4f7b2c9d-secret` in a response body; making the chain
+  return no error breaks fail-closed; breaking the column rule breaks the audit;
+  dropping `secure_delete` fails at `Open` with "deleted rows would survive in
+  the raw file".
+- **Goal 1 status:** closed out, with **G-frame explicitly carried forward** —
+  it is a Bubble Tea UI property and cannot be measured before Phase 3 exists.
+  Claiming it would be exactly the kind of dishonest green this repository
+  forbids.
+- **Refs:** internal/secrets/{resolver,redact,backend_linux,backend_darwin,
+  backend_windows,backend_other}.go; internal/store/sqlite.go;
+  internal/engine/{engine,stream}.go; scripts/mutation-proof-secrets.sh;
+  TASKS.md P2.1.1–P2.4.4 and the Goal 1 status note; ROADMAP.md §1.4.1
 
 ---
 

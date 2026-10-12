@@ -289,20 +289,30 @@ UI goroutine                       MCP handler (streams summary + cites offsets)
 
 ### 6.2 Platform keychain backends (CGO-free)
 
-| OS | Backend | Mechanism |
-|---|---|---|
-| Linux | Secret Service via D-Bus | `github.com/godbus/dbus` (pure Go) |
-| macOS | Keychain | Shell-out to `/usr/bin/security find-generic-password` (pure Go; no Security.framework cgo) |
-| Windows | Credential Manager | `golang.org/x/sys/windows` advapi32 `CredRead`/`CredWrite` (pure Go syscall) |
+| OS | Backend | Mechanism | Status |
+|---|---|---|---|
+| Linux | Secret Service via D-Bus | `github.com/godbus/dbus/v5` (pure Go), `org.freedesktop.Secret.Service` | Implemented |
+| macOS | Keychain | Shell-out to `/usr/bin/security find-generic-password` (pure Go; no Security.framework cgo) | Implemented, NOT RUN (no macOS host) |
+| Windows | Credential Manager | `golang.org/x/sys/windows` advapi32 `CredRead` (pure Go syscall) | Implemented, NOT RUN (no Windows host) |
+| other | none | reports BLOCKED; the chain falls through to `.env`, then to a hard error | Implemented |
 
 If a backend is unavailable (headless CI, minimal WSL), the resolver reports
 `BLOCKED (reason: no keychain binding)` per AGENTS.md §4.5 — it never fakes success.
+A keyring item that exists but is **locked** is reported as BLOCKED too: unlocking
+needs an interactive prompt, which a headless process cannot supply, and a
+placeholder is not an option (AGENTS.md §4.3).
 
 ### 6.3 Storage exclusion guarantee
 
 **Secrets never touch `modernc.org/sqlite`.** The schema (§8) contains no credential
 columns by construction; a CI check greps migrations for forbidden column names
 (`token`, `secret`, `password`, `authorization`, `apikey`, `credential`).
+
+`store.AuditSchema` enforces the same rule **at runtime on every `Open`**: it reads
+the live `sqlite_master` DDL (not a copy of the constant) and refuses to start if
+any column name could hold a credential. Matching is case-insensitive and
+normalizes `_`, `-`, and `.`, so `api_key` cannot slip past a rule that only knows
+`apikey`.
 
 ### 6.4 Redaction pipeline
 
@@ -311,12 +321,22 @@ Sensitive headers (`Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie
 output reaches stderr, the UI, or the SQLite store. Redaction is applied at the
 single output chokepoint (`internal/secrets.Redact`), not per-call-site.
 
-The engine implements this at its own boundary today (Move 3): response headers
-are copied and redacted before they reach a `RunResult`, and URL userinfo is
-stripped from both the recorded URL and any `net/http` transport error. When
-`internal/secrets` lands, `secrets.Redact` becomes the chokepoint and the
-engine's copy is replaced by it — the engine-side redaction is a working
-placeholder, not a competing policy.
+**Two layers, both required.** Name-based rules cover the header names above plus
+`X-Auth-Token`, `X-Session-Token`, `X-Csrf-Token`, `Proxy-Authorization-Basic`, and
+`WWW-Authenticate`. Value-based rules scrub every secret **the moment it is
+resolved, before it is returned**, wherever it later appears — a server that echoes
+a token back into a 200 response defeats layer one entirely.
+
+The engine implements this at its own boundary: response headers are copied and
+redacted before they reach a `RunResult`, response **body chunks** are scrubbed in
+place inside the dispatch goroutine before the `Sink` sees them, and URL userinfo is
+stripped from both the recorded URL and any `net/http` transport error.
+
+**Outbound requests are deliberately not scrubbed.** The real secret must reach the
+server; only diagnostic *copies* (RunResult, errors, store rows) are redacted.
+`internal/engine` declares a `Redactor` interface rather than importing
+`internal/secrets`, keeping the domain packages siblings per §3.1; `internal/app`
+supplies the concrete implementation.
 
 ## 7. Sanctioned Third-Party Dependencies (Stdlib-First Exceptions)
 
@@ -330,8 +350,10 @@ Every non-stdlib dependency requires an explicit entry here and a MEMORY.md ADL.
 | `github.com/charmbracelet/bubbles` | viewport/list/textinput/spinner | Component library | G1 |
 | `github.com/charmbracelet/huh` | Interactive forms | Form orchestration | G1 |
 | `github.com/mark3labs/mcp-go` | MCP JSON-RPC server/client over stdio | MCP protocol implementation | G3 |
-| `github.com/godbus/dbus` | Linux Secret Service transport | OS keychain access | G1 |
+| `github.com/godbus/dbus/v5` | Linux Secret Service transport (pure Go D-Bus) | OS keychain access without libsecret/cgo | G1 |
+| `modernc.org/sqlite` | SQLite driver — **the only sanctioned driver** | `mattn/go-sqlite3` is cgo and banned | G1 |
 | `golang.org/x/term`, `golang.org/x/sys` | isatty / advapi32 credential access | OS-level syscalls | G1 |
+| `github.com/google/go-cmp` (test-only) | Structural diffs for golden snapshots | No stdlib diff | G1 |
 | `github.com/BurntSushi/toml` | `pulse.toml` config parsing | No stdlib TOML | G1 |
 | `github.com/coder/websocket` | WebSocket client (RFC 6455) | No stdlib WebSocket | G2 §2.1 |
 | `google.golang.org/grpc` + `google.golang.org/protobuf` | gRPC transport + dynamic messages | No stdlib gRPC/protobuf | G2 §2.2 |
@@ -362,11 +384,21 @@ Build-tag and artifact constraints:
 
 ## 8. Storage Schema (`internal/store`)
 
+**Driver:** `modernc.org/sqlite` (pure Go, CGO-free). `mattn/go-sqlite3` is permanently
+banned (AGENTS.md §2.4).
+
+**Pragmas, set at open and verified there:**
+
+- `secure_delete=ON` — deleted rows are overwritten with zeros instead of surviving as
+  free cells recoverable from the raw file. Verified behaviourally: the test writes a
+  marker, deletes it, vacuums, and greps the raw database bytes for the marker.
+- `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`.
+
 ```sql
-collections(id TEXT PK, root_path TEXT, created_at INTEGER)
-requests(id TEXT PK, collection_id TEXT FK, file_path TEXT, name TEXT,
+CREATE TABLE collections(id TEXT PK, root_path TEXT, created_at INTEGER)
+CREATE TABLE requests(id TEXT PK, collection_id TEXT FK, file_path TEXT, name TEXT,
          method TEXT, url_template TEXT, ordinal INTEGER, updated_at INTEGER)
-history(id INTEGER PK AUTOINCREMENT, request_id TEXT FK, started_at INTEGER,
+CREATE TABLE history(id INTEGER PK AUTOINCREMENT, request_id TEXT FK, started_at INTEGER,
         duration_ms INTEGER, status_code INTEGER, request_bytes INTEGER,
         response_bytes INTEGER, sha256 TEXT, error TEXT, run_source TEXT)
 ```
@@ -375,6 +407,11 @@ history(id INTEGER PK AUTOINCREMENT, request_id TEXT FK, started_at INTEGER,
 - Bodies (request/response) are **not persisted by default**; history stores metadata
   and the response SHA-256 only. Body persistence is deferred pending a privacy ADL.
 - `response_bytes`/`duration_ms` power the timing UI and `get-history` MCP tool.
+- `url_template` stores the **raw** template including `{{var}}` anchors: the store
+  records what the file said, never what was sent.
+- `InsertHistory` refuses any row whose `error` text still contains a `{{...}}`
+  anchor — a surviving anchor means an unresolved secret is one bug away from a
+  secret.
 
 ## 9. MCP Server (`internal/mcp`)
 
