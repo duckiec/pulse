@@ -142,6 +142,14 @@ const (
 	// ErrUnterminatedBody is a structured body whose closing delimiter is
 	// missing before end of input.
 	ErrUnterminatedBody
+	// ErrSyntax is a generic grammar violation detected by the parser.
+	ErrSyntax
+	// ErrMissingAssign is a variable definition line with no '=' separator.
+	ErrMissingAssign
+	// ErrMalformedVar is a variable definition with an empty name.
+	ErrMalformedVar
+	// ErrMissingTarget is a request whose method is not followed by a target.
+	ErrMissingTarget
 )
 
 // String implements fmt.Stringer.
@@ -155,6 +163,14 @@ func (k ErrKind) String() string {
 		return "malformed header line"
 	case ErrUnterminatedBody:
 		return "unterminated body"
+	case ErrSyntax:
+		return "syntax error"
+	case ErrMissingAssign:
+		return "missing '=' in variable definition"
+	case ErrMalformedVar:
+		return "malformed variable definition"
+	case ErrMissingTarget:
+		return "missing request target"
 	default:
 		return "none"
 	}

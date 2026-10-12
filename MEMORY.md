@@ -46,6 +46,7 @@ complete (AGENTS.md §4.7).
 | 2026-10-11 | ADL-0011 | Move 1 lexer land: 32-byte Token, iter.Seq stream, lexState table, golden corpus discipline | internal/ast, testdata/ |
 | 2026-10-11 | ADL-0013 | Ponytail always-on at project level; agent skills moved global→project; AGENTS.md §4.8 amendment | AGENTS.md, .opencode/ (ignored) |
 | 2026-10-12 | ADL-0014 | Option A: ponytail plugin vendor fix — full checkout at `.opencode/ponytail/`, absolute plugins path, package.json shim | AGENTS.md, .gitignore |
+| 2026-10-12 | ADL-0012 | Move 2 parser land: bump-arena memory strategy (8-byte alignment, retained blocks, GC-visible root) and the fail-closed `(nil, err)` parse contract | internal/ast/arena.go, internal/ast/parser.go, testdata/, scripts/ |
 
 ---
 
@@ -384,6 +385,93 @@ complete (AGENTS.md §4.7).
   tooling would dangle for fresh clones.
 - **Refs:** .opencode/ponytail/**; opencode.json; AGENTS.md §4.8; ADL-0013;
   ~/.local/share/opencode-skill-src/{vendor-option-a,finalize-option-a,run-smoke,log-evidence}.sh
+
+---
+
+## ADL-0012 — Arena memory-alignment strategy and the fail-closed parse contract
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Move 2 had to build the AST (`Document`/`Request`/`Header`/`Body`/
+  `Variable`/`Assert`) with zero heap traffic per parse and hold a 10,000-request
+  document inside 2× its source size. The parser is fed an `iter.Seq[Token]`
+  stream, must do LL(1) descent with exactly one token of lookahead in frame,
+  and must resolve file-scoped `@var=value` declarations in a pre-pass. Three
+  constraints collide: (a) node allocation must be free, (b) node strings must
+  not duplicate the source, (c) the GC must never be allowed to reclaim memory
+  the AST still points at.
+- **Decision — arena memory strategy:**
+  1. **Offset-based AST.** Every string is a `[start,end)` `int32` span into an
+     arena-owned copy of the source (`Arena.Reset` copies once); accessors
+     materialize zero-copy views via `unsafe.String` (`Document.Str`). String
+     fields would have cost ~16 B each and blown the 2× ceiling; spans keep
+     `Request` at 88 B and the whole 10k document at **1.50× source**
+     (`TestMemoryCeiling`) with **−0.05× RSS growth** once warm
+     (`TestMemoryCeilingRSS`).
+  2. **8-byte alignment, exact-fit blocks.** `Arena.alloc` rounds every
+     allocation up to 8 bytes — the alignment of every AST node type (all
+     `int32`/`uint8` fields plus 8- or 16-byte slice headers). The single large
+     array (`[]Request`, `[]Header`) gets its own **exact-fit** block instead of
+     a geometric successor, so no allocation is split across blocks and no
+     block is over-reserved (`TestArenaLargeAllocationExactFit`).
+  3. **Blocks survive the pool round-trip.** `Arena.Release` clears only the
+     parse state (current block, offset, cursor) and keeps `src` + retained
+     blocks. Clearing them too was measurably wrong: `BenchmarkParseCached`
+     reported **11 allocs/op, 4.88 MB/op** (source copy + ~1.7 MB of blocks
+     rebuilt every cycle) and is now **0 allocs/op**. This is the mechanism
+     behind the G-alloc gate.
+  4. **The gate measures `allocs/op`, not an averaged byte count.** `B/op` is
+     total-bytes/N, so a single post-GC `sync.Pool` refill — the pool is drained
+     by the collector by design — averages to ~1 B/op over 2000 iterations
+     while the real invariant (no allocation per operation) still holds.
+     `scripts/ci/test-gates.sh` therefore requires `0 allocs/op` and allows
+     ≤ 8 B/op; gating on `0 B/op` was observed to fail intermittently for a
+     reason that has nothing to do with the parser.
+  4. **The root `Document` is pooled on the Go heap, never arena-allocated.**
+     It is the one node holding Go pointers (`Path`, the node slices, and the
+     arena itself), and **the GC does not trace pointers stored inside arena
+     blocks**. Arena-allocating it made the arena's own lifetime invisible to
+     the collector: it could be reclaimed while a live `Document` still pointed
+     at it, producing GC-timing-dependent memory corruption (observed as a
+     segfault in `Arena.grow` only in the full suite, only when a prior test had
+     called `runtime.GC()`). Pooling keeps zero allocations *and* keeps the
+     arena graph reachable.
+  5. **The pre-pass counts over the identical stream the fill pass consumes.**
+     `countNodes` drives `Lexer.NextToken`, not `Tokens()`: `Tokens` stops at
+     the first illegal token, so on a recoverable file it under-counted every
+     request after the damage and the fill pass then wrote past its arrays.
+- **Decision — fail-closed parse contract:**
+  1. `Parse(arena) (*Document, error)` returns `(nil, err)` on **any** error.
+     A partially filled AST is never handed out; callers that need rich
+     diagnostics use `ParseDiag`, which resyncs at `###` and accumulates up to
+     32 `SyntaxError`s (`Path`, `Kind`, `Offset`, `Line`, `Col`, `Expected`,
+     `Found`) — it still returns no document, because a file with any
+     diagnostic has no valid AST.
+  2. **Internal invariant violations are not source diagnostics.** A
+     count/fill disagreement (`internalErr`) names no file position because the
+     source is not at fault; it halts the parse and is never recorded into the
+     user-visible diagnostic list (`SyntaxError.internal`). Capacity checks on
+     every node array fail closed rather than silently truncating the AST.
+  3. **Errors are recorded exactly once**, at `parseDocument`. Recording inside
+     `errorAt` as well duplicated every diagnostic — caught by the mutation
+     proof and fixed.
+- **Consequences:** `internal/ast` parses a 10,000-request AST at 0 allocs/op
+  (23.5 ms/op, two lex passes over a 3.26 MB corpus — profiled, no parser
+  hotspot). Golden AST snapshots (`testdata/http/golden/ast/*.ast`, compared
+  with `cmp.Diff`) lock the node shapes. Writing the parser surfaced three
+  latent defects the lexer-only tests could not: a spurious `TokNewline` emitted
+  inside JSON/XML bodies (now baked out of the token goldens), a bodyless
+  request swallowing its following `###` (which mis-anchored request-scoped
+  `@var`/`# @assert` ranges), and var/assert scoping anchored at request
+  creation rather than at the block separator.
+- **Dependency note:** `github.com/google/go-cmp` is admitted to
+  `config/allowed-modules.txt` as a **test-only** exception for `cmp.Diff`
+  (ROADMAP.md §1.3.6 golden snapshots); it has no stdlib equivalent for
+  structural diffs and never reaches the shipped binary.
+- **Refs:** internal/ast/arena.go; internal/ast/parser.go;
+  internal/ast/{arena,parser,parser_bench,memory_rss_linux}_test.go;
+  testdata/http/golden/ast/; scripts/mutation-proof.sh;
+  scripts/ci/test-gates.sh; TASKS.md P1.3.2–P1.3.16; AGENTS.md §4.2
 
 ---
 

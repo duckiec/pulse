@@ -2,12 +2,15 @@
 
 ### Health check
 # @name health
+# @assert status == 200
+# @assert body == "ok"
 GET {{host}}/health HTTP/1.1
 
 ###
 
 ### Raw body
 # @name raw-create
+# @assert status == 201
 POST {{host}}/notes HTTP/1.1
 Content-Type: text/plain
 

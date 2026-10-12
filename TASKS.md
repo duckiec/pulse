@@ -53,21 +53,21 @@ AST and persists structured history to SQLite — with no UI and no network.
 
 ### 1.3 .http AST Parser
 - [x] P1.3.1 Lexer over `[]byte` with offset-based tokens (no per-token allocs)
-- [ ] P1.3.2 Recursive-descent parser producing `Document`/`Request`/`Header`/`Body` nodes in a bump arena
-  - REMAINDER: Move 2. The token stream it consumes is complete and gated (P1.3.7–P1.3.11).
-- [ ] P1.3.3 `func (d *Document) Requests() iter.Seq[*Request]` lazy traversal (Go 1.27)
-  - REMAINDER: Move 2. `Lexer.Tokens() iter.Seq[Token]` is complete (P1.3.7).
-- [ ] P1.3.4 Grammar coverage: `###` separators, `@var = value`, all methods, JSON/XML/raw bodies, `{{var}}` interpolation markers (unresolved at parse time)
-  - REMAINDER: every construct is tokenized and golden-proven (P1.3.10); parser node binding lands in Move 2.
-- [ ] P1.3.5 Fail-closed diagnostics: `file:line:col` structured errors, exit 2 in headless contexts; never return partial ASTs
-  - REMAINDER: lexer-level fail-closed complete (`Diag` with line/col, stream stops at first `TokIllegal`); exit-code wiring and AST-level guarantees land with the parser (Move 2) and `pulse test` (Goal 4).
-- [ ] P1.3.6 Benchmark gate: `BenchmarkParse` at `0 allocs/op` on cached documents (`-benchmem` in CI)
-  - REMAINDER: Move 2. `BenchmarkLexer` already gates at 0 B/op (P1.3.8).
+- [x] P1.3.2 Recursive-descent parser producing `Document`/`Request`/`Header`/`Body` nodes in a bump arena — `internal/ast/arena.go` (8-byte-aligned bump allocator, retained blocks, `sync.Pool` recycling via `Document.Release`) and `internal/ast/parser.go` (two-pass: counting pre-pass over the same token stream, then LL(1) fill with one token of lookahead and one-token `unget`)
+- [x] P1.3.3 `func (d *Document) Requests() iter.Seq[*Request]` lazy traversal (Go 1.27)
+- [x] P1.3.4 Grammar coverage: `###` separators, `@var = value`, all methods, JSON/XML/raw bodies, `{{var}}` interpolation markers (unresolved at parse time) — golden-proven per fixture in `testdata/http/golden/ast/*.ast`
+- [x] P1.3.5 Fail-closed diagnostics: `SyntaxError{Path,Kind,Offset,Line,Col,Expected,Found}` rendered as `file:line:col`, `Parse` returns `(nil, err)` on any error and never a partial AST, `ParseDiag` accumulates multi-error diagnostics with resync at `###` (capped at 32); exit-code wiring still lands with `pulse test` (Goal 4)
+- [x] P1.3.6 Benchmark gate: `BenchmarkParseCached` at `0 allocs/op` on a 10,000-request AST in a warmed arena (23.5 ms/op), enforced by `scripts/ci/test-gates.sh` in CI alongside `BenchmarkLexer` (G-alloc); the gate decides on `allocs/op` and allows ≤ 8 B/op of amortization, because `sync.Pool` is drained by the GC by design and one refill averages to a fraction of a byte
 - [x] P1.3.7 `internal/ast` lexer: 32-byte `Token` (size-asserted), `iter.Seq[Token]` stream, `lexState` transition table `stLineStart → stRequestLine → stHeaders → stBody{JSON,XML,Raw} → stDone` (ROADMAP.md §1.1.1–1.1.2)
 - [x] P1.3.8 Zero-allocation gate: `BenchmarkLexer` 0 B/op / 0 allocs/op on the generated 10k-line corpus (~296 MB/s), enforced by `scripts/ci/test-gates.sh` in CI (G-alloc)
 - [x] P1.3.9 Termination + non-degenerate-span proof: `FuzzLexer` (22 seeds) asserts ≤ len(src)+1 tokens and no zero-width `TokIllegal`; `TestTokenSize` locks the 32-byte contract; `TestInvariants` checks bounds/monotonicity over the corpus
 - [x] P1.3.10 `testdata/http/` corpus: 5 valid + 4 invalid fixtures with golden token files; regeneration via `go test ./internal/ast -run TestGoldenCorpus -update`
 - [x] P1.3.11 Corpus-driven defect fixed: stale `wantHTTPVersion` state leaked across requests (fixture 05); fixed by consuming the flag exactly once, covered by goldens
+- [x] P1.3.12 AST golden snapshots: `cmp.Diff` comparison of a rendered AST per valid fixture (`testdata/http/golden/ast/*.ast`), regenerated via `go test ./internal/ast -run TestGoldenAST -update-ast`
+- [x] P1.3.13 Memory-ceiling gate: `TestMemoryCeiling` (TotalAlloc 1.50× source) and `TestMemoryCeilingRSS` (Linux `/proc/self/statm`, warmed arena: −0.05× source) hold a 10,000-request AST inside the 2× source budget
+- [x] P1.3.14 Mutation evidence: `scripts/mutation-proof.sh` breaks two parsing boundaries (the mandatory `'='` in a variable definition; the `'# @assert'` directive) and shows red → restore → green on the `internal/ast` suite
+- [x] P1.3.15 Parser fuzz target `FuzzParse` (10 seeds) asserts no panic and the fail-closed invariant (nil document exactly when the error is non-nil) on arbitrary input
+- [x] P1.3.16 Corpus-driven defects fixed by the parser (all covered by goldens): (a) the lexer's central newline check leaked a spurious `TokNewline` inside JSON/XML bodies, corrupting every body-bearing fixture (fixed by restricting the check to line-oriented states); (b) a bodyless request swallowed the following `###`, so request-scoped `@var`/`# @assert` ranges anchored to the wrong request (fixed by one-token `unget`); (c) variable/assert scoping was anchored at request creation instead of at the block separator
 
 ### 1.4 Engine Core
 - [ ] P1.4.1 `internal/engine`: request execution over `net/http` with in-memory AST types

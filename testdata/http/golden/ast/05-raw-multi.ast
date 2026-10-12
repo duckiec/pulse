@@ -1,0 +1,12 @@
+DOC requests=2 file-vars=1
+  FILEVAR[0] host="http://localhost:8080" line=1
+REQ[0] method=GET line=7 name="health" url="{{host}}/health"
+  ASSERT "status == 200" line=5
+  ASSERT "body == \"ok\"" line=6
+  BODY NONE
+REQ[1] method=POST line=14 name="raw-create" url="{{host}}/notes"
+  HDR Content-Type="text/plain" line=15
+  ASSERT "status == 201" line=13
+  BODY RAW [256,305)
+  | line one of the raw body
+  | line two of the raw body

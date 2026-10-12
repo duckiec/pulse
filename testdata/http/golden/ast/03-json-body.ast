@@ -1,0 +1,8 @@
+DOC requests=1 file-vars=0
+REQ[0] method=POST line=2 name="nested-json" url="https://api.example.com/items"
+  HDR Content-Type="application/json" line=3
+  BODY JSON [96,180)
+  | {
+  |   "filter": {"tags": ["a", "b"], "note": "brace } inside string"},
+  |   "limit": 10
+  | }

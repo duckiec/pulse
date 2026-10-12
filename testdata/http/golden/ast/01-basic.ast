@@ -1,0 +1,5 @@
+DOC requests=1 file-vars=0
+REQ[0] method=GET line=4 name="list-users" url="https://api.example.com/users"
+  HDR Accept="application/json" line=5
+  ASSERT "status == 200" line=3
+  BODY NONE

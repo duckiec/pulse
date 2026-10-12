@@ -1,0 +1,11 @@
+DOC requests=1 file-vars=2
+  FILEVAR[0] base="https://api.example.com" line=1
+  FILEVAR[1] token="fixture-value" line=2
+REQ[0] method=POST line=5 name="create-user" url="{{base}}/users"
+  HDR Content-Type="application/json" line=6
+  HDR Authorization="Bearer {{token}}" line=7
+  BODY JSON [169,216)
+  | {
+  |   "name": "{{username}}",
+  |   "role": "admin"
+  | }

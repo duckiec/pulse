@@ -1,0 +1,9 @@
+DOC requests=1 file-vars=0
+REQ[0] method=POST line=2 name="xml-upload" url="https://api.example.com/upload"
+  HDR Content-Type="application/xml" line=3
+  BODY XML [134,242)
+  | <order id="42">
+  |   <!-- a comment with <angle> brackets -->
+  |   <item sku="A1">Widget</item>
+  |   <meta/>
+  | </order>

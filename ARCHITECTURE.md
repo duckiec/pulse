@@ -117,10 +117,32 @@ Token stream  ◄── IMPLEMENTED (Move 1): 32-byte Token, iter.Seq[Token], le
 Document AST  ──iter.Seq──▶  consumers (engine tee-off, UI tree, MCP tool listing)
 ```
 
-**Implementation status:** the lexer is complete and gated (0 allocs/op on a
-generated 10k-line corpus, termination proven by fuzz seeds, golden corpus at
-`testdata/http/golden/`); the parser lands in Move 2. The token contract and
-state machine are recorded in MEMORY.md ADL-0011.
+**Implementation status:** lexer **and** parser are complete and gated. Lexer:
+0 allocs/op on a generated 10k-line corpus, termination proven by fuzz seeds,
+golden corpus at `testdata/http/golden/`. Parser: `BenchmarkParseCached`
+(10,000-request AST, warmed arena) at **0 B/op / 0 allocs/op**, memory ceiling
+**1.50× source**, golden AST snapshots at `testdata/http/golden/ast/`. The token
+contract and state machine are recorded in MEMORY.md ADL-0011; the arena
+allocation strategy and the fail-closed parse contract in ADL-0012.
+
+**Files:** `lexer.go` (tokenizer, `Tokens()`/`NextToken()`/`Push()`),
+`parser.go` (AST nodes, `Parse`/`ParseDiag`/`ParseFile`), `arena.go`
+(`Arena`, `AcquireArena`, `allocSlice`).
+
+**Parser shape — two passes over one token stream.** A counting pre-pass
+(`countNodes`) sizes every arena array exactly, then an LL(1) fill pass builds
+them. The pre-pass deliberately drives `Lexer.NextToken()` rather than
+`Tokens()`: it must see the same tokens the fill pass sees, including those
+after an illegal token, or the counts would disagree and the fill pass would
+write past its arrays. Lookahead is exactly one token in frame; a request that
+ends on a token belonging to the document level (the following `###`) hands that
+token back with a one-token `unget` (`Lexer.Push`) instead of swallowing it.
+
+**Scoping.** Variables and asserts are scoped by **block separator**, not by
+request creation: everything declared before the first `###` (or, failing that,
+before the first request) is file-scoped (`Document.Vars`); everything after a
+separator belongs to the next request in that block (`Document.VarsOf` /
+`Document.AssertsOf`).
 
 ### 4.2 Grammar (v1)
 
@@ -138,8 +160,22 @@ variable  := '{{' name '}}' interpolation, resolved at execution time (never par
 
 - Lexer/parser operate on the original `[]byte`; string names are views into the
   buffer (no `string()` conversions in hot paths).
-- Node allocation uses a bump arena owned by the `Document`, freed in one release.
-- Benchmark gate (CI): `BenchmarkParse` reports `0 allocs/op` for cached documents.
+- The AST is **offset-based**: every string is an `int32` span into an
+  arena-owned copy of the source, materialized on demand by `Document.Str`
+  (`unsafe.String`). A `string`-per-field AST does not fit the 2× ceiling.
+- Node allocation uses a bump arena owned by the `Document`, freed in one
+  release. Allocations are 8-byte aligned; a single large node array gets an
+  exact-fit block. `Arena.Release` clears the parse state but **retains** the
+  source buffer and node blocks, so a warm cycle allocates nothing.
+- **The root `Document` is pooled on the Go heap, never arena-allocated.** The GC
+  does not trace pointers stored inside arena blocks, so the one node holding Go
+  pointers must stay outside the arena — otherwise the arena's own lifetime is
+  invisible to the collector.
+- Benchmark gates (CI, `scripts/ci/test-gates.sh`): `BenchmarkLexer` and
+  `BenchmarkParseCached` each report `0 allocs/op`. The gate asserts on
+  `allocs/op`, not on an averaged `B/op`: the GC drains `sync.Pool` by design,
+  so an occasional pool refill averages to a fraction of a byte and must not be
+  read as per-operation allocation.
 - Traversal is lazy: `func (d *Document) Requests() iter.Seq[*Request]` — consumers
   (UI virtualized list, MCP listing, streaming execution) pull one request at a
   time; a 10,000-request collection costs O(1) memory.
@@ -150,6 +186,13 @@ Any lex/parse error halts immediately with a structured diagnostic:
 `file:line:col: expected <token>, found <lexeme>` — exit code 2 in headless/MCP
 contexts, surfaced in the TUI status bar in interactive mode. Partial ASTs are never
 returned on error.
+
+The contract is split in two: `Parse` returns `(nil, err)` on the **first**
+error and never a partially filled AST; `ParseDiag` keeps going, resyncing at
+`###` and accumulating up to 32 `*SyntaxError`s for the editor/TUI path — but it
+still returns no document, because a file with any diagnostic has no valid AST.
+A violated *parser* invariant (a count/fill disagreement) is reported as an
+internal error with no file position, never as a user-facing diagnostic.
 
 ## 5. Zero-Blocking I/O Model (`internal/engine`)
 

@@ -51,6 +51,11 @@ type Lexer struct {
 	hasPending bool // a follow-up token must be emitted before scanning resumes
 	pending    Token
 
+	// pushed holds one token of pushback so a parser can peek without
+	// consuming, keeping exactly one lookahead token in frame.
+	pushed    bool
+	pushedTok Token
+
 	// Value segmentation: single-line values (targets, header values) are
 	// emitted as alternating literal runs and TokInterp anchors.
 	segActive       bool
@@ -85,7 +90,7 @@ func (l *Lexer) Diag() (Diag, bool) { return l.diag, l.hasDiag }
 func (l *Lexer) Tokens() iter.Seq[Token] {
 	return func(yield func(Token) bool) {
 		for {
-			tok := l.next()
+			tok := l.NextToken()
 			if !yield(tok) {
 				return
 			}
@@ -95,6 +100,29 @@ func (l *Lexer) Tokens() iter.Seq[Token] {
 		}
 	}
 }
+
+// NextToken returns the next token from the stream without Tokens()'s
+// stop-at-illegal rule: the parser performs its own fail-closed handling and
+// resync, driving the lexer one token at a time. Allocates nothing.
+func (l *Lexer) NextToken() Token {
+	if l.pushed {
+		l.pushed = false
+		return l.pushedTok
+	}
+	return l.next()
+}
+
+// Push returns the most recently produced token to the stream so the next call
+// to NextToken yields it again. At most one token may be pushed at a time;
+// pushing twice without an intervening read overwrites the first push.
+func (l *Lexer) Push(tok Token) {
+	l.pushedTok = tok
+	l.pushed = true
+}
+
+// ClearDiag forgets the recorded diagnostic so a ParseDiag loop can continue
+// collecting multiple errors. Callers record their own diagnostics.
+func (l *Lexer) ClearDiag() { l.hasDiag = false }
 
 // next is the state machine dispatcher.
 func (l *Lexer) next() Token {
@@ -106,8 +134,14 @@ func (l *Lexer) next() Token {
 	if l.segActive {
 		return l.nextSegment()
 	}
-	if !l.atLineStart && !l.eof() && isNewline(l.cur()) {
-		return l.newlineToken(TokNewline)
+	// Only line-oriented states emit a line terminator here. Body states
+	// (JSON/XML/raw) scan their own bytes between tokens and must never leak
+	// the newlines inside a body into the token stream.
+	switch l.state {
+	case stLineStart, stRequestLine, stHeaders, stDone:
+		if !l.atLineStart && !l.eof() && isNewline(l.cur()) {
+			return l.newlineToken(TokNewline)
+		}
 	}
 	switch l.state {
 	case stRequestLine:

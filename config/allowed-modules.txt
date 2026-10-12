@@ -5,3 +5,12 @@
 
 golang.org/x/term
 golang.org/x/sys
+
+# go-cmp is a TEST-ONLY dependency (cmp.Diff). It has no standard-library
+# equivalent for structural diffs, and it never appears in the shipped binary:
+# it is imported only from _test.go files. Sanctioned in MEMORY.md ADL-0012
+# because the golden-snapshot gate (ROADMAP.md §1.3.6) requires cmp.Diff.
+# Both spellings are listed: the exact module path (checked against go.mod) and
+# the trailing-'/' prefix form (checked against import paths).
+github.com/google/go-cmp
+github.com/google/go-cmp/

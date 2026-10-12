@@ -1,5 +1,6 @@
 ### Users collection
 # @name list-users
+# @assert status == 200
 GET https://api.example.com/users HTTP/1.1
 Accept: application/json
 
