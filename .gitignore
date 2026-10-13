@@ -15,3 +15,60 @@ coverage.txt
 # Restore with the installers in ~/.local/share/opencode-skill-src/ (MEMORY.md ADL-0013).
 .opencode/
 opencode.json
+
+# ---------------------------------------------------------------------------
+# Markdown lockdown
+# ---------------------------------------------------------------------------
+# AGENTS.md §4.6 defines a COMPLETE documentation surface: seven Essential Vibe
+# Coding Files and nothing else. Ignoring *.md by default makes that structural
+# rather than aspirational — a stray notes file, a scratch README inside a test
+# fixture directory, or a vendored third-party README cannot be committed by
+# accident, and cannot be mistaken for state a reviewer is expected to read.
+#
+# The default-deny is the point. A repository that lists what it tracks is a
+# repository where every unlisted file is a decision nobody made; a repository
+# that lists what it does NOT track is one where every tracked file was.
+#
+# Two git semantics decide whether this rule actually does what it looks like
+# it does. Both were verified by `git check-ignore` rather than assumed, and
+# the first one was WRONG on the first attempt:
+#
+#   1. A `!pattern` containing no slash matches at EVERY depth. An unanchored
+#      `!README.md` therefore resurrects `vendor/README.md` and
+#      testdata/fixture/README.md — which is the precise thing this rule
+#      exists to prevent. Every negation below is anchored with a leading
+#      slash so it matches only at the repository root.
+#   2. A `!pattern` cannot rescue a file whose parent DIRECTORY is excluded,
+#      because git never descends into an excluded directory. No directory is
+#      excluded here, so root negations apply normally.
+*.md
+
+# --- the seven Essential Vibe Coding Files (AGENTS.md §4.6) ---
+# DESIGN_SYSTEM.md is whitelisted alongside the other six DELIBERATELY. It is
+# the TUI aesthetics and keybinding contract, it is one of the seven, and a
+# whitelist that omitted it would untrack a mandated document — the exact
+# failure the default-deny above exists to prevent, reintroduced through the
+# exception list.
+!/AGENTS.md
+!/PRD.md
+!/ARCHITECTURE.md
+!/DESIGN_SYSTEM.md
+!/ROADMAP.md
+!/TASKS.md
+!/MEMORY.md
+
+# --- conventional repository files ---
+# None of these three exists yet; the negations are permissions, not files.
+# README.md and CONTRIBUTING.md are whitelisted here by explicit directive even
+# though AGENTS.md §4.6 currently says "no README.md or other root-level
+# document is authorized" — a contradiction recorded in MEMORY.md ADL-0024
+# rather than resolved unilaterally here, because the two documents disagree
+# about intent and only one of them is a code contract.
+!/README.md
+!/CONTRIBUTING.md
+
+# LICENSE has no .md extension, so the rule above never matches it. It is named
+# anyway, because a reader of this file should not have to work that out: the
+# complete set of tracked documentation-adjacent files is the seven, these two,
+# and the licence.
+!/LICENSE
