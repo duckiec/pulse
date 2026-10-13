@@ -91,12 +91,21 @@ runtime; they are the only two consumers of `internal/app`.
 | `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
 | `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport | `app` (not built); today `ast`, `engine`, `secrets` via `EngineExecutor` | `ui` |
 | `internal/rag` | Codebase indexing: bounded walker, per-language chunking, structural embedder | stdlib only (`go/parser`) | everything internal; **`store` and `mcp` both depend on this layer's OUTPUT, not on it** |
+| `internal/fuzz` | OpenAPI subset reader (JSON + hand-rolled YAML), deterministic boundary matrix, GCRA rate limiter, TAP 13 emitter | stdlib only (`encoding/json`, `regexp`, `math/rand` seed) | everything internal; it builds payloads and never sends one |
 | `internal/app` | Shared services: run request, list collections, history queries, variable resolution | `ast`, `engine`, `store`, `secrets` | `ui`, `mcp` |
 | `internal/engine` | `ProtocolEngine` executors (REST, SSE, gRPC), streaming, checksums, telemetry | `ast` (types) | `ui`, `mcp`, `store` |
 | `internal/ast` | Lexer, parser, zero-allocation AST, `iter.Seq` traversal | stdlib only | everything internal |
 | `internal/store` | SQLite schema, migrations, history persistence | stdlib + `modernc.org/sqlite` | everything internal |
 | `internal/secrets` | Keychain backends, ephemeral env, resolver chain, redaction | stdlib + sanctioned backends (§7) | everything internal |
 | `internal/devtools/importaudit` | Static, offline dependency + stdout-hygiene audit (dev tooling) | stdlib only | everything internal; never imported by shipped code |
+
+**Move 9 also added no dependency.** ROADMAP.md §3.3.1 names
+`github.com/getkin/kin-openapi` and §3.3 needs YAML, but both `gopkg.in/yaml.v2`
+and `gopkg.in/yaml.v3` are on the permanently-banned list, so the schema reader
+is purpose-built over `encoding/json` plus a subset YAML parser (§13). The
+`kin-openapi` row in §7 is a **forward contract that was not exercised**: the
+row remains as the admission point should a future move need full OpenAPI
+coverage, and CI does not permit the import today.
 
 **Move 8 added no dependency at all.** Local RAG (`internal/rag`) is stdlib-only:
 `go/parser` for Go chunking, `embed`-free hashing for the structural vector, and
@@ -427,7 +436,7 @@ Every non-stdlib dependency requires an explicit entry here and a MEMORY.md ADL.
 | `github.com/owulveryck/onnx-go` | Pure-Go ONNX inference for local embeddings | No stdlib ML runtime | G3 §3.2 |
 | `github.com/fsnotify/fsnotify` | Filesystem watching for the RAG indexer | No stdlib recursive watcher | G3 §3.2 |
 | `github.com/grandcat/zeroconf` | mDNS/Bonjour peer discovery | No stdlib mDNS | G4 §4.2 |
-| `github.com/getkin/kin-openapi` | OpenAPI 3.0/3.1 parsing for auto-fuzzing | No stdlib OpenAPI | G3 §3.3 |
+| `github.com/getkin/kin-openapi` | OpenAPI 3.0/3.1 parsing for auto-fuzzing — **NOT VENDORED**; Move 9 reads the needed subset directly (§13) and no YAML module is permitted | No stdlib OpenAPI | G3 §3.3 |
 | `github.com/santhosh-tekuri/jsonschema/v6` | MCP payload validation | No stdlib JSON Schema | G3 §3.1 |
 
 Anything not on this list fails `go mod tidy` audit in CI. `ROADMAP.md` §0.4 is the
@@ -703,3 +712,105 @@ splitting them leaves an index that disagrees with itself depending on which leg
 you ask.
 
 ---
+
+## 13. Auto-Fuzzing (`internal/fuzz` + `internal/mcp/fuzz_tool.go` + `internal/mcp/fuzz_engine.go`)
+
+### 13.1 Shape
+
+```
+OpenAPI document (JSON or YAML)
+   │  LoadOpenAPI — refusing subset parser, fatal $ref resolution
+   ▼
+fuzz.IR  ──►  Generate(op, seed, budget)  ──►  []Payload   (deterministic, sorted)
+                                                   │
+             ValidateFuzzOptions (loopback, clamped bounds)
+                                                   │
+             limiter.Wait(ctx)  ──►  semaphore.Acquire(ctx)   ── rate before send
+                                                   │
+             EngineFuzzRunner.Run ──►  render .http ──► ast.Parse ──► engine.Run
+                                                   │
+                                             status + Sink
+                                                   ▼
+                     fuzz.Render([]Result)  ──►  TAP 13  ──►  MCP tool result
+```
+
+`internal/fuzz` builds payloads and never sends one. `internal/mcp` owns the
+dispatch and the reporting. The seam is `FuzzRunner`, mirroring the injected
+`EngineExecutor` pattern — and `EngineFuzzRunner` is the engine-backed
+implementation.
+
+### 13.2 Three limits, because they bound different things
+
+| Bound | What it limits | Default | Ceiling |
+|---|---|---|---|
+| `budget` | total payloads, so a miscounted schema cannot run for ever | 200 | 5,000 |
+| `rate_per_second` | load **on the target** | 20/s | concurrency × 100 |
+| `concurrency` | load **on Pulse** — open sockets, goroutines | 4 | 32 |
+
+Collapsing them into one knob is the mistake: a high rate with unbounded
+concurrency opens hundreds of sockets, and a low rate with unbounded concurrency
+holds them open for the whole run.
+
+### 13.3 The rate guarantee
+
+`internal/fuzz.Limiter` is GCRA. With rate `R` requests/second, burst `C`, and
+`interval = 1/R`, `burstDelta = (C-1)/R`:
+
+```
+tat   := max(now, previous_tat)      // theoretical arrival time
+allow := tat - burstDelta             // when this request may proceed
+if allow < now { allow = now }
+previous_tat = tat + interval         // RESERVE at decide time
+```
+
+Reserving at DECIDE time rather than WAKE time is the whole point. The textbook
+token bucket sleeps when empty, so N waiters compute the same sleep and wake
+together — admitting a burst of N under exactly the load the limiter exists to
+prevent. The reservation gives:
+
+```
+admission_time(i) >= t0 + i/R - (C-1)/R
+  ⟹  for any window of length Δ:  count <= C + R·Δ
+```
+
+`MaxPeakAdmissions(Δ)` returns that bound, and the gate asserts against it
+rather than recomputing the formula — a test that re-derives the arithmetic can
+agree with a broken implementation by both being wrong the same way.
+
+### 13.4 The transport is part of the rate guarantee
+
+`fuzzTransport()` is not a tuning choice. `DisableKeepAlives` removes the
+pooled-connection race that makes `net/http` transparently retry an idempotent
+request; `Proxy: nil` stops `HTTP_PROXY` from carrying a `127.0.0.1` target
+through a proxy host. Without the first, the server sees more requests than the
+limiter scheduled; without the second, "loopback" describes a URL rather than
+the traffic. Against loopback the extra handshake costs microseconds, which is
+irrelevant next to the rate limit every probe already waits for.
+
+### 13.5 Verdicts
+
+| Outcome | TAP line | Meaning |
+|---|---|---|
+| 2xx or 4xx | `ok` | the server handled the boundary value; a 4xx is correct behaviour |
+| 5xx | `not ok` | a boundary value crashed the handler — the finding this tool exists for |
+| transport error | `not ok` | no response at all |
+| undeliverable probe | `ok` + `# SKIP` | the transport cannot carry it (RFC 7230 §3.2); it never left Pulse |
+| cancelled / budget exhausted | `ok` + `# SKIP` | not run; the plan still covers it |
+
+The fourth row is the one that keeps the tool honest: a header payload carrying
+a NUL is refused by the client before it is sent, so the target said nothing
+about it. Reporting that as a failure makes a correct server look broken;
+dropping it silently shrinks a corpus the plan still promises, which hangs the
+consumer.
+
+### 13.6 Determinism
+
+`Generate` is a pure function of `(op, seed, budget)`. No clock, no global RNG,
+and every map is walked through `sortedKeys` — Go randomises map iteration, and a
+corpus emitted in map order differs on every run, which would make "it stopped
+happening" indistinguishable from "this run generated different inputs". The
+seed chooses only among values that are equally valid for the declared schema,
+so coverage of declared constraints never varies with it.
+
+---
+

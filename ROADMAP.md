@@ -1242,20 +1242,51 @@ boundaries.
 
 ### 3.3.1 Schema ingestion (OpenAPI → internal IR)
 
-- **Prereq:** `github.com/getkin/kin-openapi` (pure Go, §0.4); Goal 1 AST for
-  request templates.
-- **Contract:**
+- **Prereq:** ~~`github.com/getkin/kin-openapi` (pure Go, §0.4)~~ — **NOT
+  VENDORED.** Move 9 needs YAML to read a `.yaml` schema, and both
+  `gopkg.in/yaml.v2` and `gopkg.in/yaml.v3` are permanently banned, so no
+  OpenAPI library (every one of which takes a YAML dependency) can be admitted.
+  The reader is purpose-built over `encoding/json` plus a hand-rolled YAML
+  *subset* parser. Goal 1 AST for request templates: used, and load-bearing —
+  the engine runner renders each probe to `.http` and parses it with the real
+  parser (§3.3.3).
+- **Contract:** as written, with two additions the implementation forced:
   ```go
   type IR struct {
+      Version string
       Ops []Op // {ID, Method, Path, Params, RequestBody *Schema, Responses}
   }
   func LoadOpenAPI(path string) (*IR, error) // 3.0/3.1; $ref resolution bounded;
                                             // remote refs refused (offline, I-3)
+  type ErrRemoteRef struct{ Ref string }
+  type ErrRefCycle struct{ Ref string }
+  type ErrUnsupportedDocument struct{ Why string }
   ```
+  The typed errors are the addition. A schema reader's failure modes need to be
+  *distinguishable by a caller*, because "this document is bad" and "this
+  machine cannot reach the file" call for different responses.
 - **Challenge:** `$ref` cycles and remote refs must fail closed; the loader resolves
   local refs with a visited-set and rejects any URI with a scheme (offline-first).
+  **Resolved, and the implementation generalised the rule:** an unresolvable
+  `$ref` is fatal for the WHOLE load, at eight independent sites. The first
+  draft skipped one of them, which `TestLoadOpenAPIRejectsRemoteRefs` caught: a
+  document whose only constraint lived behind a remote ref produced a corpus
+  that silently omitted it. A partial IR is indistinguishable from a complete
+  one, and a boundary tester that reports the wrong coverage is worse than one
+  that refuses.
+- **Additional challenge, not in the original contract:** a hand-rolled YAML
+  parser is a *refusing* parser. Anchors, aliases, tags, block scalars, complex
+  keys and tab indentation each produce a typed error naming the line. A lenient
+  parser that mis-nests a schema produces payloads for constraints nobody
+  declared and reports them as coverage — confident and wrong rather than loud.
 - **Verify:** Fixture suite: 3.0 and 3.1 documents, cyclic refs, remote refs — each
   asserting exact IR or the structured error; G-mut on loader fixes.
+  **SHIPPED** (MEMORY.md ADL-0022; TASKS.md P3.3a.1). Gates:
+  `TestLoadOpenAPIFromYAML`, `TestLoadOpenAPIFromJSON`,
+  `TestLoadOpenAPIRejectsRemoteRefs`, `TestLoadOpenAPIRejectsRefCycles`,
+  `TestLoadOpenAPIRejectsNonOpenAPIInput` (8 bad documents). Mutations M37
+  (green — a structural no-op, eight independent enforcement sites, recorded in
+  the script) and M38 (red — the one site with no twin).
 
 ### 3.3.2 Deterministic payload generation
 
@@ -1275,9 +1306,31 @@ boundaries.
   example values do) — every generated body passes `RedactString` before storage,
   and SSRF-shaped probes are refused against non-loopback targets unless explicitly
   allowed (target allowlist in `pulse.toml`).
+- **Implementation note — the allowlist was NOT built.** The loopback restriction
+  is unconditional and enforced structurally at three points: the target is parsed
+  and its host checked *numerically* (`net.IP.IsLoopback`, so a decimal-encoded
+  `2130706433` or an IPv4-mapped `::ffff:8.8.8.8` cannot pass a prefix
+  comparison); the transport sets `Proxy: nil`, so `HTTP_PROXY` cannot carry a
+  `127.0.0.1` target through a proxy host; and the fuzz transport is the only one
+  used. An allowlist that can re-admit non-loopback targets is a downgrade from an
+  unconditional guarantee, so the contract is tightened rather than loosened — a
+  deliberate departure from the original wording, recorded in ADL-0022.
 - **Verify:** Determinism test (same seed → byte-identical corpus); strategy
   coverage test (each strategy emits ≥1 distinct failure mode on a seeded buggy
   server); redaction test on stored findings.
+  **SHIPPED** (ADL-0022; TASKS.md P3.3a.2, P3.3a.5). Determinism is proven over
+  26 generations: `TestGenerateIsDeterministic`. Coverage of *declared
+  constraints* — not of strategies — is the stronger property, because a
+  generator that skips `maxLength` because of a typo reports a clean run having
+  tested nothing: `TestGenerateCoversDeclaredConstraints`,
+  `TestGenerateCoversEverySchemaType`, `TestGenerateProbesDeclaredPatterns`,
+  `TestGenerateEmitsEveryStrategy`. The seed cannot remove a declared-constraint
+  case: `TestGenerateIsSeedStable` over five seeds. A budget truncates by
+  even-stride rather than by prefix, because a prefix would only ever exercise
+  the first parameter alphabetically: `TestGenerateHonoursTheBudget`. Redaction
+  of the emitted diagnostic: `TestFuzzToolRedactsDiagnostics`. Loopback:
+  `TestFuzzToolRejectsNonLoopbackTargets`, `TestRequireLoopbackRejectsNumericSneaks`,
+  `TestFuzzTransportIgnoresTheProxyEnvironment`.
 
 ### 3.3.3 Execution loop and findings
 
@@ -1293,6 +1346,55 @@ boundaries.
   teardown path (Goal 1 §1.2.6).
 - **Verify:** Cancellation mid-fuzz test (no orphaned runs); dedup test (identical
   responses collapse to one finding); budget test asserts hard stop.
+- **Implementation note — SHIPPED AS A SINGLE-SHOT TOOL, streaming NOT built.**
+  `execute_fuzz_run` runs the whole budget under one limiter and returns a TAP 13
+  document; the client does not drive `fuzz-start`/`fuzz-next` per payload. The
+  bound, the interruptibility and the teardown path are all present — a cancelled
+  run emits the remaining cases as SKIP so the plan stays complete, and a hanging
+  handler costs one timeout rather than the run — so the streaming contract is a
+  reshaping of the loop rather than a new mechanism. It is **not built** and is
+  not claimed (TASKS.md P3.3a.11).
+- **Implementation note — the rate limiter is the contract's load-bearing part and
+  it is NOT a token bucket.** GCRA reserves the slot at decide time, giving
+  `admission(i) >= t0 + i/R - (C-1)/R` and therefore **no window of length Δ
+  holds more than `C + R·Δ` admissions**. The textbook construction fails under
+  concurrency: N waiters sleep the same duration and wake together, admitting a
+  burst of N exactly when the limiter matters. Measured — 1,000 concurrent
+  requests at a real `httptest` sink, 200.6/s against 200/s configured, worst
+  1-second window 203 against a bound of 204. The gate measures the *world*:
+  under mutation M33 the limiter's own observations stay correct and only
+  timestamps taken at the sink detect the defect.
+- **Implementation note — the transport is part of the rate guarantee.**
+  `http.Transport` transparently retries an idempotent request whose pooled
+  connection the server closed, so the target received more requests than the
+  limiter scheduled; `DisableKeepAlives` removes the race. Found by
+  `TestEngineRunnerSendsExactlyOneRequestPerPayload`, which counts requests at
+  the server rather than at the limiter.
+- **Implementation note — probes travel the real engine path.** Each payload is
+  rendered to `.http`, parsed by the real AST and executed by `engine.Run`, so a
+  probe meets the same variable expansion, redaction, deadlines and bounded
+  reads as a hand-written request. Three consequences followed and are fixed: a
+  round-trip `Resolver` makes `{{...}}` probes byte-exact instead of being
+  consumed by Pulse's own expander; an **undeliverable** probe (one carrying a
+  byte RFC 7230 forbids in a header) is SKIPPED with a reason rather than
+  reported as a server finding; and 2xx and 4xx both PASS, because a boundary
+  value the server correctly rejects is the behaviour under test.
+- **NOT BUILT:** finding persistence and dedup (`sha256(status + canonical
+  response prefix)`, the `findings` table, `run_source='fuzz'`). `internal/mcp`
+  never writes to `store`, and there is no `internal/app` composition root to
+  wire `RegisterFuzzTool` into a running server — so `execute_fuzz_run` is not
+  yet reachable from `pulse --mcp`. Both are recorded as open in TASKS.md
+  P3.3a.9 and P3.3a.10 rather than left implied by the contract above.
+- **SHIPPED in part** (ADL-0022; TASKS.md P3.3a.3–P3.3a.8). Gates:
+  `TestRateLimiterNeverExceedsTheConfiguredRate`,
+  `TestRateLimiterEnforcesTheBoundUnderContention`,
+  `TestRateLimiterObservationsRespectTheInvariant`,
+  `TestLimiterCancellationDoesNotWidenTheRate`, `TestSemaphoreBoundsConcurrency`,
+  `TestFuzzToolCompletesThePlanOnCancellation`,
+  `TestTAPDocumentIsWellFormed`, `TestTAPFailureEmbedsTheTriggeringPayload`,
+  `TestTAPSkippedTestsAreMarked`, `TestUndeliverableProbeIsSkippedNotFailed`,
+  `TestEngineRunnerSendsExactlyOneRequestPerPayload`,
+  `TestEngineRunnerDeliversTemplateInjectionIntact`. Mutations M32–M41.
 
 ## 3.4 Wasm Sandboxing (wazero) for Auth Signing Scripts
 

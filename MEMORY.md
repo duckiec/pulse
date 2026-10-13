@@ -1144,6 +1144,134 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0022 — Auto-fuzzing: GCRA rate limiting, a refusing YAML subset, and TAP 13
+
+- **Date:** 2026-10-13
+- **Status:** PROPOSED
+- **Context:** ROADMAP.md §3.3 asks for an LLM-driven boundary fuzzer over a
+  local OpenAPI schema, and names two prerequisites that cannot be met:
+  `github.com/getkin/kin-openapi`, and YAML parsing. Both `gopkg.in/yaml.v2` and
+  `gopkg.in/yaml.v3` are **permanently banned** (`internal/devtools/importaudit`),
+  so the YAML dependency is not a judgement call — it is unavailable. Meanwhile
+  the feature sends hundreds of deliberately malformed requests at a machine the
+  user is sitting in front of, driven by an agent that does not experience a
+  server becoming unresponsive as something a human would. The failure mode that
+  matters is therefore not "misses a bug" but "takes down the user's box".
+- **Decision:**
+  - **The limiter is GCRA, not a textbook token bucket.** The standard
+    construction — refill at rate R, spend 1, sleep when empty — has a
+    concurrency defect that only appears under load: N waiters all observe
+    "empty", all compute the same wait, all sleep the same duration and all wake
+    together, admitting a burst of N and exceeding R for a full interval
+    afterwards. GCRA reserves the slot at DECIDE time:
+    `tat := max(now, prev_tat); allow := tat - (C-1)/R; tat += 1/R`. That yields
+    one inequality, `admission(i) >= t0 + i/R - (C-1)/R`, from which **no window
+    of length Δ contains more than `C + R·Δ` admissions**. Measured: 1,000
+    concurrent requests against a real `httptest` sink at a configured 200/s
+    achieved 200.6/s, with the worst 1-second window holding 203 admissions
+    against a bound of 204.
+  - **The rate gate measures the WORLD, not the limiter's own report.** Under
+    mutation M33 (reserve but do not wait) the limiter's recorded observations
+    stay perfectly correct and every self-reporting assertion passes; only
+    timestamps recorded at the sink detect it. The gate asserts over a SLIDING
+    window rather than fixed buckets, because a fixed window hides a burst
+    straddling its boundary — which is exactly the shape the defect produces.
+  - **Cancellation does not refund a slot.** The reservation is taken under the
+    lock and the sleep happens outside it. Refunding on cancellation would let
+    the run ahead of schedule, which is how "the limiter cancelled cleanly"
+    becomes "the limiter is no longer limiting".
+  - **Zero, a negative rate, or concurrency below one is a configuration ERROR,
+    never clamped.** A caller who wants no limit has to say so explicitly;
+    an accidental zero that silently means unlimited is the single worst defect
+    this file could have.
+  - **A hand-rolled, REFUSING YAML subset parser.** Anchors, aliases, tags,
+    block scalars, complex keys and tab indentation each produce a typed error
+    naming the line. The reason is not squeamishness: a lenient parser that
+    mis-nests a schema produces payloads for constraints nobody declared and
+    reports them as coverage, so the failure mode is confident and wrong. An
+    incomplete read is indistinguishable from a clean run, which is the worst
+    property a boundary tester can have. Format is detected by first significant
+    byte, never by extension.
+  - **A `$ref` that cannot be followed is FATAL, at eight independent sites.**
+    The first implementation `continue`d past it, and
+    `TestLoadOpenAPIRejectsRemoteRefs` caught it: a document whose only
+    constraint lived behind a remote ref produced a corpus that silently omitted
+    it. Fail the whole load; the caller sees a partial IR otherwise.
+  - **A remote `$ref` is refused outright** (invariant I-3): resolving one is a
+    network fetch triggered by a user merely pointing Pulse at a file.
+  - **The fuzz transport disables keep-alives and ignores proxy environment.**
+    Both are corrections to the default transport, and both were found by
+    building the thing. `http.Transport` silently retries an idempotent request
+    whose pooled connection the server has closed — invisible to the caller, so
+    the target receives more requests than the limiter ever scheduled and the
+    proven ceiling stops describing actual traffic. And `http.DefaultTransport`
+    honours `HTTP_PROXY`, so a target spelled `127.0.0.1` would carry every
+    payload off the machine through a proxy host, turning the loopback guarantee
+    into a statement about a URL string rather than about traffic.
+  - **A round-trip `Resolver` makes interpolation an identity.** The engine
+    expands `{{name}}` in URLs, headers and bodies, so a `{{7*7}}` injection
+    probe was consumed by Pulse's own expander before leaving the process, and
+    the injection strategy reported itself as run while testing nothing.
+    Returning `"{{" + name + "}}"` from `Lookup` reproduces the input exactly for
+    every input — `{{7*7}}` → `{{7*7}}`, `a{{x}}b{{y}}` → `a{{x}}b{{y}}`. It is
+    bound last and unconditionally because a resolver that can be forgotten is a
+    resolver that will be. The one input it cannot survive is an odd number of
+    `{{` anchors, which the expander reports as an unterminated anchor: a real,
+    reported outcome rather than a silent corruption, and unavoidable given the
+    engine offers neither an escape nor a literal mode.
+  - **Three verdicts, not two: pass, fail, skip.** A probe the transport cannot
+    carry at all (a header value containing a NUL, which RFC 7230 §3.2 forbids)
+    is SKIPPED with a stated reason. It never left Pulse, so the target said
+    nothing about it; reporting it as a failure makes a correct server look
+    broken, and silently dropping it shrinks a corpus the TAP plan still
+    promises — which hangs the consumer. Same treatment for cancellation.
+  - **TAP 13, with the two rules hand-rolled emitters break.** The plan is
+    emitted from the same slice the results were rendered from (a consumer that
+    plans for 40 and receives 39 hangs), and descriptions are flattened (a
+    newline inside one makes the next line parse as a new test, corrupting every
+    result after it). Strings are single-quoted with `'` doubled — the one
+    escaping rule YAML guarantees unconditionally — rather than choosing a style
+    by content, which breaks on a value containing both quote types.
+  - **2xx and 4xx both pass; 5xx fails.** A boundary value the server correctly
+    rejects is the behaviour under test. Treating a 400 as a finding would make
+    every fuzzer report every well-written server, and a user who learns the
+    tool cries wolf stops reading it.
+  - **The seed chooses among equally-valid values, never the matrix shape**, so
+    coverage of declared constraints cannot vary between runs. A budget is a cap
+    applied by even-stride, not a prefix — a prefix would only ever exercise the
+    first parameter alphabetically.
+  - **`internal/fuzz` depends on stdlib only. Move 9 added no dependency.**
+- **Consequences — honest gaps, NOT claimed done:**
+  - **No `internal/app` composition root.** `RegisterFuzzTool` and
+    `EngineFuzzRunner` are implemented and gated, but nothing hands a runner to a
+    server, so `execute_fuzz_run` is not reachable from `pulse --mcp`. This is
+    the same gap that blocks P3.2.10 (Move 8) and P4.3.3 (Move 7), and it now
+    blocks the fuzzer and the error-explanation feature from one missing seam.
+    Building it is the highest-value remaining action in the repository.
+  - **Finding persistence and dedup are NOT built.** ROADMAP §3.3.3 specifies
+    dedup by `sha256(status + canonical response prefix)`, a `findings` table and
+    `run_source='fuzz'`. `internal/mcp` never writes to `store`, so none of it
+    exists.
+  - **The streaming `fuzz-start`/`fuzz-next`/`fuzz-report` loop is NOT built.**
+    Move 9 ships the single-shot bounded form. The bound and the interruptibility
+    are already in place, so the streaming contract is a reshaping of the loop
+    rather than a new mechanism — but it is not built.
+  - **`internal/fuzz` is not in the AGENTS.md §3.1 package list.** That list was
+    written before this move. The amendment belongs in a dedicated
+    documentation commit per §4.6 item 7 and is deliberately NOT bundled here.
+  - **The rate gate's arithmetic is proven for the limiter, and one-payload-one-
+    request is proven for the transport, but no gate measures the *combined*
+    achieved rate at a production-typical budget.** `TestFuzzToolReportsATargetServerRate`
+    asserts the achieved rate is within tolerance of the configured one; it does
+    not re-derive the sliding-window bound end to end through the tool.
+- **Refs:** internal/fuzz/openapi.go, yaml.go, boundary.go, limiter.go, tap.go,
+  openapi_test.go, limiter_test.go, tap_test.go; internal/mcp/fuzz_tool.go,
+  fuzz_engine.go, fuzz_test.go, fuzz_engine_test.go;
+  scripts/mutation-proof-fuzz.sh; TASKS.md P3.3a.1–P3.3a.8 (P3.3a.9–P3.3a.11 open);
+  ROADMAP.md §3.3.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown
