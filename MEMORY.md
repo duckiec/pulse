@@ -1272,6 +1272,126 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0023 — The composition root: one package that chooses, and a layering inversion it paid for
+
+- **Date:** 2026-10-13
+- **Status:** PROPOSED
+- **Context:** Moves 0–9 built ten subsystems, each gated, and **none of them
+  could run**. Three open items across three separate moves shared one root
+  cause and had no fix, because each was not a feature:
+  - `P4.3.3` (Move 7): `DefaultExecutor` was constructed inside the bridge with
+    a nil `secrets.Redactor`, so MCP mode redacted by header name only and a
+    vault-sourced value echoed back inside a response **body** reached the model
+    intact.
+  - `P3.2.10` (Move 8): `StoreRetriever` existed and was gated, but nothing held
+    a `*store.Store`, so the 5xx explanation was unreachable from `pulse --mcp`.
+  - `P3.3a.9` (Move 9): the fuzzer had a tool, a runner and a gate, and nothing
+    handed the runner to a server.
+  Each was recorded honestly as NOT BUILT, which is right, but recording a
+  blocker three times is a signal that the blocker is structural. It was: the
+  bridge constructed its own dependencies, so the choice of vault was a property
+  of the protocol layer rather than of the application.
+- **Decision:**
+  - **`internal/app` is the one package that knows about every other one.** Every
+    other package declares what it needs as an interface and is handed it. The
+    design goal is not architectural fashion — it is what makes each subsystem
+    testable without booting SQLite, a keychain and an HTTP transport.
+  - **The layering inversion was paid for, not worked around.**
+    `internal/mcp` declared `mcp.Redactor`, a one-method interface, and stopped
+    importing `internal/secrets`. Naming the concrete type there would have made
+    the vault a property of the protocol layer; declaring the contract lets the
+    composition root decide what is installed and prove it satisfies the
+    interface. `(*Redactor).String` gained a **nil-receiver guard** for this —
+    a nil `*Redactor` means "no values registered", which is true, and without
+    the guard a typed nil stored in an interface field passes a `!= nil` check
+    and panics one line later. The compile-time assertion lives in `internal/app`
+    because that is the one package allowed to see both sides.
+  - **Construction returns `(*App, error)` and never a partial App.** Every
+    resource acquired on the way is released on the way out, so a caller cannot
+    use — or Close — something half-built. Gated by
+    `TestAppConstructionFailureLeaksNothing`: 11 open descriptors before and
+    after a failed construction.
+  - **`Close` cancels the context BEFORE releasing the store**, and is
+    idempotent. The ordering lets in-flight work observe the shutdown and unwind
+    through its own teardown path (Goal 1 §1.2.6) rather than having its database
+    handle pulled out from under it. Idempotence is not polish: a deferred
+    `Close` and an explicit one from a signal handler both run in any realistic
+    program, and a second `sql.DB.Close` returns an error the caller cannot
+    interpret.
+  - **The chain and the redactor are ONE vault.** A value resolved through the
+    chain is registered with the redactor, so it cannot then appear in a
+    response body, a diagnostic or a retrieved chunk. Two `Redactor`s would leave
+    a window where a value is known to the resolver and invisible to the
+    scrubber. The gate asserts the ROUND TRIP, because every individual field
+    being non-nil proves nothing about whether they are the same instance.
+  - **Fail closed at construction.** `MCPServer` refuses to serve without an
+    executor, a fuzz runner or a redactor; `IndexCorpus` refuses to index without
+    one. A server with no redactor still answers every request — it just answers
+    them with the user's tokens in the body. Failing at construction is the only
+    disposition where the mistake cannot ship unnoticed.
+  - **Degradations are reported, never hidden.** A missing keychain, an
+    unreadable `.env` and an unindexable corpus each degrade with a stated
+    reason while the app keeps serving. A headless developer machine has no
+    keychain, and failing to start there would make Pulse unusable for a large
+    fraction of the people who would use a local API workbench. What is
+    forbidden is starting and behaving as though the subsystem had loaded.
+  - **Secret exit codes come from the error CHAIN.** `app.SecretExitCode`
+    returns 3 for `secrets.ErrUnresolved` and 0 for everything else, and the
+    caller falls through to its generic path. It cannot delegate to
+    `secrets.ExitCode`, which maps EVERY error to a code and would make a disk
+    failure indistinguishable from a vault failure at the call site.
+  - **The CLI reads `PULSE_*` environment variables, not flags.** Every one is a
+    deployment detail an MCP client sets once; putting them on the command line
+    would invite an agent to vary them per call. An unparsable value is logged
+    and the default is used rather than ignored silently.
+  - **`mcp.Lock()` stays the first statement of the MCP path**, with `app.New`
+    after it. Folding the lock into a convenience constructor would look safe to
+    call late, which is how a boot log ends up on the JSON-RPC channel.
+  - **The bridge builds nothing.** `mcp.NewServerWithConfig` takes an
+    `Executor`, an optional `FuzzRunner`, an optional `Redactor` and register
+    options. A protocol layer that constructs its own dependencies cannot be
+    exercised without constructing all of them.
+- **Consequences — honest gaps, NOT claimed done:**
+  - **Five of six MCP tools remain unbuilt** (`list-collections`,
+    `list-requests`, `get-request`, `get-run`, `get-history`). The composition
+    root removed the *wiring* blocker; only the handlers remain.
+  - **Fuzz finding persistence and dedup are NOT built** (P3.3a.10). A root
+    seam does not implement a schema: no `findings` table, no
+    `sha256(status + canonical response prefix)` dedup, no `run_source='fuzz'`.
+  - **The streaming `fuzz-start`/`fuzz-next` loop is NOT built** (P3.3a.11).
+  - **Chunked client delivery is NOT built** (P4.3.4). It needs Phase 3's
+    `sync.Pool` recycle path, because a client-driven stream outlives a single
+    tool call.
+  - **`P4.1.3` mode immutability is still BLOCKED on Phase 3** — `internal/ui`
+    does not exist, so there is no second wiring to assert against.
+  - **`P3.2.5` incremental reindex and `P3.2.9` the 50k benchmark remain open**
+    from Move 8; this move did not touch them.
+  - **The TUI is still a stub that exits 1.** Goal 3's *MCP* half is bridged;
+    Goal 1's interactive half is not, and the binary's default mode is still the
+    unimplemented one.
+  - **Two mutations needed several attempts each, and the attempts are the
+    finding rather than noise to hide.** Redaction is enforced at TWO independent
+    layers (`engine.WithRedactor` in flight, `EngineExecutor.Redactor` on the
+    collected outcome) and removing EITHER ONE ALONE leaves every gate green —
+    M42 therefore disables both, and the script records why. M46's first form
+    gave the binder a different redactor and came back green for a real reason:
+    the error text arrives inside an already-scrubbed `Outcome.Body`. Both are
+    recorded inline rather than tidied into a clean-looking list.
+  - **One gate was measuring the wrong thing and was found by a mutation, not by
+    inspection.** `TestAppStoresNoSecretOnDisk` read only `pulse.db`; SQLite runs
+    in WAL mode, so a freshly written row has not been checkpointed into the main
+    file, and the gate stayed green against M48 with the secret in plain text one
+    file away. It now reads `-wal` and `-shm` too. The same gate was ALSO
+    indexing a `.js` corpus, which `rag` does not chunk — so it stored nothing
+    and proved nothing. Both faults were invisible because every assertion in it
+    was technically satisfied.
+- **Refs:** internal/app/app.go, mcp.go, app_test.go; internal/mcp/redactor.go,
+  server.go; internal/secrets/redact.go; cmd/pulse/main.go;
+  scripts/mutation-proof-app.sh (M42–M49); TASKS.md P4.1b.1–P4.1b.9, P3.2.10,
+  P3.3a.9, P3.3a.10, P4.3.3; ROADMAP.md §3.1.1.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

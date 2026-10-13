@@ -2,20 +2,27 @@
 // for humans and a headless MCP server for local AI agents (AGENTS.md §1,
 // ARCHITECTURE.md §2).
 //
-// Move 0 scope: mode routing, exit codes, and the MCP stdout guard only. The
-// TUI (ROADMAP.md Goal 3... Phase 3 of TASKS.md) and the MCP server
-// (ROADMAP.md Goal 3) are stubs that fail closed.
+// MCP mode is fully wired: the composition root in internal/app builds the
+// store, the resolver chain, the redactor, the Local RAG retriever and both
+// tools, and this file only chooses a mode and maps an outcome to an exit code.
+// The TUI (ROADMAP.md Goal 1; TASKS.md Phase 3.1) is still a stub that fails
+// closed.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"golang.org/x/term"
 
+	"pulse/internal/app"
 	"pulse/internal/mcp"
 )
 
@@ -53,6 +60,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse [flags]")
 		fmt.Fprintln(stderr, "       pulse mcp")
+		fmt.Fprintf(stderr, "\nmcp mode exposes: %s\n", describeTools())
+		fmt.Fprintln(stderr, "\nenvironment: PULSE_HOME, PULSE_ENV_FILE, PULSE_RAG_ROOT,")
+		fmt.Fprintln(stderr, "            PULSE_RAG_CONCURRENCY, PULSE_RUN_TIMEOUT,")
+		fmt.Fprintln(stderr, "            PULSE_STDOUT_AUDIT")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -88,9 +99,13 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	// Transport segregation (ROADMAP.md §3.1.1, AGENTS.md §3.3). The guard runs
-	// FIRST, before the MCP package or anything it imports is used: a package
-	// that captured os.Stdout at init has already missed the swap, and the audit
-	// tripwire is what catches that case.
+	// FIRST, before the App or anything it transitively imports is *used*: a
+	// package that captured os.Stdout at init has already missed the swap, and
+	// the audit tripwire is what catches that case.
+	//
+	// The ordering is the whole point. Lock is deliberately not tucked inside
+	// app.New: a convenience wrapper that looks safe to call late is how a boot
+	// log ends up on the JSON-RPC channel.
 	lock, err := mcp.Lock(os.Getenv("PULSE_STDOUT_AUDIT") == "1")
 	if err != nil {
 		fmt.Fprintf(stderr, "pulse: %v\n", err)
@@ -101,10 +116,86 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 	// Everything after this point that writes to stdout is a bug, and in audit
 	// mode it is a loud one. The JSON-RPC codec is handed lock.Real and nothing
 	// else is given it.
-	code, serveErr := mcp.ServeLocked(ctx, lock.Real, os.Stdin)
-	if serveErr != nil {
-		fmt.Fprintf(stderr, "pulse: mcp session failed: %v\n", serveErr)
-		return code
+	application, err := app.New(ctx, appConfig())
+	if err != nil {
+		// A construction failure is reported on stderr and mapped by KIND, not
+		// by string matching: a keychain failure is exit 3 everywhere it
+		// appears, however many layers deep it was wrapped (AGENTS.md §4.4.5).
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		if code := app.SecretExitCode(err); code != 0 {
+			return code
+		}
+		return exitFail
 	}
-	return code
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		}
+	}()
+
+	// Boot diagnostics are emitted BEFORE the session starts, and they go to
+	// stderr. They are also summarised rather than dumped: a DEGRADED line is
+	// something the agent's user needs to know, not something that belongs in
+	// the protocol stream.
+	for _, d := range application.Degradations {
+		fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
+	}
+
+	err = application.ServeMCP(ctx, os.Stdin, lock.Real)
+	switch {
+	case err == nil:
+		return exitOK
+	case errors.Is(err, context.Canceled), errors.Is(err, io.EOF):
+		return exitOK
+	default:
+		fmt.Fprintf(stderr, "pulse: mcp session failed: %v\n", err)
+		if code := app.SecretExitCode(err); code != 0 {
+			return code
+		}
+		return exitFail
+	}
+}
+
+// appConfig reads PULSE_* environment variables into a Config.
+//
+// Environment rather than flags: every one of these is a deployment detail
+// (where the data lives, which vault to use, what to index) that an MCP client
+// launching `pulse mcp` sets once, and putting them on the command line would
+// invite an agent to vary them per call. An unparsable value is reported rather
+// than ignored — a typo in PULSE_HOME silently writing the index somewhere
+// unexpected is worse than a refusal to start.
+func appConfig() app.Config {
+	cfg := app.Config{
+		Home:    os.Getenv("PULSE_HOME"),
+		EnvFile: os.Getenv("PULSE_ENV_FILE"),
+	}
+	if v := os.Getenv("PULSE_RAG_ROOT"); v != "" {
+		cfg.CorpusRoot = v
+	}
+	if v := os.Getenv("PULSE_RAG_CONCURRENCY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			mcp.Logf("PULSE_RAG_CONCURRENCY=%q is not a positive integer; "+
+				"the package default is used", v)
+		} else {
+			cfg.IndexConcurrency = n
+		}
+	}
+	if v := os.Getenv("PULSE_RUN_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			mcp.Logf("PULSE_RUN_TIMEOUT=%q is not a positive duration; "+
+				"the default is used", v)
+		} else {
+			cfg.RunTimeout = d
+		}
+	}
+	return cfg
+}
+
+// describeTools is used only by `--help`, and exists so the CLI and the MCP
+// registry cannot disagree about what Pulse offers: both read the same
+// constants.
+func describeTools() string {
+	return strings.Join([]string{mcp.ToolExecuteRequest, mcp.ToolExecuteFuzz}, ", ")
 }

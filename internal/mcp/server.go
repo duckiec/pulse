@@ -28,12 +28,47 @@ type Server struct {
 	mcp *mcpserver.MCPServer
 }
 
+// Config is the bridge's dependency set.
+//
+// Every field is INJECTED. The bridge constructs no store, no redactor, no
+// index and no transport, because a protocol layer that builds its own
+// dependencies cannot be exercised without building all of them — and a test
+// that has to construct the whole application to send one JSON-RPC message
+// tests the application, not the protocol.
+//
+// A nil optional field is a documented degradation, never a silent absence:
+// no FuzzRunner omits the fuzz tool from tools/list entirely (an agent that
+// cannot see a tool will not call it, which is honest), and no Redactor means
+// value scrubbing is off while header-name redaction still applies.
+type Config struct {
+	// Exec executes `execute_request`. Required.
+	Exec Executor
+	// FuzzRunner executes `execute_fuzz_run`. nil omits the tool.
+	FuzzRunner FuzzRunner
+	// Redactor scrubs agent-visible text. Optional; see the type's contract.
+	Redactor Redactor
+	// Options are shared register options, e.g. WithFailureBinder.
+	Options []Option
+}
+
 // NewServer builds an MCP server exposing the Pulse tools.
 //
 // exec is the only thing it knows about the domain: the bridge validates
 // arguments, dispatches, and formats, and never reaches past Executor into the
 // AST or the engine.
 func NewServer(exec Executor) (*Server, error) {
+	return NewServerWithConfig(Config{Exec: exec})
+}
+
+// NewServerWithConfig builds a server from an injected dependency set.
+//
+// This is the constructor the composition root uses. [NewServer] is the
+// single-tool convenience kept for tests and for the degraded boot path, where
+// there is no application to wire.
+func NewServerWithConfig(cfg Config) (*Server, error) {
+	if cfg.Exec == nil {
+		return nil, errors.New("mcp: Config.Exec is required")
+	}
 	srv := mcpserver.NewMCPServer(ServerName, ServerVersion,
 		// Advertise no sampling and no roots: Pulse executes requests, it does
 		// not call back into the agent. Claiming capabilities the bridge does
@@ -41,8 +76,13 @@ func NewServer(exec Executor) (*Server, error) {
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(), // an agent must not be able to crash the server
 	)
-	if err := RegisterTools(srv, exec); err != nil {
+	if err := RegisterTools(srv, cfg.Exec, cfg.Options...); err != nil {
 		return nil, err
+	}
+	if cfg.FuzzRunner != nil {
+		if err := RegisterFuzzTool(srv, cfg.FuzzRunner, cfg.Redactor, cfg.Options...); err != nil {
+			return nil, err
+		}
 	}
 	return &Server{mcp: srv}, nil
 }

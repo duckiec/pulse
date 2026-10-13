@@ -53,6 +53,11 @@ domain engine:
 
 ## 2. Dual-Mode Routing Logic
 
+> **Move 10 status.** `pulse mcp` builds the full composition root
+> (`internal/app`) and serves `execute_request` + `execute_fuzz_run` over
+> stdio. `pulse` with no arguments still routes to the TUI, which **does not
+> exist** and exits 1 with a diagnostic; that half of the matrix is unchanged.
+
 Mode is selected once at process start and is **immutable for the process lifetime**.
 The `internal/ui` and `internal/mcp` packages are never linked into a simultaneous
 runtime; they are the only two consumers of `internal/app`.
@@ -89,15 +94,26 @@ runtime; they are the only two consumers of `internal/app`.
 |---|---|---|---|
 | `cmd/pulse` | Flags, mode selection, wiring, exit codes | `app`, `ui`, `mcp`, `golang.org/x/term` | — (leaf wiring only) |
 | `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
-| `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport | `app` (not built); today `ast`, `engine`, `secrets` via `EngineExecutor` | `ui` |
+| `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport. **Constructs no dependencies** (Move 10) — everything is injected | `ast`, `engine`, `fuzz` | `ui`, `secrets`, `store` |
 | `internal/rag` | Codebase indexing: bounded walker, per-language chunking, structural embedder | stdlib only (`go/parser`) | everything internal; **`store` and `mcp` both depend on this layer's OUTPUT, not on it** |
 | `internal/fuzz` | OpenAPI subset reader (JSON + hand-rolled YAML), deterministic boundary matrix, GCRA rate limiter, TAP 13 emitter | stdlib only (`encoding/json`, `regexp`, `math/rand` seed) | everything internal; it builds payloads and never sends one |
-| `internal/app` | Shared services: run request, list collections, history queries, variable resolution | `ast`, `engine`, `store`, `secrets` | `ui`, `mcp` |
+| `internal/app` | **Composition root** (Move 10): the only package that names a concrete dependency for another package. Builds store, secrets chain + redactor, embedder, retriever, binder, executor, fuzz runner; owns lifecycle and context | `ast`, `engine`, `fuzz`, `mcp`, `rag`, `secrets`, `store` | `ui` |
 | `internal/engine` | `ProtocolEngine` executors (REST, SSE, gRPC), streaming, checksums, telemetry | `ast` (types) | `ui`, `mcp`, `store` |
 | `internal/ast` | Lexer, parser, zero-allocation AST, `iter.Seq` traversal | stdlib only | everything internal |
 | `internal/store` | SQLite schema, migrations, history persistence | stdlib + `modernc.org/sqlite` | everything internal |
 | `internal/secrets` | Keychain backends, ephemeral env, resolver chain, redaction | stdlib + sanctioned backends (§7) | everything internal |
 | `internal/devtools/importaudit` | Static, offline dependency + stdout-hygiene audit (dev tooling) | stdlib only | everything internal; never imported by shipped code |
+
+**The composition root is the only place a concrete dependency is chosen.**
+Before Move 10, `internal/mcp` constructed its own executor inside
+`DefaultExecutor`, which is why its `secrets.Redactor` was nil and why three
+separate moves recorded the same blocker without being able to fix it. The
+dependency arrows now point the other way: every package declares what it needs
+as an interface, and `internal/app` supplies it.
+
+**Move 10 added no dependency either.** The cost of the composition root was one
+sibling import REMOVED: `internal/mcp` declared `mcp.Redactor` (a one-method
+interface) and stopped importing `internal/secrets`.
 
 **Move 9 also added no dependency.** ROADMAP.md §3.3.1 names
 `github.com/getkin/kin-openapi` and §3.3 needs YAML, but both `gopkg.in/yaml.v2`
@@ -811,6 +827,101 @@ corpus emitted in map order differs on every run, which would make "it stopped
 happening" indistinguishable from "this run generated different inputs". The
 seed chooses only among values that are equally valid for the declared schema,
 so coverage of declared constraints never varies with it.
+
+---
+
+## 14. Composition Root (`internal/app`)
+
+### 14.1 Why it exists
+
+Every subsystem built in Moves 0–9 was gated and none of them could run. Three
+open items across three moves shared one root cause — nothing constructed
+anything:
+
+| Item | Symptom | Root cause |
+|---|---|---|
+| P4.3.3 (Move 7) | MCP mode redacted by header name only; a vault value in a response **body** reached the model | `DefaultExecutor` built the executor with a nil `secrets.Redactor` |
+| P3.2.10 (Move 8) | The 5xx explanation was unreachable from `pulse --mcp` | Nothing held a `*store.Store` |
+| P3.3a.9 (Move 9) | `execute_fuzz_run` existed and could not be called | Nothing held an `EngineFuzzRunner` |
+
+Recording a blocker three times is a signal that the blocker is structural.
+`internal/app` is the fix: the one package allowed to name a concrete dependency
+on another package's behalf.
+
+### 14.2 The wiring
+
+```
+                 ┌────────────────── internal/app ──────────────────┐
+  store.Open ──► │ Store  ──InitRAG──► rag_chunks / rag_fts       │
+                 │   │                                            │
+  env file ────► │ Chain ──┐                                       │
+                 │   │     ├──► ONE *secrets.Redactor instance     │
+                 │   └───► │      (resolve registers, scrub reads) │
+                 │          │                                      │
+  rag.NewHashingEmbedder ─► Embedder                             │
+                 │          │                                      │
+                 │ Retriever{SearchFn, EmbedFn} ──► FailureBinder│
+                 │          │                          │           │
+                 │ Executor{EngineExecutor, Redactor, Resolver}    │
+                 │ FuzzRunner{EngineFuzzRunner, Redactor}         │
+                 └──────────┬───────────────────────────────────────┘
+                            │ mcp.NewServerWithConfig
+                            ▼
+              execute_request        execute_fuzz_run
+```
+
+The single most important line in that diagram is the shared `Redactor`. A value
+resolved through `Chain` is **registered** with it; everything that leaves the
+process is **scrubbed** by it. Two redactors would leave a window where a value
+is known to the resolver and invisible to the scrubber — and every individual
+field would still be non-nil, so no structural check would catch it. The gate
+asserts the round trip for exactly that reason.
+
+### 14.3 Lifecycle
+
+```
+New(ctx, cfg) ──► (*App, error)      partial Apps never escape
+Close() ──► cancel ctx ──► store.Close()      idempotent
+```
+
+The order is load-bearing. Cancelling first lets in-flight work observe the
+shutdown and unwind through its own teardown path (Goal 1 §1.2.6) rather than
+having its SQLite handle pulled out from under it. Idempotence is not polish: a
+deferred `Close` and an explicit one from a signal handler both run in any
+realistic program.
+
+### 14.4 Configuration
+
+| Variable | Effect | Default |
+|---|---|---|
+| `PULSE_HOME` | data directory | `<user config dir>/pulse` |
+| `PULSE_ENV_FILE` | ephemeral `.env`, loaded in memory | none |
+| `PULSE_RAG_ROOT` | corpus to index at startup | none (no indexing) |
+| `PULSE_RAG_CONCURRENCY` | walker workers | package default |
+| `PULSE_RUN_TIMEOUT` | one request | 30s |
+| `PULSE_STDOUT_AUDIT` | `1` swaps stdout for the tripwire | off |
+
+Environment rather than flags: every one is a deployment detail an MCP client
+sets once, and flags would invite an agent to vary them per call.
+
+### 14.5 Fail-closed construction
+
+`MCPServer` refuses to serve without an executor, a fuzz runner or a redactor.
+This is not defensiveness for its own sake — a server with no redactor still
+answers every request, correctly formatted, just with the user's tokens in the
+body. Refusing at construction is the only state in which the mistake cannot
+ship unnoticed.
+
+### 14.6 Degradation, reported
+
+| Condition | Behaviour | Why not fatal |
+|---|---|---|
+| No OS keychain | variables resolve via `.env`, then fail closed | A headless developer machine has no keychain; failing to start there would make Pulse unusable for a large fraction of its users |
+| Driver without FTS5 | lexical leg degrades; vector leg answers | Local RAG is optional and already reports DEGRADED |
+| Unreadable `.env` | degradation recorded, env is empty | The order is keychain → `.env` → error, and a keychain-only user must still get a tool |
+| Corpus will not index | degradation recorded, empty index | An empty index is a correct answer ("no context"), not a broken feature |
+
+What is forbidden is booting and behaving as though the subsystem had loaded.
 
 ---
 

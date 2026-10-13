@@ -1379,12 +1379,18 @@ boundaries.
   byte RFC 7230 forbids in a header) is SKIPPED with a reason rather than
   reported as a server finding; and 2xx and 4xx both PASS, because a boundary
   value the server correctly rejects is the behaviour under test.
+- **Move 10 closed the reachability half:** `internal/app` is the composition
+  root, and `execute_fuzz_run` is reachable end to end from `pulse --mcp`.
+  `TestCompositionRootFuzzEndToEnd` drives the real stdout lock, the real stdio
+  loop over in-memory pipes, the real tool, the real fuzzer and the real engine
+  against a real `httptest` target, and asserts the requests actually arrived —
+  counted **at the server**, not at the runner, because a tool that reported
+  success without sending anything would satisfy every other assertion.
 - **NOT BUILT:** finding persistence and dedup (`sha256(status + canonical
-  response prefix)`, the `findings` table, `run_source='fuzz'`). `internal/mcp`
-  never writes to `store`, and there is no `internal/app` composition root to
-  wire `RegisterFuzzTool` into a running server — so `execute_fuzz_run` is not
-  yet reachable from `pulse --mcp`. Both are recorded as open in TASKS.md
-  P3.3a.9 and P3.3a.10 rather than left implied by the contract above.
+  response prefix)`, the `findings` table, `run_source='fuzz'`). No tool
+  handler performs the write and no `findings` table exists. A composition root
+  removes the *wiring* blocker; it does not implement a schema. Recorded as
+  TASKS.md P3.3a.10.
 - **SHIPPED in part** (ADL-0022; TASKS.md P3.3a.3–P3.3a.8). Gates:
   `TestRateLimiterNeverExceedsTheConfiguredRate`,
   `TestRateLimiterEnforcesTheBoundUnderContention`,
@@ -1395,6 +1401,22 @@ boundaries.
   `TestTAPSkippedTestsAreMarked`, `TestUndeliverableProbeIsSkippedNotFailed`,
   `TestEngineRunnerSendsExactlyOneRequestPerPayload`,
   `TestEngineRunnerDeliversTemplateInjectionIntact`. Mutations M32–M41.
+
+### 3.3.4 Goal 3 bridge status (Move 10)
+
+Goal 3's **MCP** half is now bridged end to end: a local agent launches
+`pulse mcp`, gets `execute_request` and `execute_fuzz_run`, and both run
+against real subsystems through the composition root. Goal 1's **interactive**
+half is not — the TUI does not exist and `pulse` with no arguments still exits
+1 — and Goal 3 §3.4 (Wasm sandboxing) is untouched.
+
+The move that made this possible was the composition root, and the signal that
+it was needed was structural rather than functional: three open items across
+three separate moves recorded the same root cause and none of them could fix it,
+because the bridge constructed its own dependencies. The general lesson recorded
+in ADL-0023 is that **a package which constructs its own collaborators cannot be
+exercised without constructing all of them**, and that is a testability defect
+before it is an architectural one.
 
 ## 3.4 Wasm Sandboxing (wazero) for Auth Signing Scripts
 

@@ -134,8 +134,14 @@ func (r *Redactor) Scrubbed() int64 {
 // String returns s with every registered secret replaced.
 //
 // Secrets shorter than 4 bytes are ignored so ordinary text is not mangled.
+//
+// A nil receiver returns s unchanged. That is not defensive padding: a nil
+// *Redactor means "no secrets are registered", which is exactly true, and the
+// method set is satisfied by a pointer. It also makes the value safe to store
+// in an interface field, where a typed nil is indistinguishable from a nil
+// interface and would otherwise pass a `!= nil` guard and panic one line later.
 func (r *Redactor) String(s string) string {
-	if s == "" {
+	if r == nil || s == "" {
 		return s
 	}
 	r.mu.RLock()

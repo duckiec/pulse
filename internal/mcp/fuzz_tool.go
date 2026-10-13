@@ -15,7 +15,6 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"pulse/internal/fuzz"
-	"pulse/internal/secrets"
 )
 
 // ToolExecuteFuzz is the fuzzing tool's name.
@@ -232,7 +231,7 @@ type FuzzOutcome struct {
 // Every request passes the limiter BEFORE it is dispatched. The order matters:
 // acquiring the slot first means the rate bound holds for the requests actually
 // sent, rather than for the requests actually started.
-func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red *secrets.Redactor) (*FuzzOutcome, error) {
+func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red Redactor) (*FuzzOutcome, error) {
 	opts, err := ValidateFuzzOptions(opts)
 	if err != nil {
 		return nil, err
@@ -494,7 +493,7 @@ func fuzzRenderJSON(v any) string {
 // It is separate from RegisterTools because it has an extra dependency — a
 // runner — and a caller serving only `execute_request` should not be forced to
 // supply one.
-func RegisterFuzzTool(srv *mcpserver.MCPServer, runner FuzzRunner, red *secrets.Redactor, opts ...Option) error {
+func RegisterFuzzTool(srv *mcpserver.MCPServer, runner FuzzRunner, red Redactor, opts ...Option) error {
 	if srv == nil {
 		return errors.New("mcp: nil server")
 	}

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"pulse/internal/secrets"
 )
 
 // This file implements ROADMAP.md §3.2.4: when an API answers 5xx, attach the
@@ -91,8 +89,11 @@ type FailureBinder struct {
 	// spirit: a stack trace routinely quotes the request that triggered it,
 	// and a request can carry a token in a query string. Defaults to a
 	// pass-through redactor if nil, which is correct for a test and wrong for
-	// production — so DefaultBinder always supplies a real one.
-	Redact *secrets.Redactor
+	// production — so the composition root always supplies a real one.
+	//
+	// The type is the bridge's own one-method [Redactor], not the concrete
+	// vault: this layer must not know which redactor is installed.
+	Redact Redactor
 }
 
 // bind5xx reports whether a status is in the 5xx range and therefore eligible
