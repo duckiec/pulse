@@ -1748,6 +1748,51 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0028 — `pulse test` halts gracefully on SIGINT with a partial report and exit 130
+
+- **Date:** 2026-10-13
+- **Status:** ACCEPTED
+- **Context:** Move 12 returned `(nil, context.Canceled)` when a test run was
+  cancelled: the completed work was dropped, the CLI could only report a bare
+  error, and an interrupted run was indistinguishable from a failure.
+  ROADMAP.md §4.1.4 requires the plan tail before exit 130, and HANDOFF.md
+  §4.3 forbids testing it with real signals.
+- **Decision:**
+  - `cmd/pulse` wraps the test path in `signal.NotifyContext(os.Interrupt)`
+    — a bare stdlib call with no branching logic, so it carries no gate of
+    its own; the cancellation contract is gated injectably in the runner,
+    which already takes a context.
+  - `engine.TestRunner.Run` treats a dispatch-bailed worker as a halted
+    queue slot, not an error: it collects the completed entries, sets
+    `TestReport.Interrupted`, and exits `ExitInterrupted` (130). Interruption
+    outranks failures and `--strict-blocked` in both the runner and
+    `App.RunTest`, because escalating it would conflate "the user stopped
+    the run" with "a test failed".
+  - The tail declares what ran: TAP plan and JSON counts cover the completed
+    entries only, so no consumer hangs or is lied to. Parse failures stay
+    fatal with exit 2 ahead of all of this.
+  - The old `TestACancelledRunStopsPromptly` assertion (nil report +
+    `context.Canceled`) tested the previous contract and was rewritten to
+    the partial-report one — promptness and queue-drain assertions kept.
+  - Mutation pool advances to M71 (130 degraded to 1) and M72 (queue
+    ignores cancellation), proven in `scripts/mutation-proof-sigint.sh` with
+    cmp-verified restore. `ARCHITECTURE.md` §16.4 updated (JSON/silent and
+    the SIGINT tail are no longer "not built"); no topology moved.
+- **Consequences:**
+  - Ctrl+C during `pulse test` now yields a valid partial TAP/JSON document
+    and exit 130; `--silent` stays silent at 130. A second SIGINT does not
+    force-kill (the context is already cancelled) — accepted, not gated.
+  - Remaining Move 12 gaps: `--strict-blocked` skip-source design call,
+    PVLT2 recipient model before vault resolution, then P4.1c.9.
+- **Refs:** internal/engine/test_runner.go (`ExitInterrupted`, `Interrupted`),
+  test_runner_test.go (SIGINT/BailOut gates, rewritten promptness gate);
+  internal/app/test.go (130 precedence), test_test.go (end-to-end 130 +
+  partial-formatter safety); cmd/pulse/main.go (NotifyContext);
+  scripts/mutation-proof-sigint.sh (M71–M72); TASKS.md P4.1c.11;
+  ARCHITECTURE.md §16.4; ROADMAP.md §4.1.4 (contract now met).
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

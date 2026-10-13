@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -139,6 +140,14 @@ func runTest(ctx context.Context, args []string, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	// SIGINT cancels this context: the runner halts its queue, the partial
+	// report renders, and the run exits 130 (ROADMAP.md §4.1.4). Deliberately
+	// the stdlib call with no logic of its own — there is nothing to
+	// unit-test here that would not mean sending a real signal, which is
+	// flaky on Windows and CI; the cancellation contract is gated injectably
+	// in the runner (TestSIGINTFlushesTheCompletedPointsAndExitsOneThirty).
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
 	// An unknown format is a usage error: halt BEFORE any test executes so a
 	// typo cannot report a green run.
 	format, err := app.ParseTestFormat(*formatFlag)

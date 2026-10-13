@@ -483,6 +483,102 @@ func TestJSONRedactsSecrets(t *testing.T) {
 	}
 }
 
+// TestInterruptedRunExitsOneThirtyAndRendersPartialDocuments drives a SIGINT
+// through the whole composition-root path: the runner halts, the exit stays
+// 130 (never escalated, never degraded to 1), and BOTH formatters render the
+// partial entries without panicking and without overpromising.
+//
+// The context is cancelled explicitly mid-run — the same cancellation
+// signal.NotifyContext delivers on SIGINT in production. No real signal is
+// sent; a gate that raised one would be flaky on Windows and CI.
+func TestInterruptedRunExitsOneThirtyAndRendersPartialDocuments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	files := map[string]string{}
+	for i := 0; i < 6; i++ {
+		files[fmt.Sprintf("i%02d.http", i)] = fmt.Sprintf(
+			"# @name i\n# @assert status == 200\nGET %s/i HTTP/1.1\n\n###\n", srv.URL)
+	}
+	dir := dirWith(t, files)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	a := newTestApp(t)
+	res, err := a.RunTest(ctx, dir, 2, 10*time.Second, false)
+	if err != nil {
+		t.Fatalf("RunTest: %v", err)
+	}
+	if !res.Report.Interrupted {
+		t.Error("an interrupted run did not set Interrupted")
+	}
+	if res.Exit != 130 {
+		t.Errorf("an interrupted run exited %d, want 130", res.Exit)
+	}
+	// TAP tail: exactly one plan, and it promises what ran.
+	var plan string
+	var results int
+	for _, l := range strings.Split(res.TAP, "\n") {
+		switch {
+		case strings.HasPrefix(l, "1.."):
+			plan = l
+		case strings.HasPrefix(l, "ok "), strings.HasPrefix(l, "not ok "):
+			results++
+		}
+	}
+	if plan != fmt.Sprintf("1..%d", res.Report.Total) {
+		t.Errorf("TAP plan %q does not promise the %d reported points", plan, res.Report.Total)
+	}
+	if results != res.Report.Total {
+		t.Errorf("%d TAP result lines for %d reported points", results, res.Report.Total)
+	}
+	// JSON tail: one object whose counts are the report's.
+	var doc struct {
+		Total   int `json:"total"`
+		Passed  int `json:"passed"`
+		Failed  int `json:"failed"`
+		Skipped int `json:"skipped"`
+		Exit    int `json:"exit"`
+		Tests   []struct {
+			OK bool `json:"ok"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal([]byte(res.JSON), &doc); err != nil {
+		t.Fatalf("the partial JSON document does not parse: %v:\n%s", err, res.JSON)
+	}
+	if doc.Total != res.Report.Total || doc.Exit != 130 || len(doc.Tests) != doc.Total {
+		t.Errorf("partial JSON(total=%d exit=%d tests=%d) disagrees with the report(total=%d)",
+			doc.Total, doc.Exit, len(doc.Tests), res.Report.Total)
+	}
+	// Silence still silences, and still exits 130: a fresh run cancelled
+	// mid-flight through the silent CLI seam. (Reusing the dead context
+	// would race slot-grabs against the already-fired cancellation instead
+	// of exercising the mid-run halt.)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel2()
+	}()
+	var out bytes.Buffer
+	code, err := newTestApp(t).TestDirEx(ctx2, dir, &out, 2, 10*time.Second, false, app.TestFormatTAP, true)
+	if err != nil {
+		t.Fatalf("TestDirEx(silent): %v", err)
+	}
+	if code != 130 {
+		t.Errorf("silent interrupted run exited %d, want 130", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("silent interrupted run wrote %d bytes, want zero", out.Len())
+	}
+}
+
 // TestVaultPathsAndRoundTripOnDisk proves the CLI-facing path shapes and the
 // disk round trip, through the App rather than through the secrets package.
 func TestVaultPathsAndRoundTripOnDisk(t *testing.T) {

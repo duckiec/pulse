@@ -37,6 +37,7 @@ import (
 //	1  any assertion failed, or a request errored
 //	2  usage or PARSE error (a malformed .http file or a malformed assertion)
 //	3  secret-resolution failure
+//	130  the run was halted by context cancellation (SIGINT)
 //
 // There is no exit 0 unless every test point is ok, and there is no case in
 // which a failed assertion yields anything but 1. The mapping is a pure
@@ -53,6 +54,9 @@ const (
 	ExitUsage = 2
 	// ExitSecret is the secret-resolution exit.
 	ExitSecret = 3
+	// ExitInterrupted is the cancellation exit (SIGINT): the run halted
+	// mid-collection and the report holds what actually ran.
+	ExitInterrupted = 130
 )
 
 // Errors.
@@ -181,6 +185,12 @@ type TestReport struct {
 	// makes the run exit 2 regardless of any assertion that did run.
 	parseFailed bool
 
+	// Interrupted is set when the run halted on context cancellation
+	// (SIGINT). Entries holds the test points that actually ran — the TAP
+	// plan and the JSON counts describe THEM, not the original file set —
+	// and ExitCode is 130 regardless of any failure among them.
+	Interrupted bool
+
 	// ExitCode is the process exit this run yields.
 	ExitCode int
 	// Elapsed is the wall-clock duration of the whole run.
@@ -297,6 +307,10 @@ type TestRunner struct {
 
 // Run walks files, executes them and returns a report.
 //
+// Context cancellation (SIGINT) halts the queue: workers that never
+// dispatched contribute nothing, in-flight requests abort, and the returned
+// report holds what actually ran with Interrupted set and exit 130.
+//
 // A parse failure in any file is fatal for the whole run and yields exit 2: the
 // collection is broken, and reporting one file's results as "passing" while
 // another could not be read would be a green facade (AGENTS.md §4.5).
@@ -342,6 +356,7 @@ func (r *TestRunner) Run(ctx context.Context, files []string, cfg TestConfig, re
 	}
 	wg.Wait()
 
+	interrupted := false
 	for _, res := range results {
 		if res.err != nil {
 			// A parse failure fatal to the run: exit 2, no report.
@@ -351,8 +366,14 @@ func (r *TestRunner) Run(ctx context.Context, files []string, cfg TestConfig, re
 				report.ExitCode = ExitUsage
 				return report, res.err
 			}
+			// A worker that never dispatched because the context died
+			// contributes no entries: the queue halted, and what ran is
+			// what the report holds. This is the SIGINT path — it is
+			// recorded, not returned, so the caller gets the partial
+			// report instead of a bare context.Canceled.
 			if errors.Is(res.err, context.Canceled) {
-				return nil, res.err
+				interrupted = true
+				continue
 			}
 			// A request-level failure is recorded, not fatal.
 		}
@@ -370,7 +391,17 @@ func (r *TestRunner) Run(ctx context.Context, files []string, cfg TestConfig, re
 
 	report.summarize()
 	report.Elapsed = time.Since(start)
-	report.ExitCode = ExitCodeFor(report)
+	// Interruption outranks every other mapping: a run halted by SIGINT
+	// exits 130 even when the completed points include failures (which
+	// alone would read as 1) or skips (which --strict-blocked would
+	// escalate). Conflating "the user stopped the run" with "a test
+	// failed" sends the operator in the wrong direction.
+	if interrupted {
+		report.Interrupted = true
+		report.ExitCode = ExitInterrupted
+	} else {
+		report.ExitCode = ExitCodeFor(report)
+	}
 	return report, nil
 }
 

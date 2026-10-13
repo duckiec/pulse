@@ -1098,8 +1098,9 @@ allocated itself — which is also why `vault encrypt` REMOVES the plaintext fil
 
 The recipient model (X25519 + HKDF + Ed25519, §4.3.1) is not built: one key, one
 container, no recipient list, so rotation means "change the key" rather than
-"re-wrap for a new recipient set". No `*.vault` resolution at request time. No
-JSON or silent output formats, and no SIGINT plan tail. The three real keychain
+"re-wrap for a new recipient set". No `*.vault` resolution at request time.
+`pulse test --format json` / `--silent` (ADL-0027) and the SIGINT plan tail
+with exit 130 (ADL-0028) are built. The three real keychain
 write backends (darwin `security`, windows `CredWriteW`, linux Secret Service)
 compile on every cross-compile target and are BLOCKED in this environment: no
 darwin or windows host, and no Secret Service daemon in WSL.

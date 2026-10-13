@@ -104,7 +104,10 @@ func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout ti
 	if err != nil && report == nil {
 		return nil, err
 	}
-	if strictBlocked && report.Skipped > 0 {
+	// An interrupted run keeps its 130: --strict-blocked must not rewrite
+	// what SIGINT concluded. Escalating an interrupted run to 1 would
+	// conflate "the user stopped the run" with "a test failed".
+	if !report.Interrupted && strictBlocked && report.Skipped > 0 {
 		// Opt-in escalation. The skipped entries stay in the document, so the
 		// reason remains visible even when the run is failed.
 		report.ExitCode = engine.ExitFailed

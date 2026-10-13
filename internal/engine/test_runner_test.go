@@ -570,8 +570,14 @@ func statusServer(status int) (func(), string) {
 // parallelism 2 there are ALWAYS four workers still queued on the semaphore
 // when the context dies. That is the state the gate needs: the first draft
 // cancelled after 2ms against a handler that answered in 1ms, the whole
-// collection finished in 4ms, and the gate asserted `context.Canceled` on a run
-// that had completed successfully — a flake in the TEST, not the runner.
+// collection finished in 4ms, and the gate asserted on a run that had
+// completed successfully — a flake in the TEST, not the runner.
+//
+// Since Issue 3 the contract is a PARTIAL report, not a bare error: the run
+// returns what actually ran with Interrupted set and exit 130. The old
+// assertion (`errors.Is(err, context.Canceled)` on a nil report) tested the
+// previous contract and was rewritten, not weakened — every property it
+// checked (prompt unwind, queue drain) is still asserted below.
 func TestACancelledRunStopsPromptly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
@@ -596,13 +602,22 @@ func TestACancelledRunStopsPromptly(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err = newTestRunner().Run(ctx, files,
+	report, err := newTestRunner().Run(ctx, files,
 		engine.TestConfig{MaxParallel: 2, Timeout: 10 * time.Second},
 		&recordingReporter{})
 	elapsed := time.Since(start)
 
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("a cancelled run returned %v, want context.Canceled", err)
+	if err != nil {
+		t.Errorf("a cancelled run returned err %v; cancellation is reported IN the report, not as an error", err)
+	}
+	if report == nil {
+		t.Fatal("a cancelled run returned a nil report; the partial results are the whole point")
+	}
+	if !report.Interrupted {
+		t.Error("a cancelled run did not set Interrupted")
+	}
+	if report.ExitCode != engine.ExitInterrupted {
+		t.Errorf("a cancelled run exited %d, want %d", report.ExitCode, engine.ExitInterrupted)
 	}
 	// The run must stop at the cancellation, not run the whole collection: six
 	// requests at 50ms each with parallelism 2 is 150ms, so unwinding in well
@@ -611,7 +626,120 @@ func TestACancelledRunStopsPromptly(t *testing.T) {
 		t.Errorf("a cancelled run took %v; it ran the whole collection rather "+
 			"than unwinding at the cancellation", elapsed)
 	}
-	t.Logf("cancelled mid-run and unwound in %v", elapsed.Round(time.Millisecond))
+	t.Logf("cancelled mid-run and unwound in %v with %d of 6 points reported",
+		elapsed.Round(time.Millisecond), report.Total)
+}
+
+// TestSIGINTFlushesTheCompletedPointsAndExitsOneThirty is the Issue 3 gate:
+// no real signal is ever sent. The context IS the signal source —
+// signal.NotifyContext cancels it on SIGINT in production, and here the test
+// cancels it explicitly mid-run. That injectability is the design, not a
+// shortcut: a gate that raised a real SIGINT would be flaky on Windows and CI
+// (HANDOFF.md §4.3).
+//
+// Three independent tripwires, each catching a different break:
+//
+//   - Interrupted must be set (M72 clears it by running everything anyway);
+//   - the exit must be exactly 130 (M71 degrades it to 1);
+//   - the server must have seen FEWER requests than files (the queue halted;
+//     in-flight requests abort client-side, so only dispatched ones arrive).
+func TestSIGINTFlushesTheCompletedPointsAndExitsOneThirty(t *testing.T) {
+	var served atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	const files = 6
+	dir := t.TempDir()
+	for i := 0; i < files; i++ {
+		writeFile(t, dir, fmt.Sprintf("s%02d.http", i), fmt.Sprintf(
+			"# @name s\n# @assert status == 200\nGET %s/s HTTP/1.1\n\n###\n", srv.URL))
+	}
+	paths, err := engine.Files(dir)
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	rep := &recordingReporter{}
+	report, err := newTestRunner().Run(ctx, paths,
+		engine.TestConfig{MaxParallel: 2, Timeout: 10 * time.Second}, rep)
+	if err != nil {
+		t.Fatalf("a SIGINT run returned err %v; the partial report carries the outcome", err)
+	}
+	if report == nil {
+		t.Fatal("a SIGINT run returned a nil report")
+	}
+	if !report.Interrupted {
+		t.Error("a SIGINT run did not set Interrupted")
+	}
+	if report.ExitCode != 130 {
+		t.Errorf("a SIGINT run exited %d, want 130: indistinguishable from a test failure", report.ExitCode)
+	}
+	if n := served.Load(); n >= files {
+		t.Errorf("the server saw %d requests for %d files; the queue did not halt on cancellation", n, files)
+	}
+	if report.Total == 0 {
+		t.Error("a SIGINT run reported zero points; the completed work was dropped instead of flushed")
+	}
+	if len(rep.entries) != report.Total {
+		t.Errorf("the reporter received %d points for a %d-point report; the tail must declare what ran",
+			len(rep.entries), report.Total)
+	}
+	t.Logf("SIGINT flushed %d of %d points from %d server hits, exit 130",
+		report.Total, files, served.Load())
+}
+
+// TestTheBailOutTailNeverOverpromises pins the partial-report rendering
+// contract both formatters depend on: the counts describe the ENTRIES, never
+// the original file set. A plan that promised the undispatched points would
+// hang a TAP consumer; a JSON total that counted them would lie to a dashboard.
+func TestTheBailOutTailNeverOverpromises(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	for i := 0; i < 6; i++ {
+		writeFile(t, dir, fmt.Sprintf("b%02d.http", i), fmt.Sprintf(
+			"# @name b\n# @assert status == 200\n# @assert status in 200..299\nGET %s/b HTTP/1.1\n\n###\n", srv.URL))
+	}
+	paths, err := engine.Files(dir)
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	report, err := newTestRunner().Run(ctx, paths,
+		engine.TestConfig{MaxParallel: 2, Timeout: 10 * time.Second},
+		&recordingReporter{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := len(report.Entries); got != report.Total {
+		t.Errorf("%d entries for a %d-point report; the tail must be exactly what ran", got, report.Total)
+	}
+	if got := report.Passed + report.Failed + report.Skipped; got != report.Total {
+		t.Errorf("passed+failed+skipped = %d for a %d-point report", got, report.Total)
+	}
+	if report.Total >= 12 {
+		t.Errorf("total = %d, want fewer than the 12 undisrupted points; undispatched work leaked in", report.Total)
+	}
 }
 
 // ---- TAP output shape -----------------------------------------------------
