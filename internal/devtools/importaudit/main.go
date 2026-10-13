@@ -36,6 +36,15 @@ var permanentlyBanned = []string{
 // corrupts the JSON-RPC wire (AGENTS.md §3.3).
 var stdoutHygieneDirs = []string{"internal/mcp", "internal/app"}
 
+// stdoutHygieneExemptFiles are files that legitimately manipulate os.Stdout
+// as part of the isolation boundary itself. The guard in stdio.go is the ONE
+// place that swaps os.Stdout; without it, every other file in the package
+// would be free to write to the wire. The exemption is narrow: it covers
+// only the guard file, and only the os.Stdout references within it.
+var stdoutHygieneExemptFiles = map[string]bool{
+	"internal/mcp/stdio.go": true,
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "importaudit: FAIL\n%v\n", err)
@@ -107,8 +116,21 @@ func run() error {
 			}
 		}
 		// 3. stdout hygiene in MCP-reachable packages.
+		//
+		// Test files are exempt, and the exemption is not a convenience: a
+		// test that proves the isolation boundary holds MUST be able to swap
+		// os.Stdout for a pipe and observe what crossed it. Test files are
+		// also not linked into the shipped binary, so a stray print in one
+		// cannot corrupt a client's wire. Holding tests to the production
+		// rule would forbid writing the gate at all.
+		if strings.HasSuffix(rel, "_test.go") {
+			continue
+		}
 		for _, dir := range stdoutHygieneDirs {
 			if strings.HasPrefix(rel, dir+string(filepath.Separator)) {
+				if stdoutHygieneExemptFiles[rel] {
+					continue // the guard file is the boundary itself
+				}
 				off, err := stdoutWrites(path)
 				if err != nil {
 					return fmt.Errorf("parse %s: %w", rel, err)

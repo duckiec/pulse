@@ -268,6 +268,17 @@ func TestReconnectReplaysLastEventID(t *testing.T) {
 	for conns.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Wait for the resumed payload itself, not merely for the second
+	// connection: a frame is dispatched on the next frame tick, so asserting
+	// immediately after the server logs connection 2 races the dispatcher.
+	//
+	// The wait MUST come before Close(): closing m.stop makes the pump return
+	// early, and a frame still sitting in the buffer is dropped rather than
+	// dispatched. Closing first is what made this gate flaky.
+	bodyDeadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(sink.text(), "resumed-after-evt-2") && time.Now().Before(bodyDeadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	_ = st.Close()
 
 	if n := conns.Load(); n < 2 {
@@ -282,14 +293,6 @@ func TestReconnectReplaysLastEventID(t *testing.T) {
 	}
 	if a := attempts.Load(); a < 1 {
 		t.Errorf("OnReconnect fired %d times, want >= 1", a)
-	}
-	// Wait for the resumed payload itself, not merely for the second
-	// connection: a frame is dispatched on the next frame tick, so asserting
-	// immediately after the server logs connection 2 races the dispatcher. This
-	// is what made the gate flaky under -count=2.
-	bodyDeadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(sink.text(), "resumed-after-evt-2") && time.Now().Before(bodyDeadline) {
-		time.Sleep(5 * time.Millisecond)
 	}
 	if body := sink.text(); !strings.Contains(body, "resumed-after-evt-2") {
 		t.Errorf("reconnect did not replay from the resume point:\n%s", body)

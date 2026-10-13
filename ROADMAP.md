@@ -909,23 +909,36 @@ boundaries.
 - **Prereq:** AGENTS.md §3.3; `mark3labs/mcp-go` (pure Go, §0.4); the dual-mode
   router (ARCHITECTURE.md §2 precedence; the stdout guard itself is implemented here
   first because it is security-critical at boot).
-- **Contract:**
+- **Contract (shipped, MEMORY.md ADL-0020):**
   ```go
-  // In cmd/pulse, MCP mode:
-  realStdout := os.Stdout          // the ONLY writer, handed to the JSON-RPC codec
-  os.Stdout = os.NewFile(^uintptr(0), os.DevNull) // stray fmt.Print* lands in /dev/null
-  // PULSE_STDOUT_AUDIT=1 (debug builds): replace /dev/null with a writer that panics,
-  // converting any hygiene violation into a loud, test-detectable failure.
-  srv := server.NewMCPServer("pulse", version)
-  server.NewStdioServer(srv).Listen(ctx, os.Stdin, realStdout)
+  // In cmd/pulse, MCP mode -- the guard runs FIRST, before the mcp package is used:
+  lock, err := mcp.Lock(audit bool) // audit == (os.Getenv("PULSE_STDOUT_AUDIT") == "1")
+  defer lock.Restore()
+  // lock.Real is os.Stdout captured before the swap; os.Stdout now points at
+  // os.DevNull (production) or at a frame-judging Tripwire (audit). In audit mode
+  // any complete line that is not a valid JSON-RPC 2.0 frame panics to stderr,
+  // converting a hygiene violation into a loud, test-detectable failure.
+  code, err := mcp.ServeLocked(ctx, lock.Real, os.Stdin)
   ```
+  The API is split rather than a single `NewStdioServer(...).Listen(...)` because a
+  helper that captures `os.Stdout` internally is itself the indirection the guard
+  exists to remove; the codec is handed the captured channel and nothing else.
+  `ServeLocked` returns `(exitCode, err)`, and both clean stdin EOF and
+  `context.Canceled` map to exit 0.
 - **Challenge:** Dependencies and transitive packages may capture `os.Stdout` before
   the swap; the guard therefore runs **first** in `main`, and the audit-mode writer
   catches late captures. The JSON-RPC codec is the only component holding
   `realStdout`.
 - **Verify:** G-hyg CI analyzer: zero `os.Stdout`/`fmt.Print*` references under
   `internal/mcp` and `internal/app` MCP paths; a planted-stray-write regression test
-  fails the build; audit-mode test panics as designed.
+  fails the build; audit-mode test panics as designed. **Shipped**, with two narrow
+  analyzer exemptions recorded in ADL-0020: the guard file itself
+  (`internal/mcp/stdio.go` -- it *is* the boundary) and `_test.go` files (a test
+  proving isolation must be able to swap `os.Stdout` for a pipe and observe it; test
+  files are not linked into the shipped binary). Gates:
+  `TestMCPStdoutIsolation`, `TestMCPStdoutAuditTripwire`,
+  `TestMCPDiagnosticsNeverReachStdout`, `TestStdioLoopEmitsOnlyJSONRPC`,
+  `TestStdoutGuardTripsOnRoguePrint`.
 
 ### 3.1.2 Routing precedence and mode immutability
 
@@ -940,6 +953,12 @@ boundaries.
   is the guard. Agents are documented to invoke `pulse mcp`.
 - **Verify:** Matrix test over (flag × isatty) asserting mode and exit codes;
   stdout byte-content assertion in MCP-mode boot (empty before handshake).
+  **Partially shipped.** Routing precedence, the non-TTY fail-closed branch, and the
+  MCP-boot stdout assertion are implemented and gated
+  (`TestRunModeMatrix`, `TestMCPBootLeavesStdoutEmpty`). The architecture test that
+  asserts `internal/ui` and `internal/mcp` are never both wired is **NOT built** --
+  `internal/ui` does not exist yet, so there is nothing to assert against. That item
+  stays unchecked in TASKS.md; it cannot honestly be ticked until Phase 3 lands.
 
 ### 3.1.3 Tool registry and payload validation
 
@@ -953,12 +972,16 @@ boundaries.
   }
   type ToolHandler func(ctx context.Context, req CallToolRequest) (*CallToolResult, error)
 
-  srv.AddTool(mcp.NewTool("run-request",
-      mcp.WithDescription("Execute an .http request; streams 5xx-heavy payload summaries"),
-      mcp.WithString("ref", mcp.Required(), mcp.Description("file::name")),
+  // Shipped as "execute_request", NOT the illustrative "run-request" below.
+  // Naming is snake_case per MCP ecosystem convention; see MEMORY.md ADL-0020.
+  srv.AddTool(mcp.NewTool("execute_request",
+      mcp.WithDescription("Execute a .http request from a raw payload or a file path"),
+      mcp.WithString("payload"),  // raw .http source, XOR
+      mcp.WithString("path"),     // path to a .http file,  XOR
+      mcp.WithNumber("index"),    // which request in the document
       mcp.WithString("env"),
       mcp.WithNumber("timeout_ms")),
-      runRequestHandler)
+      executeRequestHandler)
 
   // every CallToolRequest args validated against the tool's JSON Schema BEFORE dispatch;
   // validation failure → JSON-RPC error -32602 (invalid params); no partial dispatch.
@@ -969,6 +992,23 @@ boundaries.
   `RedactString`/`RedactHeaders` (Goal 1 §1.3.3) before serialization.
 - **Verify:** Table-driven invalid-payload tests per tool asserting -32602 and zero
   handler invocation; redaction test on each tool result; G-hyg on the result path.
+  **Shipped for `execute_request`.** Concretely: the schema is compiled once at
+  registration; unknown keys are rejected (`additionalProperties: false`) because a
+  silently-ignored field is how an agent concludes its request was honoured;
+  coercion (`index`/`timeout_ms` integer-or-string, `include_body`
+  boolean-or-string) is per-field, opt-in, and **recorded** in a `warnings` list the
+  caller reads, because coercion that is not reported is worse than a rejection;
+  "exactly one of `payload`/`path`" is enforced semantically, not in the schema,
+  because JSON Schema cannot express two mutually-exclusive optional keys without
+  leaving one of the three cases unstated to the client.
+  Gates: `TestInvalidArgumentsAreStructuredErrors` (6 cases),
+  `TestCoercionIsRecordedNotSilent`, `TestProtocolGateParsesExecutesAndReturns`, `TestRedactionChokepointRunsOnResults`.
+  **Open:** the redaction chokepoint is implemented and tested in
+  `collectingSink.outcome`, but `DefaultExecutor` is built with a `nil`
+  `secrets.Redactor` because no composition root (`internal/app`) exists yet -- so in
+  MCP mode today redaction is by header name only and vault-sourced values are not
+  yet scrubbed from bodies. Recorded as an open TASKS.md item; **not** counted as
+  done.
 
 ### 3.1.4 Lifecycle, cancellation, and error mapping
 
@@ -983,7 +1023,23 @@ boundaries.
   the per-call context into `Engine.Run` and awaits `RunHandle.done`.
 - **Verify:** Lifecycle conformance test against a scripted client (initialize,
   call, cancel mid-stream, shutdown, exit 0); error-code table test; cancellation
-  latency assertion.
+  latency assertion. **Shipped.** Gates: `TestProtocolGateHonoursTheHandshake`,
+  `TestCancellationStopsTheToolCall`, `TestStdioLoopEmitsOnlyJSONRPC`, and the
+  `-32002`/`-32003`/`-32602` structured-error cases. Domain errors occupy the
+  reserved `-320xx` block exactly as specified (parse `-32002`, unresolved secret
+  `-32003`, timeout `-32004`, transport `-32005`, unsupported `-32006`), and each
+  carries a stable `category` string in `data` so an agent can branch on the code
+  rather than on English prose; `ProtocolError.payload()` **includes the cause**, so
+  a schema failure surfaces the parser's `:1:1:` line:col and is actionable rather
+  than merely categorical.
+  **One judgement recorded explicitly:** a failure with no HTTP status (transport
+  death, timeout, unresolved secret) is reported as the error itself, never as a
+  synthesised `status: 0` outcome, with any partial body attached to `data`.
+  Presenting "no response" as "a response whose status is zero" produces a
+  plausible-looking wrong answer that an agent will reason about.
+  **Test-harness constraint (documented in the test, not a product limitation):**
+  mcp-go's stdio loop cancels the request context on stdin EOF, so a scripted test
+  agent must hold the input pipe open until the response is observed.
 
 ## 3.2 Local RAG over the Application Codebase (Pure Go)
 

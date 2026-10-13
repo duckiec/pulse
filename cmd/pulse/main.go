@@ -8,12 +8,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 
 	"golang.org/x/term"
+
+	"pulse/internal/mcp"
 )
 
 // Semantic exit codes (AGENTS.md §4.4).
@@ -27,7 +30,8 @@ const (
 const version = "0.0.0-dev"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdout.Fd()))))
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr,
+		term.IsTerminal(int(os.Stdout.Fd()))))
 }
 
 // run executes the mode-routing matrix (ARCHITECTURE.md §2.1). Precedence:
@@ -35,9 +39,9 @@ func main() {
 //  1. `pulse mcp` subcommand or `--mcp` flag  -> MCP mode (stdout locked)
 //  2. bare `pulse` with a TTY stdout         -> TUI mode
 //  3. bare `pulse` with a pipe stdout        -> fail closed, exit 2
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer, stdoutIsTTY bool) int {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, stdoutIsTTY bool) int {
 	if len(args) > 0 && args[0] == "mcp" {
-		return runMCP(args[1:], stderr)
+		return runMCP(ctx, args[1:], stderr)
 	}
 
 	fs := flag.NewFlagSet("pulse", flag.ContinueOnError)
@@ -60,7 +64,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, stdoutIsTTY b
 		fmt.Fprintln(stdout, "pulse "+version)
 		return exitOK
 	case *mcpFlag:
-		return runMCP(fs.Args(), stderr)
+		return runMCP(ctx, fs.Args(), stderr)
 	case !stdoutIsTTY:
 		// Fail closed: never attach a TUI to a pipe, and never treat a
 		// non-TTY as an implicit MCP invitation (ARCHITECTURE.md §2.1).
@@ -77,53 +81,30 @@ func runTUI(_ io.Reader, _, stderr io.Writer) int {
 	return exitFail
 }
 
-func runMCP(args []string, stderr io.Writer) int {
+func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "pulse: unexpected argument %q after `pulse mcp`\n", args[0])
 		return exitUsage
 	}
-	// Transport segregation (ROADMAP.md §3.1.1, AGENTS.md §3.3): stdout becomes
-	// the reserved JSON-RPC channel. The guard swaps os.Stdout out before any
-	// subsystem initializes, so a stray write can never corrupt the wire.
-	restore := redirectStdout(os.Getenv("PULSE_STDOUT_AUDIT") == "1")
-	defer restore()
 
-	fmt.Fprintln(stderr, "pulse: mcp mode is not yet implemented (ROADMAP.md Goal 3)")
-	return exitFail
-}
+	// Transport segregation (ROADMAP.md §3.1.1, AGENTS.md §3.3). The guard runs
+	// FIRST, before the MCP package or anything it imports is used: a package
+	// that captured os.Stdout at init has already missed the swap, and the audit
+	// tripwire is what catches that case.
+	lock, err := mcp.Lock(os.Getenv("PULSE_STDOUT_AUDIT") == "1")
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		return exitFail
+	}
+	defer lock.Restore()
 
-// redirectStdout swaps os.Stdout for /dev/null (or a tripwire when audit is
-// enabled) and returns a restore function. The real channel must be captured
-// by the caller before calling this. With audit enabled, any write to
-// os.Stdout panics loudly instead of vanishing silently.
-func redirectStdout(audit bool) func() {
-	prev := os.Stdout
-	if audit {
-		if pr, pw, err := os.Pipe(); err == nil {
-			os.Stdout = pw
-			go func() {
-				buf := make([]byte, 512)
-				if n, _ := pr.Read(buf); n > 0 {
-					panic(fmt.Sprintf(
-						"STDOUT HYGIENE VIOLATION: %q — stdout is the reserved JSON-RPC channel (ROADMAP.md §3.1.1)",
-						buf[:n]))
-				}
-			}()
-			return func() {
-				os.Stdout = prev
-				pw.Close()
-				pr.Close()
-			}
-		}
+	// Everything after this point that writes to stdout is a bug, and in audit
+	// mode it is a loud one. The JSON-RPC codec is handed lock.Real and nothing
+	// else is given it.
+	code, serveErr := mcp.ServeLocked(ctx, lock.Real, os.Stdin)
+	if serveErr != nil {
+		fmt.Fprintf(stderr, "pulse: mcp session failed: %v\n", serveErr)
+		return code
 	}
-	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err == nil {
-		os.Stdout = devnull
-	}
-	return func() {
-		os.Stdout = prev
-		if devnull != nil {
-			devnull.Close()
-		}
-	}
+	return code
 }

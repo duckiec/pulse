@@ -89,7 +89,7 @@ runtime; they are the only two consumers of `internal/app`.
 |---|---|---|---|
 | `cmd/pulse` | Flags, mode selection, wiring, exit codes | `app`, `ui`, `mcp`, `golang.org/x/term` | — (leaf wiring only) |
 | `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
-| `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport | `app` | `ui`, `engine` directly |
+| `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport | `app` (not built); today `ast`, `engine`, `secrets` via `EngineExecutor` | `ui` |
 | `internal/app` | Shared services: run request, list collections, history queries, variable resolution | `ast`, `engine`, `store`, `secrets` | `ui`, `mcp` |
 | `internal/engine` | `ProtocolEngine` executors (REST, SSE, gRPC), streaming, checksums, telemetry | `ast` (types) | `ui`, `mcp`, `store` |
 | `internal/ast` | Lexer, parser, zero-allocation AST, `iter.Seq` traversal | stdlib only | everything internal |
@@ -472,29 +472,95 @@ CREATE TABLE history(id INTEGER PK AUTOINCREMENT, request_id TEXT FK, started_at
 
 ## 9. MCP Server (`internal/mcp`)
 
-- Library: `github.com/mark3labs/mcp-go` (sanctioned in §7).
+**Implementation status: `execute_request` is complete and gated. The remaining
+tools below are not built** — see the status column and TASKS.md §4.3.
+
+- Library: `github.com/mark3labs/mcp-go` v1.2.1 (sanctioned in §7).
 - Transport: stdio, spec-compliant lifecycle (`initialize` → `initialized` →
-  operations → `shutdown` → exit 0). No custom framing.
-- Tools (kebab-case, spec-conformant):
+  operations → `shutdown` → exit 0). No custom framing. MCP stdio is
+  **newline-delimited JSON**, not Content-Length framing — anything that parses
+  the wire must buffer to the next newline and tolerate split frames.
+- Tools (**`snake_case`, per MCP convention** — see MEMORY.md ADL-0020 for the
+  deviation from ROADMAP.md §3.1.3's illustrative kebab-case):
 
-| Tool | Params | Returns |
+| Tool | Params | Returns | Status |
+|---|---|---|---|
+| `execute_request` | exactly one of `payload` \| `path`, plus `index?`, `env?`, `timeout_ms?`, `body_mode?`, `include_body?` | status, timing, size, checksum, bounded body (redacted) | **BUILT** |
+| `list_collections` | — | collection roots and file counts | not built |
+| `list_requests` | `collection?`, `filter?` | request refs (file, name, method, url template) | not built |
+| `get_request` | `ref` | full AST view of the request (secrets redacted) | not built |
+| `get_run` | `run_id` | status of an in-flight run (from the streaming engine) | not built |
+| `get_history` | `limit?` | recent executions with redaction applied | not built |
+| `explain_failure` | `run_id` \| `ref` | top-k indexed code chunks correlated to a 5xx (ROADMAP.md §3.2.4) | not built |
+| `fuzz_start` | `openapi_ref`, `strategy`, `budget` | fuzz session handle (ROADMAP.md §3.3.3) | not built |
+| `fuzz_next` | `session` | next generated payload (deterministic seed) | not built |
+| `fuzz_report` | `session` | deduplicated findings, redacted | not built |
+
+### 9.1 Boot ordering (the isolation boundary)
+
+```
+cmd/pulse/main.go   runMCP()
+  │
+  ├─ 1. mcp.Lock(audit)          ← FIRST. Captures os.Stdout as lock.Real,
+  │                               then points os.Stdout at /dev/null, or at a
+  │                               Tripwire when PULSE_STDOUT_AUDIT=1.
+  │                               Must precede any *use* of the mcp package:
+  │                               a dependency that captured os.Stdout in init()
+  │                               has already missed the swap, and the tripwire
+  │                               is the backstop for that case.
+  │
+  ├─ 2. mcp.ServeLocked(ctx, lock.Real, os.Stdin)
+  │                               The JSON-RPC codec is the ONLY holder of
+  │                               lock.Real. ServeLocked returns
+  │                               (exitCode, error); clean stdin EOF and
+  │                               context.Canceled both map to exit 0.
+  │
+  └─ 3. lock.Restore()           (deferred)
+```
+
+`Lock` is a function and `StdoutLock` is its result type — Go forbids a
+package-level type and function from sharing an identifier.
+
+### 9.2 Error taxonomy
+
+Protocol failures keep their JSON-RPC meanings. Domain failures occupy a
+reserved `-320xx` block so an agent can branch on the **code** rather than on
+English prose; each carries a stable `category` string in `data`, and
+`ProtocolError.payload()` includes the cause (e.g. the parser's `:1:1:`).
+
+| Code | Category | Meaning |
 |---|---|---|
-| `list-collections` | — | collection roots and file counts |
-| `list-requests` | `collection?`, `filter?` | request refs (file, name, method, url template) |
-| `get-request` | `ref` | full AST view of the request (secrets redacted) |
-| `run-request` | `ref`, `env?`, `timeout_ms?` | status, timing, size, checksum, streamed body summary (secrets redacted) |
-| `get-run` | `run_id` | status of an in-flight run (from the streaming engine) |
-| `get-history` | `limit?` | recent executions with redaction applied |
-| `explain-failure` | `run_id` \| `ref` | top-k indexed code chunks correlated to a 5xx (ROADMAP.md §3.2.4) |
-| `fuzz-start` | `openapi_ref`, `strategy`, `budget` | fuzz session handle (ROADMAP.md §3.3.3) |
-| `fuzz-next` | `session` | next generated payload (deterministic seed) |
-| `fuzz-report` | `session` | deduplicated findings, redacted |
+| `-32700` | `internal` | JSON parse error |
+| `-32600` | `internal` | invalid request object |
+| `-32601` | `internal` | unknown method |
+| `-32602` | `arguments` | schema or semantic validation failure — handler never invoked |
+| `-32603` | `internal` | internal error |
+| `-32002` | `parse` | `.http` AST parse failure |
+| `-32003` | `secret` | unresolved variable — fail-closed, never a placeholder |
+| `-32004` | `timeout` | run exceeded its budget |
+| `-32005` | `transport` | connection/dial/read failure |
+| `-32006` | `unsupported` | request shape the engine cannot serve |
 
-- All tool results pass through `secrets.Redact`. All logging goes to stderr only.
-  A single byte on stdout outside the JSON-RPC layer is a release blocker
-  (AGENTS.md §3.3).
-- Call arguments are schema-validated before dispatch (jsonschema); validation
-  failures return JSON-RPC `-32602` and never reach the handler (ROADMAP.md §3.1.3).
+A failure with **no** HTTP status is reported as the error itself, never as a
+synthesised `status: 0` outcome; any partial body is attached to `data`.
+
+### 9.3 Invariants
+
+- All logging goes to stderr only, prefixed `pulse:`. A single byte on stdout
+  outside the JSON-RPC layer is a release blocker (AGENTS.md §3.3), and the
+  tripwire turns that claim from unfalsifiable into a failing test.
+- Call arguments are schema-validated **before** dispatch (jsonschema); unknown
+  keys are rejected (`additionalProperties: false`), and coercion is per-field,
+  opt-in, and **recorded** in a `warnings` list the caller can read
+  (ROADMAP.md §3.1.3).
+- Response bodies accumulate to at most `MaxResponseBytes` (256 KiB) — a model's
+  context window, not a server buffer. Truncation is explicit: `truncated: true`,
+  `body_bytes` reports the **true** total, plus warning text.
+- Redaction is applied in `collectingSink.outcome`, immediately before the
+  outcome becomes a tool result — the single chokepoint no path can bypass.
+  **Open:** no composition root supplies a concrete `secrets.Redactor` yet
+  (`internal/app` does not exist), so in MCP mode today redaction is by header
+  name only. Tracked in TASKS.md §4.3; not claimed as complete.
 
 ## 10. Error Handling & Exit Codes
 

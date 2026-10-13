@@ -850,6 +850,136 @@ complete (AGENTS.md §4.7).
   internal/engine/jsonstream_test.go; scripts/mutation-proof-grpc.sh;
   TASKS.md P3.0b.1–P3.0b.12; ROADMAP.md §2.2
 
+### ADL-0020 — The MCP bridge: two-layer stdout isolation, schema-first tool dispatch, and the `execute_request` naming deviation
+
+- **Date:** 2026-10-12
+- **Status:** ACCEPTED
+- **Context:** Phase 4 (§4.2, §4.3) of TASKS.md and ROADMAP.md §3.1. The MCP
+  server had to exist before anything else could talk to an agent, and its
+  defining property is negative: **it must be impossible for Pulse itself to
+  corrupt the JSON-RPC wire.** A stray `fmt.Println` from anywhere in the
+  process inserts a non-JSON line into a stream the client parses as JSON-RPC
+  2.0, and the client's parser — not ours — decides what to do about it. Most
+  clients die. So the question was never "where do we avoid printing"; it is
+  "what makes a print impossible rather than merely discouraged".
+- **Decision — stdout isolation is two layers, not one:**
+  - **Layer 1, production: swap `os.Stdout` to `/dev/null`.** `mcp.Lock(audit)`
+    captures the real channel as `StdoutLock.Real`, then points `os.Stdout` at
+    the null device. Every `fmt.Print*`, every `log.Printf`, every dependency
+    that captures `os.Stdout` into a package-level var at init lands in a
+    device that costs one `write(2)` and discards. The wire is unreachable from
+    the rest of the program *by construction*, not by review discipline.
+  - **Layer 2, audit: swap `os.Stdout` to a `Tripwire`.** Under
+    `PULSE_STDOUT_AUDIT=1` the same swap installs a newline-buffered frame judge
+    instead of `/dev/null`. It forwards every write into the wire **and** checks
+    it: a complete line that is not a valid JSON-RPC 2.0 frame (`jsonrpc:"2.0"`,
+    an id of type string/number/null, and a `method`, `result`, or `error` key)
+    is protocol corruption and panics to stderr. Because MCP stdio is
+    newline-delimited JSON and *not* Content-Length framing, the judge buffers
+    to the next newline and therefore tolerates a frame split across writes.
+  - **The audit layer is not a debug convenience; it is what makes layer 1
+    auditable.** A swap to `/dev/null` is silent by construction, so "we wrote
+    nothing to the wire" is unfalsifiable by inspection. The tripwire turns the
+    same claim into a test that fails loudly, which is what
+    `TestMCPStdoutAuditTripwire` and `TestStdoutGuardTripsOnRoguePrint` use.
+- **Decision — the guard runs first, and the boot is split in two:**
+  - `mcp.Lock()` is the *first* call in `cmd/pulse/main.go`'s MCP path, before the
+    `mcp` package or anything it imports is *used*. Ordering matters: a package
+    that runs `var out = os.Stdout` in its `init` has already captured the real
+    channel by the time any Pulse code runs, and swapping the variable afterwards
+    cannot reach it. Running the guard first is the best that can be done from
+    inside the process; the tripwire is the backstop for the residual case.
+  - Consequently the API is `Lock() (StdoutLock, error)` then
+    `ServeLocked(ctx, lock.Real, os.Stdin)`, and `ServeLocked` returns
+    `(exitCode int, err error)`. It does not capture `os.Stdout` itself — that
+    would be the very indirection the guard removes. The type is `StdoutLock`
+    rather than `Lock` because Go forbids a package-level type and function from
+    sharing an identifier.
+  - Clean stdin EOF **and** `context.Canceled` both map to exit 0. A client that
+    closes the pipe is a normal shutdown, not a failure, and treating it as one
+    would make every harness wrapper look like a crash.
+- **Decision — error taxonomy: standard codes plus a reserved domain block.**
+  Protocol-level failures keep the JSON-RPC meanings (`-32700` parse, `-32600`
+  invalid request, `-32601` unknown method, `-32602` invalid params, `-32603`
+  internal). Domain failures map into `-32002…-32006` — parse, unresolved secret,
+  timeout, transport, unsupported — so an agent can branch on the code without
+  pattern-matching English prose. Each carries a stable `category` string in
+  `data` (`arguments`/`parse`/`secret`/`timeout`/`transport`/`unsupported`/
+  `internal`); the category is part of the contract and the message text is not.
+  `ProtocolError.payload()` **includes the cause**, so a schema failure carries
+  the parser's `:1:1:` line:col and is actionable rather than merely
+  categorical.
+- **Decision — schema-first validation with RECORDED, opt-in coercion:**
+  - The tool schema is compiled once at registration. Unknown keys are rejected
+    (`additionalProperties: false`) — an agent's typo must be an error, not a
+    silently ignored field, because a silently ignored field is how an agent
+    concludes its request was honoured.
+  - MCP clients send loosely-typed JSON. Coercion (`index` and `timeout_ms` as
+    integer-or-string, `include_body` as boolean-or-string) is therefore
+    **per-field, opt-in, and recorded**: every conversion is appended to a
+    warning list that travels back in the tool result. Coercion that is not
+    reported is coercion the caller cannot see, which is worse than a rejection.
+  - "Exactly one of `payload`/`path`" is enforced **semantically**, not in the
+    schema, because a JSON Schema cannot express "one of two mutually exclusive
+    keys" without leaving one of the three cases unstated to the client.
+- **Decision — `MaxResponseBytes = 256 KiB`, and truncation is explicit.** The
+  accumulated body is bounded because it is destined for a model's context
+  window; an unbounded body is a denial-of-service aimed at the agent, not the
+  server. Truncation sets `truncated: true`, reports the **true** `body_bytes`
+  total (not the truncated count, which would be a lie), and carries warning
+  text. `TestResponseTruncationIsExplicit` uses a 400 000-byte fixture — an earlier 200 KB
+  fixture sat *under* the ceiling and proved nothing, which is how a gate can
+  be green and meaningless.
+- **Decision — a failure with no HTTP status is reported as the error, not as a
+  zero-status result.** Transport death, timeout, and secret failure happened
+  before any status existed. Synthesising `status: 0` would present "no response"
+  as "a response, whose status is zero", which is exactly the kind of plausible-
+  looking wrong answer an agent will then reason about. When a partial body
+  exists it is attached to the error's `data`, so nothing is lost.
+- **Decision — `Recorder`, not `RecoverInto`.** The panic-recovery helper
+  originally appended to a shared slice with no synchronization; `-race` flagged
+  it as a genuine data race once two concurrent tool calls were in flight.
+  Replacing it with a mutex-guarded `Recorder` is the fix, and the race
+  detector — not inspection — is what found it.
+- **Decision — the tool is named `execute_request`, not `run-request`.** This is
+  a deliberate deviation from ROADMAP.md §3.1.3's illustrative kebab-case name.
+  MCP convention across the ecosystem is `snake_case`, clients' generated SDK
+  bindings assume it, and a one-off hyphenated name in a registry that will hold
+  `list_collections`, `get_history`, `fuzz_start`, … is a permanent wart. The
+  roadmap's name was illustrative; the naming *convention* it illustrated is not
+  authoritative. All other planned tools follow snake_case.
+- **Decision — the G-hyg analyzer exempts exactly two things, and both are
+  principled:**
+  1. `internal/mcp/stdio.go` — the guard file. It is the boundary; flagging it
+     would be flagging the thing that enforces the rule. Every other file in
+     `internal/mcp` remains fully subject to the rule.
+  2. `_test.go` files under the MCP paths. A test that proves the isolation
+     holds *must* be able to swap `os.Stdout` for a pipe and observe what
+     crossed it; holding tests to the production rule would forbid writing the
+     gate at all. Test files are also not linked into the shipped binary, so a
+     print in one cannot reach a client's wire.
+- **Consequences:** 24 gates green in `internal/mcp` and `cmd/pulse`; `-race`
+  clean; six mutation boundaries red→green (`scripts/mutation-proof-mcp.sh`,
+  M19–M24); the `importaudit` G-hyg analyzer passes with the two exemptions.
+  The dependency allowlist gains `mark3labs/mcp-go v1.2.1` and
+  `santhosh-tekuri/jsonschema/v6 v6.0.3` (both pure Go, CGO-free) plus their
+  transitives. **Open gap, deliberately not papered over:** `DefaultExecutor` is
+  constructed with a `nil` `secrets.Redactor`, because no composition root
+  (`internal/app`) exists yet. The redaction *chokepoint* is implemented and
+  tested in `collectingSink.outcome`, but in MCP mode today redaction is by
+  header name only — vault-sourced values are not yet scrubbed from bodies. This
+  is tracked as an open TASKS.md item and is **not** claimed as done.
+  A pre-existing flake in `TestReconnectReplaysLastEventID` (engine, Move 5) was
+  found and fixed here: it closed the stream *before* waiting for the resumed
+  payload, and `Close()` drops a buffered frame rather than dispatching it. 8/8
+  clean after the fix.
+- **Refs:** internal/mcp/stdio.go; internal/mcp/errors.go; internal/mcp/validate.go;
+  internal/mcp/tools.go; internal/mcp/server.go; internal/mcp/server_test.go;
+  cmd/pulse/main.go; cmd/pulse/main_test.go;
+  internal/devtools/importaudit/main.go; internal/engine/stream_test.go;
+  scripts/mutation-proof-mcp.sh; config/allowed-modules.txt;
+  TASKS.md P4.2.1–P4.2.3, P4.3.1, P4.3.5; ROADMAP.md §3.1
+
 ---
 
 ## Entry Template (copy for new decisions)
