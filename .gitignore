@@ -57,6 +57,23 @@ opencode.json
 !/TASKS.md
 !/MEMORY.md
 
+# --- skill-agent configuration (MEMORY.md ADL-0026) ---
+# These three are NOT part of the seven Essential Vibe Coding Files. They are
+# read by the engineering skills (triage, to-spec, to-tickets, domain-modeling)
+# and mean nothing to the compiler, so they are whitelisted narrowly rather than
+# by loosening the default-deny above.
+#
+# `/.agents/*.md` is anchored AND single-star ON PURPOSE. Git semantics that
+# made this subtle are documented in the header: an unanchored `!` matches at
+# every depth, and a single `*` does not cross a `/`. So this line whitelists
+# exactly the three config files sitting directly in `.agents/` and leaves the
+# ~40 vendored SKILL.md files underneath `.agents/skills/` ignored. Untracking
+# the vendor tree is the existing policy for `.opencode/` (ADL-0013/0014): it is
+# reproducible from `skills-lock.json` plus the pinned upstream, so committing
+# ~40 third-party files would add review surface for no provenance gain.
+!/.agents/*.md
+!/GLOSSARY.md
+
 # --- conventional repository files ---
 # None of these three exists yet; the negations are permissions, not files.
 # README.md and CONTRIBUTING.md are whitelisted here by explicit directive even

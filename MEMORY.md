@@ -1632,6 +1632,83 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0026 - Agent-skill configuration lives in `.agents/`, and the documentation surface widens by exactly four files
+
+- **Date:** 2026-10-13
+- **Status:** PROPOSED
+- **Context:** The engineering skills (`tdd`, `triage`, `to-spec`, `domain-modeling`,
+  `code-review`, `handoff`) read per-repo configuration: an issue tracker, a triage label
+  vocabulary, and a domain-doc convention. The skill that scaffolds this defaults to
+  `docs/agents/`, which is neither portable across harnesses nor compatible with the
+  markdown lockdown. This repo already vendors its skills into `.agents/` (the portable
+  tree, hash-pinned by `skills-lock.json`) and mirrors them into `.opencode/` and
+  `.freebuff/`; configuration written to a harness directory would not survive a change
+  of harness.
+- **Decision:**
+  - **Configuration goes in `.agents/`, alongside the skills that read it.** A grep of
+    all 40 vendored skills found that **only the setup skill itself** ever mentions
+    `docs/agents/`; no consumer hardcodes a path. The location is therefore a convention
+    established by whatever points at it, which means the only thing that has to change
+    is the pointer - and portability is free.
+  - **Issue tracker: GitHub Issues**, via `gh`, which is installed and authenticated.
+    `.agents/issue-tracker.md` additionally records that an issue proposes work and never
+    substitutes for the commit carrying it, because ADL-0015 makes `origin/main` the
+    database of record.
+  - **Triage labels: the five canonical defaults**, created in the tracker with
+    `gh label create`. `.agents/triage-labels.md` narrows `ready-for-agent` for THIS
+    repo: under §4.2 and §4.7, "ready for an agent" means the issue already names its
+    gate, its exit condition, and its mutation. An issue that cannot answer those three
+    is `needs-info`.
+  - **There will be no `docs/adr/` directory.** `MEMORY.md` is already the append-only
+    decision ledger (§4.6) with 26 entries and is what CI checks. A parallel ADR
+    directory would give this repository two sources of truth for the same decisions with
+    no rule for which wins - §4.5's greenwash applied to architecture. `.agents/domain.md`
+    says so explicitly, so the next agent does not create one.
+  - **§4.6's documentation surface widens by exactly four files**: `.agents/issue-tracker.md`,
+    `.agents/triage-labels.md`, `.agents/domain.md`, and `GLOSSARY.md`. No eighth
+    *domain* document and no second ledger; these are skill plumbing plus a vocabulary
+    index.
+  - **The lockdown itself is not loosened.** `.gitignore` gains two anchored negations,
+    `!/.agents/*.md` and `!/GLOSSARY.md`. `/.agents/*.md` is anchored AND single-star on
+    purpose: git documents that an unanchored `!` matches at every depth, and a single
+    `*` does not cross a `/`. The line therefore whitelists exactly the three config files
+    directly in `.agents/` and leaves the ~40 vendored `SKILL.md` files underneath
+    `.agents/skills/` ignored - consistent with the existing policy for `.opencode/`
+    (ADL-0013/0014), where the vendor tree is untracked because it is reproducible from
+    `skills-lock.json` plus the pinned upstream.
+  - **Verified, not assumed.** `git check-ignore` was run on all four whitelisted files
+    (all committable), on five vendored `SKILL.md` files (all still ignored - the leak
+    check), and on five decoy paths at four depths (`notes.md`, `docs/README.md`,
+    `vendor/README.md`, `testdata/fixture/README.md`, `internal/app/README.md` - all still
+    ignored, so the default-deny survives).
+- **Consequences - honest gaps:**
+  - **The vendored skill tree and `skills-lock.json` are BOTH untracked.** That is the
+    pre-existing policy, but it has a consequence worth stating: the lock file that exists
+    to make the tree reproducible is not itself committed, so a fresh clone of `main` gets
+    **no skills at all** until someone runs the restore procedure in
+    `~/.local/share/opencode-skill-src/` (ADL-0013/0014). The new `.agents/*.md` config
+    files this commit DOES ship therefore travel without the skills that read them. That
+    is a coherent trade - the config is cheap to review, the tree is not - but it is a
+    real one, and committing the tree or at minimum `skills-lock.json` is a separate
+    decision this entry does not make.
+  - **`AGENTS.md` gained §6, and it is explicitly non-normative.** It opens by stating
+    that sections 1-5 are the contract and section 6 is configuration, and that a
+    conflicting file under `.agents/` is to be fixed rather than weighed. An
+    `AGENTS.md` whose later section quietly outranks its earlier one is worse than no
+    section at all. Appended as §6 so no existing section renumbers and no cross-reference
+    in §4 breaks.
+  - **`GLOSSARY.md` was written from vocabulary the repository already had settled**
+    (AGENTS.md, PRD.md, ARCHITECTURE.md, ADL-0025) rather than invented, and each term
+    names where it is authoritative. It is an index, not a source. A term whose definition
+    disagreed with the code would be a bug in the glossary, so it is reviewable against
+    the commits it indexes.
+  - This entry amends §4.6, so per §4.6.7 it ships in a **dedicated documentation
+    commit**, not bundled with feature work.
+- **Refs:** `.agents/issue-tracker.md`, `.agents/triage-labels.md`, `.agents/domain.md`,
+  GLOSSARY.md, .gitignore (the two anchored negations), AGENTS.md §6.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

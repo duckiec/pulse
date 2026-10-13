@@ -409,3 +409,39 @@ on the chopping block**:
   further justification required.
 - Proposals to amend this document go through a dedicated discussion; they are not
   bundled with feature PRs.
+
+---
+
+## 6. Agent Skills (configuration, not directive)
+
+**Sections 1–5 are the contract. Section 6 is configuration.** Nothing here is a gate.
+A file under `.agents/` that contradicts §1–§5 is wrong, and §1–§5 wins; the correct
+response to a conflict is to fix the file, not to weigh the two. Added by MEMORY.md
+ADL-0026, which records why the sanctioned documentation surface in §4.6 was widened.
+
+The engineering skills (`tdd`, `triage`, `to-spec`, `domain-modeling`, `code-review`,
+`handoff`, and the rest) read their configuration from `.agents/`, not from a
+tool-specific directory. `.opencode/` and `.freebuff/` are harnesses; `.agents/` is the
+portable copy, and configuration written to a harness directory would not survive a
+change of harness.
+
+### Issue tracker
+
+GitHub Issues on `duckiec/pulse`, via the `gh` CLI. Issues may *propose* work; they may
+never substitute for the commit that carries it, because `origin/main` is the database of
+record (ADL-0015). See `.agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, label string equal to role name: `needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`. `ready-for-agent` is narrower here than
+in most repos — it additionally implies the issue already names its gate, its exit
+condition, and its mutation per §4.2. See `.agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context. Vocabulary in `GLOSSARY.md`; decisions in the `ADL-nnnn` entries of
+`MEMORY.md`, which is the append-only ledger and the single source of truth. There is
+deliberately **no `docs/adr/` directory** — a second decision ledger in a repository that
+already has one is a fork with no precedence rule. `MEMORY.md` is amended by appending,
+never by editing a prior entry. See `.agents/domain.md`.
