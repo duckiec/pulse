@@ -123,16 +123,29 @@ internal/ast/        .http lexer, parser, zero-allocation AST (no I/O, no UI)
 internal/engine/     request execution: transport, streaming, TeeReader multiplexing
 internal/store/      modernc.org/sqlite persistence, migrations, history
 internal/secrets/    keychain bindings, ephemeral env resolution, zero-trust vault
+internal/rag/        codebase indexing: bounded walker, per-language chunking, embedder
+internal/fuzz/       OpenAPI subset reader, deterministic boundary matrix, GCRA limiter, TAP 13
 internal/mcp/        JSON-RPC server, spec lifecycle, stdio transport
 internal/ui/         Bubble Tea models, Lip Gloss styling, Huh forms
-internal/app/        shared application services used by BOTH internal/ui and internal/mcp
+internal/app/        COMPOSITION ROOT — the one package that names a concrete dependency
+                     on another package's behalf; owns lifecycle and the app context
 ```
 
 - Dependency flow is strictly one-directional: `ui` and `mcp` depend on `app`, which
-  depends on `engine`, `ast`, `store`, `secrets`. No sibling package may import another
-  sibling's internals.
-- Domain logic (AST, engine, secrets, store) MUST be transport-agnostic and UI-agnostic.
-  It is driven by both modes.
+  depends on `engine`, `ast`, `fuzz`, `rag`, `store`, `secrets`. No sibling package may
+  import another sibling's internals.
+- Domain logic (AST, engine, secrets, store, rag, fuzz) MUST be transport-agnostic and
+  UI-agnostic. It is driven by both modes.
+- **`internal/app` is the ONLY package permitted to name a concrete dependency on another
+  package's behalf.** Every other package declares what it needs as an interface and is
+  handed it. A package that constructs its own collaborators cannot be exercised without
+  constructing all of them — that is a testability defect before it is an architectural
+  one. Where a sibling's concrete type was previously named (the `secrets.Redactor` in
+  `internal/mcp`), declare a local interface instead and let `app` prove the concrete type
+  satisfies it.
+- `cmd/pulse` wires modes and maps outcomes to exit codes. It MUST NOT open a store, read
+  a keychain or build a domain service: that is `internal/app`'s work, and duplicating it
+  in `main` is how the two drift.
 
 ### 3.2 Concurrency Invariants (UI Thread)
 
