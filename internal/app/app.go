@@ -358,19 +358,9 @@ func (a *App) buildRetrieval() error {
 // and a token in a response body reached the model intact.
 func (a *App) buildTools() error {
 	a.Executor = &mcp.EngineExecutor{
-		Redactor: a.Redactor,
-		Resolver: a.Chain,
-		NewEngine: func(doc *ast.Document) engine.ProtocolEngine {
-			return engine.NewProtocolRouter(doc, engine.RouterConfig{
-				REST: []engine.Option{
-					engine.WithRedactor(a.Redactor),
-					engine.WithResolver(a.Chain),
-					engine.WithTimeout(a.cfg.RunTimeout),
-					engine.WithUserAgent("pulse/" + Version),
-				},
-				GRPC: &engine.GRPCConfig{Resolver: a.Chain, Redactor: a.Redactor},
-			})
-		},
+		Redactor:  a.Redactor,
+		Resolver:  a.Chain,
+		NewEngine: a.newRouter,
 	}
 
 	a.FuzzRunner = &mcp.EngineFuzzRunner{
@@ -382,6 +372,25 @@ func (a *App) buildTools() error {
 }
 
 // degrade records a condition the app booted with and could not resolve.
+// newRouter builds the protocol router for one parsed document.
+//
+// It is a method rather than a closure inside buildTools because the test
+// runner needs the SAME router: two constructions would be two places for the
+// redactor, the resolver and the timeout to be wired differently, and a test run
+// that redacts differently from an MCP call is a redaction gate that passes in
+// one mode and fails in the other.
+func (a *App) newRouter(doc *ast.Document) engine.ProtocolEngine {
+	return engine.NewProtocolRouter(doc, engine.RouterConfig{
+		REST: []engine.Option{
+			engine.WithRedactor(a.Redactor),
+			engine.WithResolver(a.Chain),
+			engine.WithTimeout(a.cfg.RunTimeout),
+			engine.WithUserAgent("pulse/" + Version),
+		},
+		GRPC: &engine.GRPCConfig{Resolver: a.Chain, Redactor: a.Redactor},
+	})
+}
+
 func (a *App) degrade(msg string) {
 	if a.Redactor != nil {
 		msg = a.Redactor.String(msg)

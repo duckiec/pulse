@@ -2,11 +2,14 @@
 // for humans and a headless MCP server for local AI agents (AGENTS.md §1,
 // ARCHITECTURE.md §2).
 //
-// MCP mode is fully wired: the composition root in internal/app builds the
-// store, the resolver chain, the redactor, the Local RAG retriever and both
-// tools, and this file only chooses a mode and maps an outcome to an exit code.
-// The TUI (ROADMAP.md Goal 1; TASKS.md Phase 3.1) is still a stub that fails
-// closed.
+// Three modes are wired: `pulse mcp` serves the MCP server, `pulse test <dir>`
+// runs a headless pipeline, and `pulse vault ...` manages encrypted
+// configuration. The TUI (ROADMAP.md Goal 1; TASKS.md Phase 3.1) is still a stub
+// that fails closed.
+//
+// This file wires modes and maps outcomes to exit codes. It does not open a
+// store, read a keychain or build a domain service: that is internal/app's work,
+// and duplicating it here is how the two drift (AGENTS.md §3.1).
 package main
 
 import (
@@ -23,7 +26,9 @@ import (
 	"golang.org/x/term"
 
 	"pulse/internal/app"
+	"pulse/internal/engine"
 	"pulse/internal/mcp"
+	"pulse/internal/secrets"
 )
 
 // Semantic exit codes (AGENTS.md §4.4).
@@ -32,6 +37,7 @@ const (
 	exitFail  = 1 // generic failure
 	exitUsage = 2 // usage or parse error
 	exitSec   = 3 // keychain / secret resolution failure
+	exitIntr  = 130
 )
 
 const version = "0.0.0-dev"
@@ -44,11 +50,20 @@ func main() {
 // run executes the mode-routing matrix (ARCHITECTURE.md §2.1). Precedence:
 //
 //  1. `pulse mcp` subcommand or `--mcp` flag  -> MCP mode (stdout locked)
-//  2. bare `pulse` with a TTY stdout         -> TUI mode
-//  3. bare `pulse` with a pipe stdout        -> fail closed, exit 2
+//  2. `pulse test <dir>`                      -> headless pipeline
+//  3. `pulse vault ...`                       -> vault commands
+//  4. bare `pulse` with a TTY stdout          -> TUI mode
+//  5. bare `pulse` with a pipe stdout         -> fail closed, exit 2
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, stdoutIsTTY bool) int {
-	if len(args) > 0 && args[0] == "mcp" {
-		return runMCP(ctx, args[1:], stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "mcp":
+			return runMCP(ctx, args[1:], stderr)
+		case "test":
+			return runTest(ctx, args[1:], stderr)
+		case "vault":
+			return runVault(ctx, args[1:], stderr)
+		}
 	}
 
 	fs := flag.NewFlagSet("pulse", flag.ContinueOnError)
@@ -60,10 +75,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse [flags]")
 		fmt.Fprintln(stderr, "       pulse mcp")
-		fmt.Fprintf(stderr, "\nmcp mode exposes: %s\n", describeTools())
-		fmt.Fprintln(stderr, "\nenvironment: PULSE_HOME, PULSE_ENV_FILE, PULSE_RAG_ROOT,")
-		fmt.Fprintln(stderr, "            PULSE_RAG_CONCURRENCY, PULSE_RUN_TIMEOUT,")
-		fmt.Fprintln(stderr, "            PULSE_STDOUT_AUDIT")
+		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked]")
+		fmt.Fprintln(stderr, "       pulse vault init|encrypt|decrypt <file> [--key-id ID]")
+		fmt.Fprintln(stderr, "mcp mode exposes: "+describeTools())
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -92,20 +106,201 @@ func runTUI(_ io.Reader, _, stderr io.Writer) int {
 	return exitFail
 }
 
+// describeTools is used only by `--help`, and exists so the CLI and the MCP
+// registry cannot disagree about what Pulse offers: both read the same
+// constants.
+func describeTools() string {
+	return strings.Join([]string{mcp.ToolExecuteRequest, mcp.ToolExecuteFuzz}, ", ")
+}
+
+// ---- pulse test ------------------------------------------------------------
+
+// runTest is the `pulse test <dir>` entry.
+//
+// The exit code is a pure function of the run, mirrored from the engine's own
+// mapping so the CLI and the runner cannot disagree (ROADMAP.md §4.1.4).
+func runTest(ctx context.Context, args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pulse test", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		parallel = fs.Int("parallel", engine.DefaultParallel,
+			"maximum concurrent requests (default derives from a conservative cap, not core count)")
+		timeout       = fs.Duration("timeout", engine.DefaultTestTimeout, "per-request timeout")
+		strictBlocked = fs.Bool("strict-blocked", false,
+			"fail the run when any test is BLOCKED and reported as a skip")
+	)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: pulse test <dir>")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	root := fs.Arg(0)
+	if root == "" {
+		fmt.Fprintln(stderr, "pulse test: a directory of .http files is required")
+		return exitUsage
+	}
+
+	// `pulse test` is a single-shot command and never installs the stdout
+	// lock, so its TAP output is ordinary stdout and there is no JSON-RPC
+	// stream to corrupt (ROADMAP.md §4.1.3, G-hyg).
+	application, err := app.New(ctx, appConfig())
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		return app.SecretExitCode(err)
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		}
+	}()
+	for _, d := range application.Degradations {
+		fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
+	}
+
+	code, err := application.TestDir(ctx, root, os.Stdout, *parallel, *timeout, *strictBlocked)
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse test: %v\n", err)
+		// A parse failure is exit 2, a secret failure exit 3, and anything
+		// else the runner's own mapping.
+		if app.SecretExitCode(err) != 0 {
+			return exitSec
+		}
+		var vErr *app.VaultError
+		if errors.As(err, &vErr) {
+			return vErr.ExitCode()
+		}
+		if code == 0 {
+			return exitUsage
+		}
+		return code
+	}
+	return code
+}
+
+// ---- pulse vault -----------------------------------------------------------
+
+// runVault is the `pulse vault ...` entry.
+//
+// The key never reaches the repository, a config file or a temp dir at any
+// point: it is generated, written to the keychain, read back, and zeroised
+// (AGENTS.md §3.4).
+func runVault(ctx context.Context, args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pulse vault", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		keyID  = fs.String("key-id", "", "keychain account suffix; empty selects the default")
+		envOut = fs.String("out", "", "plaintext output path for decrypt (default: the .env path)")
+	)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: pulse vault init [--key-id ID]")
+		fmt.Fprintln(stderr, "       pulse vault encrypt <path.env> [--key-id ID]")
+		fmt.Fprintln(stderr, "       pulse vault decrypt <path.env.vault> [--key-id ID] [--out PATH]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	cmd := fs.Arg(0)
+	if cmd == "" {
+		fmt.Fprintln(stderr, "pulse vault: init, encrypt or decrypt is required")
+		return exitUsage
+	}
+
+	application, err := app.New(ctx, appConfig())
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		return app.SecretExitCode(err)
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		}
+	}()
+
+	store := secrets.NewStore()
+	resolver := secrets.NewBackend()
+
+	switch cmd {
+	case "init":
+		account, err := application.VaultInit(*keyID, store)
+		if err != nil {
+			fmt.Fprintf(stderr, "pulse vault init: %v\n", err)
+			return vaultExit(err)
+		}
+		fmt.Fprintf(os.Stderr, "pulse: vault key stored in the keychain as %q\n", account)
+		return exitOK
+
+	case "encrypt", "decrypt":
+		path := fs.Arg(1)
+		if path == "" {
+			fmt.Fprintf(stderr, "pulse vault %s: a .env path is required\n", cmd)
+			return exitUsage
+		}
+		key, err := application.VaultKey(*keyID, resolver)
+		if err != nil {
+			fmt.Fprintf(stderr, "pulse vault %s: %v\n", cmd, err)
+			return vaultExit(err)
+		}
+		defer clear(key)
+
+		if cmd == "encrypt" {
+			if err := application.VaultEncrypt(path, key); err != nil {
+				fmt.Fprintf(stderr, "pulse vault encrypt: %v\n", err)
+				return vaultExit(err)
+			}
+			_, vault := app.VaultPaths(path)
+			fmt.Fprintf(os.Stderr, "pulse: wrote %s and removed the plaintext\n", vault)
+			return exitOK
+		}
+
+		out := *envOut
+		if out == "" {
+			out = path
+		}
+		plain, err := application.VaultDecryptTo(path, out, key)
+		if err != nil {
+			fmt.Fprintf(stderr, "pulse vault decrypt: %v\n", err)
+			return vaultExit(err)
+		}
+		fmt.Fprintf(os.Stderr, "pulse: wrote %s\n", plain)
+		return exitOK
+
+	default:
+		fmt.Fprintf(stderr, "pulse vault: unknown subcommand %q\n", cmd)
+		return exitUsage
+	}
+}
+
+// vaultExit maps a vault error to an exit code.
+func vaultExit(err error) int {
+	var vErr *app.VaultError
+	if errors.As(err, &vErr) {
+		return vErr.ExitCode()
+	}
+	if app.SecretExitCode(err) != 0 {
+		return exitSec
+	}
+	return exitFail
+}
+
+// ---- pulse mcp -------------------------------------------------------------
+
+// runMCP boots the composition root and serves the MCP session.
+//
+// `mcp.Lock()` is the FIRST statement of the path, before anything the App
+// transitively imports is *used*: a package that captured os.Stdout at init has
+// already missed the swap by the time we get here, and the audit tripwire is
+// what catches that case. Folding the lock into a convenience constructor would
+// look safe to call late, which is how a boot log ends up on the JSON-RPC
+// channel (AGENTS.md §3.3).
 func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "pulse: unexpected argument %q after `pulse mcp`\n", args[0])
 		return exitUsage
 	}
 
-	// Transport segregation (ROADMAP.md §3.1.1, AGENTS.md §3.3). The guard runs
-	// FIRST, before the App or anything it transitively imports is *used*: a
-	// package that captured os.Stdout at init has already missed the swap, and
-	// the audit tripwire is what catches that case.
-	//
-	// The ordering is the whole point. Lock is deliberately not tucked inside
-	// app.New: a convenience wrapper that looks safe to call late is how a boot
-	// log ends up on the JSON-RPC channel.
 	lock, err := mcp.Lock(os.Getenv("PULSE_STDOUT_AUDIT") == "1")
 	if err != nil {
 		fmt.Fprintf(stderr, "pulse: %v\n", err)
@@ -113,14 +308,8 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	defer lock.Restore()
 
-	// Everything after this point that writes to stdout is a bug, and in audit
-	// mode it is a loud one. The JSON-RPC codec is handed lock.Real and nothing
-	// else is given it.
 	application, err := app.New(ctx, appConfig())
 	if err != nil {
-		// A construction failure is reported on stderr and mapped by KIND, not
-		// by string matching: a keychain failure is exit 3 everywhere it
-		// appears, however many layers deep it was wrapped (AGENTS.md §4.4.5).
 		fmt.Fprintf(stderr, "pulse: %v\n", err)
 		if code := app.SecretExitCode(err); code != 0 {
 			return code
@@ -133,10 +322,7 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 	}()
 
-	// Boot diagnostics are emitted BEFORE the session starts, and they go to
-	// stderr. They are also summarised rather than dumped: a DEGRADED line is
-	// something the agent's user needs to know, not something that belongs in
-	// the protocol stream.
+	// Boot diagnostics go to stderr, and are summarised rather than dumped.
 	for _, d := range application.Degradations {
 		fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
 	}
@@ -158,12 +344,11 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 
 // appConfig reads PULSE_* environment variables into a Config.
 //
-// Environment rather than flags: every one of these is a deployment detail
-// (where the data lives, which vault to use, what to index) that an MCP client
-// launching `pulse mcp` sets once, and putting them on the command line would
-// invite an agent to vary them per call. An unparsable value is reported rather
-// than ignored — a typo in PULSE_HOME silently writing the index somewhere
-// unexpected is worse than a refusal to start.
+// Environment rather than flags: every one of these is a deployment detail an
+// MCP client sets once, and putting them on the command line would invite an
+// agent to vary them per call. An unparsable value is reported rather than
+// ignored — a typo in PULSE_HOME silently writing the index somewhere unexpected
+// is worse than a refusal to start.
 func appConfig() app.Config {
 	cfg := app.Config{
 		Home:    os.Getenv("PULSE_HOME"),
@@ -175,8 +360,7 @@ func appConfig() app.Config {
 	if v := os.Getenv("PULSE_RAG_CONCURRENCY"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			mcp.Logf("PULSE_RAG_CONCURRENCY=%q is not a positive integer; "+
-				"the package default is used", v)
+			mcp.Logf("PULSE_RAG_CONCURRENCY=%q is not a positive integer; the package default is used", v)
 		} else {
 			cfg.IndexConcurrency = n
 		}
@@ -184,18 +368,10 @@ func appConfig() app.Config {
 	if v := os.Getenv("PULSE_RUN_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
-			mcp.Logf("PULSE_RUN_TIMEOUT=%q is not a positive duration; "+
-				"the default is used", v)
+			mcp.Logf("PULSE_RUN_TIMEOUT=%q is not a positive duration; the default is used", v)
 		} else {
 			cfg.RunTimeout = d
 		}
 	}
 	return cfg
-}
-
-// describeTools is used only by `--help`, and exists so the CLI and the MCP
-// registry cannot disagree about what Pulse offers: both read the same
-// constants.
-func describeTools() string {
-	return strings.Join([]string{mcp.ToolExecuteRequest, mcp.ToolExecuteFuzz}, ", ")
 }

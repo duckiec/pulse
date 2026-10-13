@@ -1504,6 +1504,134 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0025 — Vault cryptography and the CI/CD loop: a nonce, an exit code, and a binary that runs
+
+- **Date:** 2026-10-13
+- **Status:** PROPOSED
+- **Context:** Goal 4 opens with two capabilities: a headless `pulse test` pipeline a CI
+  system can drive (ROADMAP.md §4.1), and commit-encrypted production config
+  (ROADMAP.md §4.3). The directive scoped both, adding two gates of its own that
+  became the most valuable things in the move: a NONCE gate that proves nonce
+  uniqueness, and a TAP EXIT gate that proves the exit code mirrors the results.
+- **Decision:**
+  - **AES-256-GCM, stdlib only.** `crypto/aes`, `crypto/cipher`, `crypto/rand`, and
+    nothing else — no third-party crypto, no KDF, no password mode. The container is
+    `PVLT1`: magic, a reserved flags byte, a 12-byte nonce, then `gcm.Seal`'s
+    output with the tag appended. **A reserved-flags byte is REFUSED rather than
+    ignored**: an ignored flag that later means "compressed" would decrypt to
+    garbage, and a refused one makes the container's version the thing that has to
+    be upgraded.
+  - **The key is 32 bytes of `crypto/rand`, with no derivation.** Stretching a
+    uniformly random key is theatre that makes a weaker key look stronger, and it
+    would imply the key was a passphrase.
+  - **A nonce is generated per seal and never reused.** This is the load-bearing
+    property of the whole file. Nonce reuse under one key is not a weakness but a
+    break: GCM's keystream cancels between the two plaintexts, and the
+    AUTHENTICATION KEY is recoverable, so an attacker can forge a third container
+    that verifies. A counter, a timestamp, a hash of the plaintext and a fixed
+    constant are each schemes that eventually repeat — only `crypto/rand` cannot
+    be made to repeat by a change in workload, a clock adjustment, a re-encryption
+    of unchanged input, or a rotation done twice. The cost is 12 bytes per seal.
+  - **The nonce gate seals 200 times and asserts THREE things**: no nonce repeats,
+    no container repeats, and all 200 decrypt to the same plaintext. The loop is
+    the test, because a fixed nonce passes a single seal and fails on the second —
+    which is the whole defect. Mutation M61 names the actual nonce in its failure.
+  - **`Seal` does NOT zeroise its caller's buffer.** It did originally, and
+    `TestSealingTheSamePlaintextTwiceDiffers` caught it immediately: a function
+    that wipes what it was handed cannot be composed, cannot be called twice on
+    the same bytes, and fails the most natural assertion there is. Zeroisation is
+    the caller's, and the FILE path applies it to the buffer it allocated itself —
+    which is why `vault encrypt` removes the plaintext file as well as the buffer.
+  - **Every decryption failure reports the same thing.** `ErrAuthFailed` covers
+    wrong key, tampered byte and truncation identically. The GCM tag is the only
+    mechanism that distinguishes them, so surfacing the difference to the CLI
+    would hand an oracle to anyone who can present a container and observe the
+    exit status. The exit CODES differ (auth vs format) but both are 1, and
+    `kindForDecrypt` documents why.
+  - **The keychain's read and write sides are separate interfaces.**
+    `SecretResolver` has been read-only since Move 4 and three moves of
+    resolution logic, degradation reporting and fail-closed mapping are built on
+    it; making it also write would give every reader a credential-writing path it
+    does not need. `SecretStore` is new (Store/Available/Backend), implemented on
+    darwin via the `security` CLI, windows via `CredWriteW` through
+    `x/sys/windows`, and linux via Secret Service D-Bus `CreateItem`.
+  - **The exit code is a pure function of the report**, mirrored from
+    `engine.ExitCodeFor` so `pulse test` and the runner cannot disagree:
+    0 all pass, 1 any failure, 2 usage-or-parse, 3 secret-resolution, and a
+    BLOCKED-with-reason test is a `# SKIP` line that does NOT fail the run (it
+    fails only under `--strict-blocked`). **An empty report is exit 2, not 0** — a
+    run that produced no test points has not passed anything, and reporting
+    success for "nothing happened" is the greenwash AGENTS.md §4.5 exists to
+    prevent.
+  - **The exit mapping scans for a secret failure BEFORE any plain failure.** The
+    single-pass version returned 1 whenever a plain failure happened to precede a
+    secret one, which made exit 3 a function of file ordering rather than of
+    cause. Exit 3 means "configure your keychain" and exit 1 means "a test
+    failed"; telling a user about a failing assertion while their real problem is
+    a missing credential sends them in the wrong direction.
+  - **The runner produces structured entries and does not format.** Move 9's TAP
+    13 emitter lives in `internal/fuzz` and AGENTS.md §3.1 forbids a sibling
+    importing a sibling, so `internal/engine` is a producer and `internal/app` is
+    the formatter. This is the layering rule AND the reuse: a JSON or silent
+    reporter costs no change in the engine.
+  - **`App.newRouter` is shared by the test runner and the MCP path.** Two
+    constructions would be two places for the redactor, the resolver and the
+    timeout to be wired differently, and a test run that redacts differently
+    from an MCP call is a redaction gate that passes in one mode and fails in the
+    other.
+  - **Assertions are validated before any request is dispatched.** A malformed
+    assertion is exit 2, and discovering it after six requests have hit the server
+    is both slow and misleading.
+  - **`assert.go`'s `EvalBody` takes the body separately, deviating from ROADMAP
+    §4.1.1's `Eval(res *RunResult)`.** `RunResult` is a bounded SUMMARY
+    (Status, Elapsed, Bytes, Digest) that deliberately does not carry the body,
+    because a body can be gigabytes and a RunResult outlives the stream that
+    produced it. `body contains` therefore cannot be evaluated against a
+    RunResult; the honest options were to assert against the Digest — a much
+    weaker statement, and one that cannot answer "does the error message name the
+    symbol" — or to pass the body in.
+  - **`pulse test` is single-shot and never installs the stdout lock**, so its TAP
+    goes to ordinary stdout and there is no JSON-RPC stream to corrupt.
+- **Consequences — honest gaps, NOT claimed done:**
+  - **The three real keychain backends are BLOCKED, not PASSED.** `vault init`
+    cannot be verified on this host: WSL has no Secret Service daemon, and there
+    is no darwin or windows machine. `TestStoreAvailableNamesTheReason` reports
+    the reason rather than passing silently, and the storage gate runs against
+    `MemoryStore`. The darwin/windows/linux write paths are COMPILED on all
+    cross-compile targets but not executed. The darwin path passes the secret as
+    an argv element to a short-lived child, which `ps` can read — a real and
+    documented weakness of the CGO-free constraint, not an oversight, mitigated
+    only by `vault init` being a once-per-machine operation.
+  - **A 200-seal nonce gate is not a statistical proof.** It detects a FIXED
+    nonce with certainty and a poorly seeded PRNG with near-certainty, but it
+    cannot bound the collision probability of a 96-bit random nonce. The
+    guarantee is that the source is `crypto/rand`, which the gate asserts
+    indirectly.
+  - **No rotation, revocation, or multi-recipient support** (ROADMAP §4.3.4,
+    §4.3.1). The container carries no recipient list and no per-recipient
+    wrapped DEK, so `pulse vault rotate` would have to re-encrypt with the SAME
+    key rather than wrap a new one for a new recipient set. Revocation is
+    therefore "change the key", which does not help a revoked contributor who
+    already holds the old one.
+  - **No resolvable `*.vault` in a collection** (ROADMAP §4.3.3). A request
+    referencing `{{VAULTED_TOKEN}}` fails closed with an unresolved variable.
+  - **No `pulse test` --format json / --silent** (ROADMAP §4.1.3), and no SIGINT
+    plan-tail emission. The exit code works; the alternate output formats and the
+    signal path do not exist.
+  - **Goal 4 is not effectively OPENED by this move**: the headless loop and the
+    single-recipient vault are in, peer-to-peer sync (§4.2) is untouched, and the
+    rotation/revocation half of §4.3 is not built.
+  - **One `-race` run of `internal/engine` failed on `TestSSEStreamCarriesTelemetry`**
+    and did not reproduce in five subsequent runs. It is in Move 5 code this move
+    did not touch (git diff shows only `assert.go`, `test_runner.go` and their
+    tests added to that package). Reported as a PRE-EXISTING FLAKE, not as a pass.
+- **Refs:** internal/secrets/vault.go, store.go and its four platform files,
+  vault_test.go; internal/engine/assert.go, test_runner.go, test_runner_test.go;
+  internal/app/test.go, test_test.go; cmd/pulse/main.go;
+  scripts/mutation-proof-vault.sh (M61–M68, M65b); ROADMAP.md §4.1, §4.3.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

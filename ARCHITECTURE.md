@@ -466,6 +466,13 @@ Every non-stdlib dependency requires an explicit entry here and a MEMORY.md ADL.
 | `github.com/grandcat/zeroconf` | mDNS/Bonjour peer discovery | No stdlib mDNS | G4 §4.2 |
 | `github.com/getkin/kin-openapi` | OpenAPI 3.0/3.1 parsing for auto-fuzzing — **NOT VENDORED**; Move 9 reads the needed subset directly (§13) and no YAML module is permitted | No stdlib OpenAPI | G3 §3.3 |
 | `github.com/santhosh-tekuri/jsonschema/v6` | MCP payload validation | No stdlib JSON Schema | G3 §3.1 |
+| ~~`github.com/tetratelabs/wazero`~~ | (Move 11, §15) | — | — |
+
+**Move 12 added no dependency.** The vault is stdlib crypto (`crypto/aes`,
+`crypto/cipher`, `crypto/rand`) precisely because AGENTS.md §2.2 requires the
+stdlib first and because a cryptography dependency is the class of dependency
+most worth not having: the audit surface is the standard library's, which is
+reviewed by more eyes than any vendored copy.
 
 Anything not on this list fails `go mod tidy` audit in CI. `ROADMAP.md` §0.4 is the
 admission point for forward contracts; rows introduced by roadmap goals carry their
@@ -1012,3 +1019,90 @@ no instance pooling. Goal 3 is recorded as PARTIAL (§3.5) rather than COMPLETE,
 these are three of the four reasons.
 
 ---
+
+## 16. CI/CD Loop & Vault (`internal/engine` + `internal/app` + `internal/secrets`)
+
+### 16.1 Two halves, one layering rule
+
+```
+internal/engine/test_runner.go   parse, execute, evaluate -> []Entry
+                                          |
+                                          | imports internal/ast ONLY
+                                          v
+internal/app/test.go             tapReporter -> fuzz.Render (Move 9)
+                                          |
+                                          v
+cmd/pulse/main.go                pulse test <dir> -> exit code
+```
+
+`engine` produces and does not format; `app` formats. That is not tidiness —
+Move 9's TAP emitter lives in `internal/fuzz`, and AGENTS.md §3.1 forbids a
+sibling importing a sibling. `app` is the only package allowed to name both, so
+it is the only place the wiring can live, and the result is that a JSON or
+silent reporter costs no change in the engine.
+
+`App.newRouter` is shared by the test runner and the MCP path, so a test run and
+an MCP call redact identically. Two constructions would be two places for the
+redactor, resolver and timeout to drift apart.
+
+### 16.2 The exit code
+
+| Code | Meaning |
+|---|---|
+| 0 | every test point passed, or was skipped with a stated reason |
+| 1 | any assertion failed, or a request errored |
+| 2 | usage error, parse error, **or a report with no test points** |
+| 3 | secret-resolution failure |
+
+`ExitCodeFor` is a pure function of the report, so `pulse test` and the runner
+cannot disagree. Two properties are deliberate and are gated rather than
+argued:
+
+- **an empty report is 2, not 0** — a run that produced no test points has not
+  passed anything, and success for "nothing happened" is the greenwash §4.5
+  exists to prevent;
+- **a secret failure is scanned for before any plain failure**, so exit 3 does
+  not depend on file ordering. Exit 3 means "configure your keychain"; exit 1
+  means "a test failed"; telling the user the second while the first is true
+  sends them in the wrong direction.
+
+### 16.3 The vault
+
+```
+"PVLT1" | flags u8 | nonce[12] | gcm.Seal(...) = ciphertext || tag[16]
+```
+
+AES-256-GCM from the stdlib. No KDF: the key is 32 bytes of `crypto/rand` held in
+the keychain, and stretching a uniformly random key is theatre that implies the
+key was a passphrase.
+
+**A nonce is generated per seal and never reused.** This is the one property the
+whole design rests on: nonce reuse under one key recovers GCM's authentication
+key, so an attacker can forge a container that verifies. A counter, a timestamp,
+a hash of the plaintext and a fixed constant each eventually repeat; only
+`crypto/rand` cannot be made to repeat by a workload change, a clock
+adjustment, or a rotation done twice. The gate seals 200 times and asserts no
+nonce repeats, no container repeats, and all 200 decrypt to the same plaintext.
+
+Every decryption failure reports identically. The GCM tag is the only mechanism
+that distinguishes "wrong key" from "one flipped byte", so surfacing that to the
+CLI would hand an oracle to anyone who can present a container and observe the
+exit status.
+
+`Seal` does not zeroise its caller's buffer. It did originally and the round-trip
+gate caught it: a function that wipes what it was handed cannot be composed.
+Zeroisation belongs to the caller, and the file path applies it to the buffer it
+allocated itself — which is also why `vault encrypt` REMOVES the plaintext file.
+
+### 16.4 Not built
+
+The recipient model (X25519 + HKDF + Ed25519, §4.3.1) is not built: one key, one
+container, no recipient list, so rotation means "change the key" rather than
+"re-wrap for a new recipient set". No `*.vault` resolution at request time. No
+JSON or silent output formats, and no SIGINT plan tail. The three real keychain
+write backends (darwin `security`, windows `CredWriteW`, linux Secret Service)
+compile on every cross-compile target and are BLOCKED in this environment: no
+darwin or windows host, and no Secret Service daemon in WSL.
+
+---
+

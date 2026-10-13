@@ -1795,6 +1795,20 @@ never leave their OS keychains.
 - **Verify:** Golden tests per operator (including boundary equality and
   `in range` semantics); malformed-assert corpus each asserting the structured
   parse error and exit 2.
+- **SHIPPED (Move 12), WITH ONE DELIBERATE DEVIATION (ADL-0025).** The grammar is
+  six operators over five subjects and nothing else, in `internal/engine/assert.go`.
+  `in lo..hi` is inclusive at BOTH ends and `<` is strict; both are pinned by
+  boundary tests rather than by prose. A subject that cannot be read FAILS rather
+  than passing vacuously, so a typo'd subject cannot report green for a file.
+  `EvalBody(res, body)` takes the body SEPARATELY from `*RunResult`: `RunResult`
+  is a bounded summary carrying Bytes and a Digest but not the body, so
+  `body contains` cannot be evaluated against it, and asserting on the Digest
+  would be a different and much weaker statement. Reading `header <name>`
+  canonicalises the name, because Go's `http.Header` is keyed by the canonical
+  MIME form and a `.http` file written `content-type` would never match.
+  Gates: `TestAssertionGrammarIsTotal` (24 expressions), `TestAssertionBoundarySemantics`,
+  `TestBodyAssertionsFailWithoutABody`, `TestHeaderAssertionCanonicalises`.
+  Mutation M68 (the assertion's verdict discarded) red.
 
 ### 4.1.2 Execution flow and concurrency
 
@@ -1835,6 +1849,18 @@ never leave their OS keychains.
 - **Verify:** TAP grammar conformance test against a reference TAP consumer;
   SIGINT test asserting plan-tail emission; JSON redaction test; G-hyg in MCP
   contexts (no TAP on stdout when serving).
+- **SHIPPED IN PART (Move 12).** TAP 13 only, emitted line-per-write (unbuffered),
+  because a TAP consumer parses incrementally and a buffered writer breaks a
+  streaming dashboard. The engine produces structured entries and `internal/app`
+  formats them onto Move 9's emitter, which satisfies AGENTS.md §3.1's no-sibling-
+  import rule AND reuses the emitter — a JSON or silent reporter costs no change
+  in the engine.
+  Gates: `TestTAPOutputConformsToThirteen`, `TestTAPPlanAndResultsAgreeForAnAllPassingRun`,
+  `TestWriteTestReportIsOneWritePerLine`, `TestExitCodeMatrixFromTheCLIPath`.
+  Mutation M67 (the plan written from a counter, the same boundary as Move 9's
+  M35) red.
+  NOT met: the JSON and silent formats, the SIGINT plan tail, and a conformance
+  test against a REFERENCE consumer rather than internal assertions.
 
 ### 4.1.4 Exit codes and signal safety
 
@@ -1848,6 +1874,23 @@ never leave their OS keychains.
   policy files may require `--strict-blocked` to fail the run instead.
 - **Verify:** Exit-code matrix test including the `--strict-blocked` mode; audit
   test asserting skip lines carry reasons; mutation gate on exit-code logic.
+- **SHIPPED IN PART (Move 12, MEMORY.md ADL-0025).** The exit-code mapping is a
+  pure function of the report (`engine.ExitCodeFor`), mirrored from the runner so
+  the CLI cannot disagree: 0 all pass, 1 any failure, 2 usage-or-parse, 3
+  secret-resolution, and a BLOCKED-with-reason test is a `# SKIP` line that does
+  NOT fail the run. **A report with NO test points is exit 2, not 0** — reporting
+  success for "nothing happened" is the greenwash AGENTS.md §4.5 exists to
+  prevent, and it is gated. The mapping scans for a secret failure BEFORE any
+  plain failure so exit 3 does not depend on file ordering; the single-pass
+  version made it do so, which mutation M64 caught.
+  **An EMPTY report is exit 2** — a run with no test points has not passed
+  anything, and M66 proves the gate catches the "nothing happened is a pass"
+  mutation.
+  Gates: `TestExitCodeMirrorsTAPResults`, `TestExitCodeForIsATotalFunction`,
+  `TestExitCodeMatrixFromTheCLIPath` (drives the CLI seam).
+  Mutations M63, M64, M65, M65b, M66 all red.
+  NOT met: SIGINT 130 plan-tail emission and the `--strict-blocked` mode's own
+  gate (`--strict-blocked` works; nothing exercises a run that HAS skips).
 
 ## 4.2 Peer-to-Peer Sync (CRDT over mDNS/Tailscale)
 
@@ -1934,6 +1977,24 @@ never leave their OS keychains.
 - **Verify:** Container round-trip test (encrypt→decrypt byte-identical); tamper
   tests per field (flip a byte in each region → verification or decryption failure,
   never silent); format golden-bytes test.
+- **SHIPPED IN PART, WITH A DEVIATION FROM THIS CONTRACT (ADL-0025).** The
+  container is `PVLT1`: magic, a reserved flags byte, a 12-byte `crypto/rand`
+  nonce, and `gcm.Seal`'s output with the tag appended. AES-256-GCM from the
+  stdlib, with NO KDF — the key is 32 bytes of `crypto/rand` held in the
+  keychain, and stretching a uniformly random key is theatre.
+  **The contract's recipient model is NOT what was built.** There is no
+  per-recipient `ephPub | wrappedDEK`, no X25519, no HKDF and no Ed25519
+  signature: one key, one container, no recipient list. Key rotation and
+  revocation therefore have to mean "change the key", which does not help a
+  revoked contributor who already holds the old one — the threat model this
+  section explicitly calls out as the reason for the design.
+  Gates: `TestContainerFormatRoundTrips`, `TestEnvFileRoundTripThroughDisk`,
+  `TestOpenRefusesTamperedContainers` (7 cases: every field flipped, truncated,
+  wrong key).
+  Mutations M61 (a hardcoded nonce) and M62 (the authentication tag dropped) red.
+  NOT met: multi-recipient round-trip, the per-field tamper MATRIX as specified
+  (each region and each byte class), and a golden-bytes test for the container
+  format.
 
 ### 4.3.2 Commit-time encryption flow
 
@@ -1951,6 +2012,15 @@ never leave their OS keychains.
   that fails commits containing keychain-shaped material.
 - **Verify:** End-to-end fixture (3 recipients); G-secret gate on the repo; plaintext-
   zeroization test (post-call scan of the buffer, poisoned buffers).
+- **SHIPPED IN PART (ADL-0025).** `pulse vault encrypt <path.env>` reads the
+  plaintext, seals it under the keychain-derived key, writes the container at
+  0600, and REMOVES the plaintext — a vault next to the `.env` it came from
+  protects nothing. The in-memory plaintext is zeroised after the write, and that
+  zeroisation is legitimate where `Seal`'s was not: `Seal` was originally
+  destroying its CALLER's buffer, which the round-trip gate caught immediately
+  (a function that wipes what it was handed cannot be called twice on the same
+  bytes), so zeroisation moved to the file path that owns the buffer it read.
+  NOT met: the 3-recipient fixture, the G-secret repo scan gate, and rotation.
 
 ### 4.3.3 Resolution-time decryption (via authorized keychains)
 
@@ -1966,6 +2036,11 @@ never leave their OS keychains.
 - **Verify:** Multi-recipient fixture (each authorized member decrypts; an
   unauthorized key yields `ErrNoRecipient`); verify-before-decrypt ordering test;
   no-plaintext-on-disk assertion during resolution.
+- **NOT BUILT (Move 12).** The resolver does not detect `*.vault` references. A
+  request referencing `{{VAULTED_TOKEN}}` fails closed with an unresolved
+  variable, which is the correct SAFE behaviour and the wrong feature.
+  `pulse vault decrypt` writes the plaintext explicitly, which is the one place
+  this repo writes a secret to disk, and it is the user's requested command.
 
 ### 4.3.4 Rotation and revocation
 
