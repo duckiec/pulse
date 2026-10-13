@@ -1793,6 +1793,54 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0029 — Vault crypto re-audit: verified, not rewritten, with fresh M73/M74 proof
+
+- **Date:** 2026-10-13
+- **Status:** ACCEPTED
+- **Context:** The Issue 4 directive describes `vault init`, AES-256-GCM
+  sealing with per-seal nonces, `encrypt`/`decrypt`, and nonce/tamper gates
+  as new work. All of it shipped in Move 12 (ADL-0025, TASKS.md P4.1c.4–8):
+  `internal/secrets/vault.go` carries the full layer, and the gates
+  (`TestSealingTheSamePlaintextTwiceDiffers`,
+  `TestOpenRefusesTamperedContainers`, `TestEnvFileRoundTripThroughDisk`)
+  are green on the unmutated tree. Rewriting working crypto to satisfy a
+  directive would be churn with real regression risk, not progress.
+- **Decision:**
+  - VERIFY, don't rewrite. Confirmed by reading: 32-byte keys from
+    `crypto/rand` (`NewKey`), one 12-byte `crypto/rand` nonce per seal
+    (`generateNonce`), container `PVLT1` + reserved flags byte + prepended
+    nonce + `gcm.Seal` output with 16-byte tag appended, keychain write
+    side via `SecretStore` (`VaultInit`), encrypt-removes-plaintext and
+    decrypt-restores-`.env` at 0600, stdlib only (`crypto/aes`,
+    `crypto/cipher`, `crypto/rand` — no third-party crypto anywhere in
+    `internal/secrets`).
+  - NO `crypto.go` / `crypto_test.go` split. The layer's home is `vault.go`
+    by ADL-0025, referenced from TASKS.md P4.1c.4 and the existing mutation
+    script; moving it would invalidate those refs to satisfy a path mention.
+    Substance over layout.
+  - Fresh mutation proof under new IDs in
+    `scripts/mutation-proof-vault-reaudit.sh`: M73 (fixed 12-byte nonce —
+    the gate names it on trial 1, `010203...0c`) and M74 (failed `Open`
+    returns its bytes — the five auth subtests go red while pre-auth format
+    checks correctly stay green). M73 overlaps M61's claim and is recorded
+    as a re-proof, not a new boundary; M74 is genuinely distinct from M62
+    (seal-time tag drop vs open-time error swallow). Both red →
+    cmp-verified restore → green.
+  - This move does NOT close Move 12 or Goal 4.1, whatever the directive's
+    framing: P4.1c.9 (vault resolution at request time), P4.1b.10/11,
+    P4.1.3, §4.2 CRDT sync, and the PVLT2 recipient model all remain open.
+    TASKS.md is therefore UNCHANGED — P4.1c.4–8 were already checked and
+    are accurate; no box is ticked that was not earned here.
+- **Consequences:** The vault layer has two independent red→green proofs
+  (M61–M68 and M73–M74). The next vault work is P4.1c.9 resolution (Issue 5
+  sequencing: recipient model first), against the `PVLT1` shape documented
+  above.
+- **Refs:** internal/secrets/vault.go, vault_test.go;
+  scripts/mutation-proof-vault-reaudit.sh (M73–M74); TASKS.md P4.1c.4–8
+  (unchanged, re-verified); ROADMAP.md §4.3 (contracts unmoved).
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown
