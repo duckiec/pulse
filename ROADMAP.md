@@ -1072,6 +1072,26 @@ boundaries.
 - **Verify:** Fixture-repo test: expected chunk count/spans per language; planted
   secret in a tracked file never appears in any stored chunk; incremental reindex
   (watcher event) yields exactly the changed chunks.
+  **Partially shipped (MEMORY.md ADL-0021).** The pipeline, the per-language
+  chunkers and the deny-list are built and gated:
+  `TestGoChunksCutAtDeclarationBoundaries`, `TestPythonChunksCutAtIndentationBlocks`,
+  `TestAstroChunksSplitAtStructuralFences`, `TestOversizeDeclarationIsWindowedWithOverlap`,
+  `TestDenyListRefusesSecretFiles`, `TestGitignoreSemantics`, `TestWalkStatsAreHonest`,
+  `TestRedactionRunsBeforeStorageAndEmbedding`, `TestTwoIndexRunsAgree`.
+  **Contract refinements, both forced by something observed:**
+  - **The Go cut uses `decl.Doc`, not `decl.Pos()`.** `decl.Pos()` is the `func`
+    keyword, several lines below the comment, so the naive cut drops the doc
+    comment from every chunk — and the comment is half of what makes a retrieved
+    chunk explain anything.
+  - **A Python block ends at a same-indent block start as well as at a dedent.**
+    A top-level `class` has indent 0, so the dedent rule alone can never fire and
+    the class runs to end of file as one chunk — the module, retrieved whenever
+    any of its methods is named.
+  - **`.gitignore` normalisation preserves a leading `/`.** Stripping it, which
+    looks like tidy-up, converts an anchored rule into one matching at any depth.
+    Over-exclusion is silent and its symptom — an explanation that cannot find
+    the file you are staring at — looks exactly like a retrieval miss.
+  **NOT BUILT:** the fsnotify watcher and the stale-chunk reaper (§3.2.5).
 
 ### 3.2.2 Embedding strategy without CGO vector DBs
 
@@ -1092,6 +1112,25 @@ boundaries.
 - **Verify:** Embedding determinism test (identical text → identical vector);
   unsupported-op test asserts DEGRADED; vector quality smoke test on a fixture corpus
   (nearest-neighbor sanity: a function's own docstring ranks its body first).
+  **Shipped as a structural embedder behind the same interface (ADL-0021).**
+  `onnx-go` is **not vendored**, because the contract it exists to satisfy —
+  a pinned model at `$PULSE_HOME/models/embd-int8.onnx`, fetched out of band and
+  verified by SHA-256 — cannot be satisfied without shipping the artifact, and
+  Pulse never downloads one at runtime (invariant I-3). Shipping a stub behind
+  the identical interface keeps the seam real and the DEGRADED path reachable.
+  What ships is `HashingEmbedder`: signed feature-hashing over identifier tokens,
+  sub-word splits and character trigrams at d=256. It is a real vector and it is
+  informative for code — `TestCamelCaseIsSplit` proves a trace saying "parse http
+  response" finds `parseHTTPResponse` — but it is not semantic, and
+  `Embedder.Name()` returns `structural-hash-v1` so no result can be mistaken for
+  one.
+  **The DEGRADED path is a TYPE, not a nil interface.** `UnavailableEmbedder`
+  returns `ErrModelUnavailable` and never a zero vector, because a zero vector
+  ranks as "matches nothing" and the user would be told their code has no similar
+  chunks rather than that the feature is not installed. Those are different
+  claims and only one of them is true.
+  Gates: `TestEmbeddingIsDeterministic`, `TestEmbeddingSeparatesSimilarFromUnrelated`,
+  `TestCamelCaseIsSplit`, `TestUnavailableEmbedderFailsClosed`, `TestEmptyTextYieldsNoVector`.
 
 ### 3.2.3 Storage and hybrid retrieval in SQLite
 
@@ -1116,6 +1155,33 @@ boundaries.
 - **Verify:** Retrieval benchmark (p99 latency on a 50k-chunk fixture); recall@10
   fixture test (known query→expected chunk); whitelist/secret grep on the new
   schema; background-goroutine assertion.
+  **Partially shipped (ADL-0021).** Schema, hybrid retrieval and the recall gates
+  are built: `TestRAGSchemaSurvivesTheSecretAudit`,
+  `TestHybridRetrievalFindsTheKnownChunk`, `TestVectorLegOrdersByCosine`,
+  `TestReciprocalRankFusionPrefersAgreement`, `TestUpsertIsBoundedPerTransaction`,
+  `TestStaleFTSRowsAreReplaced`, `TestReindexIsIdempotent`,
+  `TestDeleteByFileRemovesBothLegs`, `TestCosineMatchesTheRAGPackage`.
+  **FTS5 availability was PROBED, not assumed** — a build can advertise the
+  compile option and still fail to instantiate the module, and discovering that at
+  first query time means the user's first 500 explanation fails with a syntax
+  error instead of at index time with a clear message.
+  **Three decisions worth recording because each is the opposite of the obvious
+  one:**
+  - **The tables are created by `InitRAG`, not by `Open`.** The main schema
+    applies unconditionally at open, so FTS5 there would make Pulse unopenable on
+    a driver without it — for an optional feature that reports DEGRADED.
+  - **The FTS5 query is BUILT, never passed through.** Error bodies are full of
+    `"`, `*`, `:`, `(`, `AND`, `OR`, `NOT`, `NEAR`. Handing one to `MATCH`
+    verbatim turns every response containing a quote into a query syntax error:
+    the explanation feature failing precisely when it is needed.
+    `TestFTSQueryCannotBeInjected` sends eight realistic 500 bodies.
+  - **A chunk's row and its FTS row are written in the SAME transaction.**
+    Splitting them leaves a window where a chunk is findable by vector and
+    invisible to lexical search — an index that disagrees with itself depending
+    on which leg you ask.
+  **NOT RUN:** the 50k-chunk p99 latency benchmark. The recall fixtures are 2–4
+  chunks; the O(N·d) cost at the ceiling is argued from the operation count
+  (~12.8M int8 multiply-adds at d=256, N=50k), not measured.
 
 ### 3.2.4 Attaching backend handler code to a 500
 
@@ -1133,6 +1199,29 @@ boundaries.
   error text passes `RedactString` before embedding *and* after retrieval.
 - **Verify:** Failure-to-chunk correlation test on a fixture repo (seeded bug →
   expected handler ranks top-3); redaction test with a token in the error body.
+  **Shipped (ADL-0021).** Gates:
+  `TestFiveHundredBindingIsNotSuppressedOnSuccess` (11 status cases, asserting
+  **both** directions), `TestErrorTextExtraction` (9 body shapes),
+  `TestExtractionIsBounded`, `TestBindingRedactsErrorText`,
+  `TestBindingRedactsRetrievedSource`, `TestRetrievalFailureIsDegradedNotFatal`,
+  `TestDegradedRetrievalIsLabelled`, `TestBindingIsBounded`, `TestNilBinderIsSilent`,
+  `TestStoreRetrieverMapsEveryField`, `TestRenderBindingProducesReadableOutput`.
+  **The 5xx gate is `500 <= status <= 599`, exactly, and both directions are
+  pinned** because they fail differently. A 5xx that gets no context is a silent
+  feature failure — the worst kind, because everything looks healthy. A 200 that
+  does is noise that costs the agent's context window and teaches it to ignore
+  the attachment. The range is closed at both ends on purpose: a synthetic or
+  proxied status above 599 is not a server error this binder can explain, and
+  attaching source to it would be a confident wrong answer.
+  **Redaction runs on the error text BEFORE it becomes a search query**, not after
+  — the query reaches an embedding and then a store, so a secret in it is a secret
+  on disk and in a model's context window.
+  **A retrieval failure is a degradation, never a failure of the request.** The
+  agent asked to run a request and got a 500; that is the answer, and the context
+  attachment is recorded in `warnings` where the agent will see it.
+  **NOT BUILT:** no `internal/app` composition root exists, so nothing hands a
+  `*store.Store` to the binder and this is not yet reachable from `pulse --mcp`.
+  `StoreRetriever` exists and is gated; the wiring does not.
 
 ### 3.2.5 Incremental maintenance and index health
 
@@ -1296,6 +1385,10 @@ boundaries.
 - G-hyg: zero stdout writes in MCP paths; stray-write regression test fails build.
 - Lifecycle conformance against a scripted MCP client (3.1.4).
 - RAG: determinism, recall fixture, secret-free chunks, DEGRADED path when no model.
+  **Partially met (ADL-0021):** determinism, recall, secret-free chunks and the
+  DEGRADED path are green. NOT met: the 50k-chunk p99 latency benchmark, the
+  incremental-reindex branch-switch simulation (§3.2.5), and the composition root
+  that would make a 5xx explanation reachable from a running server.
 - Fuzzing: determinism, dedup, cancellation, budget.
 - Wasm: bounds tests, import whitelist, key-never-enters-guest proof, trap recovery.
 - Dependency registry updated; ADLs appended; `ARCHITECTURE.md` MCP/RAG/wasm

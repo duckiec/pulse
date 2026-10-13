@@ -982,6 +982,168 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0021 — Local RAG: FTS5 + brute-force cosine fused by RRF, and the chunking heuristics
+
+- **Date:** 2026-10-13
+- **Status:** ACCEPTED
+- **Context:** ROADMAP.md §3.2. The goal is narrow and concrete: when an API
+  answers 5xx, hand the local LLM the backend code most likely responsible. The
+  difficulty is that the obvious implementation is forbidden. `sqlite-vec`,
+  `vss`, and every other SQLite vector extension are **C libraries**, and
+  AGENTS.md §2.1 makes `CGO_ENABLED=0` mandatory on every platform and every CI
+  job. There is therefore no vector extension, no ANN index, no HNSW — not as a
+  performance trade-off, but as a constraint of the build. The same constraint
+  rules out `onnx-go` fetching a MiniLM artifact at runtime (invariant I-3,
+  offline-first), so there is no neural embedding either.
+- **Decision — two independent signals, fused by Reciprocal Rank Fusion:**
+  - **Lexical: FTS5** (verified compiled into `modernc.org/sqlite` v1.60.1, with
+    `bm25()` callable — a probe at implementation time, not an assumption).
+    FTS5 finds exact tokens, which is what a stack trace supplies.
+  - **Structural: brute-force cosine** over int8 vectors, computed in Go. FTS5
+    finds tokens; cosine finds shape, and neither subsumes the other.
+  - **Fusion: RRF with k=60**, `1/(k+rank)` summed across whichever signals
+    placed a chunk. RRF merges two **rankings**, not two scores, so it needs no
+    calibration between an unbounded bm25 and a cosine in [-1,1] — which is the
+    whole reason it is used rather than a weighted sum.
+  - The cost is O(N·d) for the cosine leg at d=256 int8, ~256 multiply-adds per
+    chunk, ~12.8M ops at the ROADMAP's 50k ceiling. Bounded by the FTS leg
+    taking candidates first.
+- **Decision — the embedding is structural, and says so.** `HashingEmbedder` is a
+  signed feature-hashing projection over identifier tokens, sub-word splits, and
+  character trigrams at d=256. It is a real vector and genuinely informative for
+  code — it captures `camelCase` morphology, so a trace saying "parse http
+  response" finds `parseHTTPResponse` — but it is NOT semantic, and
+  `Embedder.Name()` returns `structural-hash-v1` so every result is labelled.
+  `UnavailableEmbedder` is a **first-class type**, not a nil interface: "the
+  model is not installed" must be reported to the user, not silently treated as
+  "no results". Its `Embed` returns `ErrModelUnavailable`, never a zero vector,
+  because a zero vector ranks as "matches nothing" and the user is told their
+  code has no similar chunks rather than that the feature is not installed.
+  This is ROADMAP.md §3.2.2's DEGRADED contract honoured with the model path
+  stubbed at the interface boundary rather than faked behind it.
+- **Decision — chunking cuts at FUNCTIONAL boundaries, per language, with
+  windowing only as overflow:**
+  - **Go: `go/parser`.** The boundaries are the compiler's own
+    (FuncDecl/GenDecl/TypeSpec), and the doc comment is included via `decl.Doc`.
+    Scanning for the word `func` would start bogus chunks inside string literals
+    and comments; a chunk beginning mid-expression is worse than no chunk
+    because it retrieves confidently and wrongly. Method symbols are
+    receiver-qualified (`(*Router).handleUsers`) because two `Serve` methods on
+    different types are different bugs.
+  - **Python: indentation IS the structure.** No Python parser exists in the Go
+    stdlib and adding one would violate stdlib-first for a heuristic that does not
+    need exactness. `def`/`async def`/`class`/`@` start a block at **any**
+    indentation, and a block ends at the next dedent **or** at the same indent
+    that starts a new block — the second condition is the one that is easy to
+    miss, and without it a top-level `class` (indent 0) runs to end of file and
+    yields one chunk for the whole module. Nested defs become their own named
+    chunks: a stack frame names `inner`, and a chunk labelled `handle` that
+    merely contains `inner` is a weaker match.
+  - **Astro: structural fences** — frontmatter, `<script>`, `<style>`, template.
+  - **Windowing is overflow, not the default**: declarations over 64 lines are
+    split with 16-line overlap. The overlap is not decoration — without it a
+    defect on a boundary line lands in neither window when the split moves.
+- **Decision — the secret guarantee is at the WALKER, not the scrubber.** A file
+  matching `.env*`, `*.pem`, `*.key`, `id_rsa`, `.git-credentials`, `secrets.*`
+  and the like is never OPENED. A secret that is read can already have been
+  indexed; redaction afterwards is too late. `.gitignore` semantics are a
+  documented subset, and a leading `/` is preserved by normalisation because
+  stripping it (the obvious cleanup) turns an anchored rule into one that matches
+  at any depth — silent over-exclusion.
+- **Decision — the FTS5 query is BUILT, never passed through.** Real error text
+  contains `"`, `*`, `:`, `(`, `AND`, `OR`, `NOT`, `NEAR` — all FTS5 syntax.
+  Handing a 500 body to `MATCH` verbatim turns every response whose body contains
+  a quote into a query syntax error, i.e. the explanation feature fails precisely
+  when it is needed. Terms are extracted as `[A-Za-z0-9_]` runs (FTS5's own
+  bareword alphabet) and re-emitted as quoted phrases joined by **OR** — OR
+  because a stack trace's tokens are mostly absent from any single file and AND
+  would return zero rows exactly when the identifier matters most.
+- **Decision — RAG tables are created by `InitRAG`, not by `Open`.** The main
+  schema applies unconditionally when the history database opens, so putting
+  FTS5 there would make the whole application unopenable on a driver build
+  without FTS5 — for a feature that is optional and reports DEGRADED honestly. A
+  user who never indexes a codebase should not be unable to run Pulse at all.
+  `InitRAG` probes with a real CREATE and a real `bm25()` call, because a build
+  can advertise the flag and still fail to instantiate the module, and finding
+  that out at first query time means the user's first 500 explanation fails with
+  a syntax error instead of at index time with a clear message.
+- **Decision — writes are batched at 256 chunks per transaction.** A single
+  transaction for 50k chunks holds the write lock for minutes; batching means a
+  concurrent reader (an MCP session mid-explanation) waits milliseconds. Each
+  chunk's row and its FTS5 row are written in the SAME transaction, because
+  splitting them leaves a window where a chunk is findable by vector and
+  invisible to lexical search — an index that disagrees with itself depending on
+  which leg you ask.
+- **Decision — internal/mcp does not import internal/store, and internal/store
+  does not import internal/rag.** The dependency flow in ARCHITECTURE.md §3 is
+  one-directional, so the store's `CosineInt8` and the RAG package's are written
+  twice and pinned to agree by `TestCosineMatchesTheRAGPackage`; the MCP
+  `Retriever` interface is satisfied by `StoreRetriever`, which takes function
+  parameters rather than the store type, so no database driver is reachable from
+  inside the MCP-reachable package tree (AGENTS.md §3.3).
+- **Consequences — what the gates proved, including about themselves.**
+  Four separate gates had to be rewritten because they measured the wrong thing,
+  and the reasons are the most useful part of this entry:
+  - **Memory ceiling.** Whole-process RSS is dominated by the Go runtime's
+    baseline; `HeapAlloc` with the collector DISABLED reports total allocation
+    (278 MB for a 1,000-file corpus — churn, not retention); and a *sampled*
+    `HeapAlloc` peak carries the collector's own policy, swinging between 1.15x
+    and 2.44x on identical source across five runs. The gate now asserts against
+    the walker's OWN `PeakBuf` high-water mark — the largest single-file read
+    buffer, tracked by the code that allocates it — and requires that it not
+    grow while the chunk count does. That is machine-independent and cannot drift
+    with GC timing. Measured: 3,138 bytes for both 125 and 1,000 files, 1.00x.
+  - **File-descriptor leak.** `/proc/self/fd` sampled before and after 12 rounds
+    of cancelled walks plus 25 differently-timed aborts; delta exactly 0.
+  - **Churn.** TotalAlloc is bounded at 256x source. The gate SKIPS under `-race`
+    with a stated reason: the detector's shadow allocations inflate TotalAlloc
+    by 8-10%, and the measurement is 237x in a normal build versus 257x under
+    `-race` on identical source — a 256x threshold sitting inside the
+    instrumentation's noise would pass or fail depending on whether the race
+    detector was switched on. Loosening the bound instead would leave a bound
+    that no longer says what it was chosen to say.
+  - **Mutation proof M25–M31**, all red → restore → green. Two of the seven
+    boundaries took seven attempts to make meaningful, and that is recorded in
+    `scripts/mutation-proof-rag.sh` rather than tidied away:
+    - *M30 (vector-leg ordering).* The obvious mutation — changing cosine's
+      divisor — is a **no-op**: `quantize` rescales every vector to L2 length
+      exactly 127, so `|a|·|b|` already equals 127². Both a straight divisor
+      change and a clamp to 127² left the gate green. The reason is a real design
+      property: **RRF consumes rankings, not scores**, so narrowing the numeric
+      band changes the returned `Score` but not the order fusion sees. Only an
+      ordering change is a behavioural break.
+    - *M31 (consumer's right to stop).* Six earlier mutations left the gate
+      green, each for a correct reason: cancellation is enforced at four
+      independent points, so disabling one is masked by the other three; and the
+      consumer's exit is independently visible through `done`. The seventh
+      attempt deadlocked for 600 seconds — and that hang was a **real defect**,
+      so the fix went into the code rather than the gate: termination now cancels
+      a derived context, and the producer already selects on `ctx.Done()` for the
+      caller's own cancellation. One mechanism, no site where it can be
+      forgotten, no reachable deadlock. The shipped mutation removes the
+      consumer's right to stop while keeping liveness (workers drain rather than
+      exit, producer stops watching `done`).
+- **Consequences — honest gaps, NOT claimed done:**
+  - **No `internal/app` composition root.** `StoreRetriever` exists and is
+    gated, but nothing wires a `*store.Store` into an MCP server, so the binding
+    is not reachable from `pulse --mcp` yet. This is the same gap P4.3.3 records
+    from Move 7 and it now blocks the explanation feature end to end.
+  - **No incremental reindex (ROADMAP §3.2.5).** `DeleteRAGChunksByFile` and the
+    content-addressed id are the primitives it needs and are built; the fsnotify
+    watcher is not. Branch-switch simulation is NOT RUN.
+  - **No retrieval-latency benchmark at 50k chunks.** The recall gates are
+    fixtures of 2–4 chunks; the O(N·d) claim at the ROADMAP's ceiling is argued
+    from the operation count, not measured.
+  - **`onnx-go` is not vendored.** ROADMAP §3.2.2 names it; shipping a stub
+    behind the same interface was chosen because a model artifact cannot be
+    fetched at runtime and none is vendored. The interface is the seam.
+- **Refs:** internal/rag/rag.go, walker.go, chunk.go, embed.go, indexer.go,
+  indexer_test.go, race_on_test.go, race_off_test.go; internal/store/rag.go,
+  rag_test.go; internal/mcp/error_binder.go, error_binder_test.go, tools.go;
+  scripts/mutation-proof-rag.sh; TASKS.md P3.2.1–P3.2.4; ROADMAP.md §3.2
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

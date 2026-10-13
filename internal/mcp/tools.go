@@ -95,6 +95,13 @@ type Outcome struct {
 	RequestIdx int                       `json:"request_index"`
 	Telemetry  *engine.TelemetrySnapshot `json:"telemetry,omitempty"`
 	Warnings   []string                  `json:"warnings,omitempty"`
+
+	// Context carries backend source bound to a 5xx failure (ROADMAP.md
+	// §3.2.4). nil on every non-5xx outcome and on a 5xx with nothing to
+	// attach — which are different states, and the difference is the point:
+	// nil means "no context was bound", and the agent is told nothing about
+	// whether that is because the run succeeded or because the index is empty.
+	Context *Binding `json:"context,omitempty"`
 }
 
 // EngineExecutor is the production Executor, backed by the AST parser and the
@@ -295,7 +302,15 @@ func (s *collectingSink) outcome(origin string, index int, r engine.Redactor) *O
 // ---- tool registration -----------------------------------------------------
 
 // RegisterTools installs every tool on srv.
-func RegisterTools(srv *mcpserver.MCPServer, exec Executor) error {
+func RegisterTools(srv *mcpserver.MCPServer, exec Executor, opts ...Option) error {
+	var ro registerOptions
+	for _, fn := range opts {
+		if fn != nil {
+			fn(&ro)
+		}
+	}
+	binder := ro.binder
+
 	tool := mcp.NewTool(ToolExecuteRequest,
 		mcp.WithDescription(
 			"Execute an HTTP request written in the .http file format. "+
@@ -315,9 +330,26 @@ func RegisterTools(srv *mcpserver.MCPServer, exec Executor) error {
 			mcp.Description("Set false to return status and headers only. Default true.")),
 	)
 	srv.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return handleExecuteRequest(ctx, exec, req)
+		return handleExecuteRequest(ctx, exec, binder, req)
 	})
 	return nil
+}
+
+// Option configures tool registration.
+type Option func(*registerOptions)
+
+// ---- tool registration -----------------------------------------------------
+
+// WithFailureBinder installs contextual error binding for execute_request.
+//
+// A nil binder is legal and means "this server does not index code": the tool
+// omits the attachment entirely rather than emitting an empty one.
+func WithFailureBinder(b *FailureBinder) Option {
+	return func(o *registerOptions) { o.binder = b }
+}
+
+type registerOptions struct {
+	binder *FailureBinder
 }
 
 // handleExecuteRequest validates, dispatches, and formats.
@@ -326,7 +358,7 @@ func RegisterTools(srv *mcpserver.MCPServer, exec Executor) error {
 // no path where a malformed argument from an agent becomes a crash: the agent
 // is an untrusted input source, and a panic in a server the agent did not write
 // is a denial of service it can trigger by accident.
-func handleExecuteRequest(ctx context.Context, exec Executor, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleExecuteRequest(ctx context.Context, exec Executor, binder *FailureBinder, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	input, err := ValidateExecuteRequest(req.GetArguments())
 	if err != nil {
 		// No partial dispatch: the engine is never touched.
@@ -386,6 +418,14 @@ func handleExecuteRequest(ctx context.Context, exec Executor, req mcp.CallToolRe
 	// an agent can tell what it actually asked for from what Pulse ran.
 	out.Warnings = append(out.Warnings, input.Warnings...)
 
+	// Contextual error binding (ROADMAP.md §3.2.4). This runs ONLY for a 5xx,
+	// and only when a binder is configured. It is enrichment: if retrieval
+	// fails the request result stands on its own, with a warning recording the
+	// degradation.
+	if binder != nil && out.Status >= 500 && out.Status <= 599 {
+		binder.ExplainFailure(ctx, out, SymbolHintFromURL(out.URL))
+	}
+
 	payload := renderOutcome(out, input)
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{mcp.NewTextContent(payload)},
@@ -424,7 +464,53 @@ func renderOutcome(out *Outcome, input *ToolInput) string {
 	for _, w := range out.Warnings {
 		fmt.Fprintf(&b, "warning: %s\n", w)
 	}
+	if out.Context != nil && len(out.Context.Chunks) > 0 {
+		renderBinding(&b, out.Context)
+	}
 	return b.String()
+}
+
+// renderBinding writes the backend-context attachment for an agent's context
+// window.
+//
+// It is plain text with path:line prefixes rather than a JSON blob because the
+// agent is reading this in a context window and a reviewer is reading it in a
+// transcript; both want `internal/handlers/user.go:88` more than they want
+// `{"path":"internal/handlers/user.go","start_ln":88}`.
+func renderBinding(b *strings.Builder, bind *Binding) {
+	fmt.Fprintf(b, "\nbecause this request failed with %d, the most relevant local code:\n",
+		bind.Status)
+	if bind.ErrorText != "" {
+		fmt.Fprintf(b, "  error: %s\n", singleLine(bind.ErrorText))
+	}
+	if bind.Degraded {
+		fmt.Fprintf(b, "  (DEGRADED: %s retrieval only, no embedding model)\n", bind.Embedder)
+	}
+	for _, c := range bind.Chunks {
+		fmt.Fprintf(b, "\n  --- %s:%d-%d", c.Path, c.StartLn, c.EndLn)
+		if c.Symbol != "" {
+			fmt.Fprintf(b, " (%s)", c.Symbol)
+		}
+		if len(c.Sources) > 0 {
+			fmt.Fprintf(b, " [matched by %s]", strings.Join(c.Sources, "+"))
+		}
+		b.WriteString("\n")
+		for _, line := range strings.Split(strings.TrimRight(c.Text, "\n"), "\n") {
+			fmt.Fprintf(b, "    %s\n", line)
+		}
+	}
+	for _, n := range bind.Notes {
+		fmt.Fprintf(b, "\n  note: %s\n", n)
+	}
+}
+
+// singleLine collapses a multi-line fragment so it cannot break the labelled
+// layout above.
+func singleLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func prettyJSON(body string) (string, bool) {

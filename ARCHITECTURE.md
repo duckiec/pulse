@@ -90,12 +90,20 @@ runtime; they are the only two consumers of `internal/app`.
 | `cmd/pulse` | Flags, mode selection, wiring, exit codes | `app`, `ui`, `mcp`, `golang.org/x/term` | — (leaf wiring only) |
 | `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
 | `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport | `app` (not built); today `ast`, `engine`, `secrets` via `EngineExecutor` | `ui` |
+| `internal/rag` | Codebase indexing: bounded walker, per-language chunking, structural embedder | stdlib only (`go/parser`) | everything internal; **`store` and `mcp` both depend on this layer's OUTPUT, not on it** |
 | `internal/app` | Shared services: run request, list collections, history queries, variable resolution | `ast`, `engine`, `store`, `secrets` | `ui`, `mcp` |
 | `internal/engine` | `ProtocolEngine` executors (REST, SSE, gRPC), streaming, checksums, telemetry | `ast` (types) | `ui`, `mcp`, `store` |
 | `internal/ast` | Lexer, parser, zero-allocation AST, `iter.Seq` traversal | stdlib only | everything internal |
 | `internal/store` | SQLite schema, migrations, history persistence | stdlib + `modernc.org/sqlite` | everything internal |
 | `internal/secrets` | Keychain backends, ephemeral env, resolver chain, redaction | stdlib + sanctioned backends (§7) | everything internal |
 | `internal/devtools/importaudit` | Static, offline dependency + stdout-hygiene audit (dev tooling) | stdlib only | everything internal; never imported by shipped code |
+
+**Move 8 added no dependency at all.** Local RAG (`internal/rag`) is stdlib-only:
+`go/parser` for Go chunking, `embed`-free hashing for the structural vector, and
+FTS5 + brute-force cosine in `internal/store` on the existing `modernc.org/sqlite`
+driver. There is no vector extension (all are C libraries, barred by §2.4) and no
+ONNX runtime is vendored (ROADMAP.md §3.2.2's model artifact cannot be fetched at
+runtime, invariant I-3). The Embedder interface is the seam a real model drops into.
 
 Supporting directories (not Go packages): `config/allowed-modules.txt` (sanctioned
 dependency allowlist), `scripts/` (`bootstrap-toolchain.sh`, `ci/*` gate scripts,
@@ -588,3 +596,110 @@ Built with the `go` toolchain only (`CGO_ENABLED=0 go build -trimpath ./cmd/puls
 ---
 
 *Topology changes to this document are mandatory and same-commit per AGENTS.md §4.6.*
+
+## 12. Local RAG (`internal/rag` + `internal/store/rag.go` + `internal/mcp/error_binder.go`)
+
+**Status (MEMORY.md ADL-0021):** indexing, storage, retrieval and 5xx binding are
+built and gated. Incremental reindex, the 50k-chunk latency benchmark, and the
+`internal/app` composition root that would make the explanation reachable from a
+running server are **not** built.
+
+### 12.1 Why there is no vector extension
+
+`sqlite-vec`, `vss`, and every other SQLite vector extension are C libraries.
+`CGO_ENABLED=0` is mandatory on every platform and every CI job (§2.1), so there
+is no vector extension, no ANN index and no HNSW — not as a performance
+trade-off, but as a constraint of the build. FTS5 **was verified compiled into
+`modernc.org/sqlite` v1.60.1 with a callable `bm25()`** by probe, not assumed.
+
+### 12.2 Hybrid retrieval
+
+| Signal | Implementation | Finds |
+|---|---|---|
+| Lexical | FTS5 + `bm25()`, top-200 | exact tokens — what a stack trace supplies |
+| Structural | brute-force cosine over int8, d=256 | shape, identifier morphology |
+
+Fused by **Reciprocal Rank Fusion** (`1/(60+rank)`, summed across whichever
+signals placed a chunk). RRF merges two **rankings**, not two scores, so it needs
+no calibration between an unbounded bm25 and a cosine in [-1,1] — which is the
+whole reason it is used over a weighted sum. Each hit reports `lexical_rank`,
+`vector_rank` and `sources`, so a fused result is auditable.
+
+**The FTS5 query is built, never passed through.** Error bodies are full of `"`,
+`*`, `:`, `(`, `AND`, `OR`, `NOT`, `NEAR`; handing one to `MATCH` verbatim turns
+every response containing a quote into a query syntax error — the explanation
+feature failing precisely when it is needed. Terms are extracted as FTS5's own
+bareword alphabet and re-emitted as quoted phrases joined by **OR** (AND would
+return zero rows exactly when the identifier matters most).
+
+### 12.3 Chunking (functional boundaries, windowing only as overflow)
+
+| Language | Cut at | Notes |
+|---|---|---|
+| Go | `go/parser` top-level decls | compiler's boundaries, not a guess; `decl.Doc` included; symbols receiver-qualified (`(*Router).handle`) |
+| Python | indentation-defined blocks | indentation IS the structure; a block ends at a dedent **or** a same-indent block start; nested `def`s get their own named chunks |
+| Astro | frontmatter / `<script>` / `<style>` / template | HTML with islands, so the author's own units |
+
+Declarations over **64 lines** are windowed with **16-line overlap**. The overlap
+is not decoration: without it, a defect on a boundary line lands in neither
+window when the split point moves.
+
+### 12.4 Secret guarantees
+
+- **Deny-list at the WALKER**: a file matching `.env*`, `*.pem`, `*.key`,
+  `id_rsa`, `.git-credentials`, `secrets.*` is never *opened*. A secret that is
+  read can already have been indexed; redaction afterwards is too late.
+- **Redaction before storage AND before embedding.** An embedding of a secret is
+  a secret in a form nothing downstream can redact — it is already hashed into
+  numbers.
+- **The RAG schema passes the same `AuditSchema` no-credential-columns gate** as
+  the history schema.
+- Error text and retrieved source are both redacted before the error text becomes
+  a search **query**: the query reaches an embedding and then a store.
+
+### 12.5 Streaming and memory
+
+`Index(root, opts…) iter.Seq2[Chunk, error]` is **lazy**, and that is the memory
+contract rather than an API convenience: a generator that accumulated its output
+would hold every chunk of the repository live at once. A consumer that writes and
+drops keeps the live set at one file's chunks plus one worker.
+
+Bounded by construction: fixed worker pool (never a goroutine per file), a
+512 KiB per-file cap enforced from the directory entry, one descriptor open per
+worker, pooled read buffers. **Termination cancels a derived context** rather than
+using a side channel — a side channel must be selected on at every point the
+producer can block, and any forgotten point is a deadlock reported as a suite
+timeout. The gate asserts the walker's own `PeakBuf` high-water mark does not grow
+while the chunk count does (3,138 bytes at both 125 and 1,000 files).
+
+### 12.6 5xx binding
+
+`FailureBinder` runs on every outcome and attaches the top-3 retrieved chunks
+when, and only when, `500 <= status <= 599`. Both directions matter: a 5xx that
+gets no context is a silent feature failure, and a 200 that does is noise that
+costs context window and teaches the agent to ignore the attachment. A retrieval
+failure is a **DEGRADATION recorded in `warnings`**, never a failure of the
+request — the agent asked to run a request and got a 500, and that is the answer.
+
+`internal/mcp` does **not** import `internal/store` (§3.1); the seam is the
+`Retriever` interface, satisfied by `StoreRetriever`, which takes function
+parameters rather than the store type. That keeps the database driver out of the
+MCP-reachable package tree (AGENTS.md §3.3).
+
+### 12.7 Storage
+
+```
+rag_chunks(id PK, path, lang, start_ln, end_ln, symbol, text, vec BLOB, scale, updated_at)
+rag_fts   VIRTUAL TABLE fts5(text, symbol, path, content='rag_chunks')
+rag_meta(key PK, value)
+```
+
+Created by `InitRAG`, **not** by `Open`: the main schema applies unconditionally
+when the history database opens, so putting FTS5 there would make Pulse
+unopenable on a driver build without FTS5 — for an optional feature. Writes are
+batched at **256 chunks per transaction** so a concurrent reader waits
+milliseconds; each chunk's row and its FTS row share the transaction, because
+splitting them leaves an index that disagrees with itself depending on which leg
+you ask.
+
+---
