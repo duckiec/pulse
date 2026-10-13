@@ -43,49 +43,46 @@ opencode.json
 #      excluded here, so root negations apply normally.
 *.md
 
-# --- the seven Essential Vibe Coding Files (AGENTS.md §4.6) ---
-# DESIGN_SYSTEM.md is whitelisted alongside the other six DELIBERATELY. It is
-# the TUI aesthetics and keybinding contract, it is one of the seven, and a
-# whitelist that omitted it would untrack a mandated document — the exact
-# failure the default-deny above exists to prevent, reintroduced through the
-# exception list.
+# --- the tracked documentation surface ---
+# Six negations. Anything else ending in .md is denied by the rule above.
+# README.md and CONTRIBUTING.md do not exist yet; their negations are
+# permissions, not files.
 !/AGENTS.md
 !/PRD.md
 !/ARCHITECTURE.md
-!/DESIGN_SYSTEM.md
-!/ROADMAP.md
-!/TASKS.md
-!/MEMORY.md
-
-# --- skill-agent configuration (MEMORY.md ADL-0026) ---
-# These three are NOT part of the seven Essential Vibe Coding Files. They are
-# read by the engineering skills (triage, to-spec, to-tickets, domain-modeling)
-# and mean nothing to the compiler, so they are whitelisted narrowly rather than
-# by loosening the default-deny above.
-#
-# `/.agents/*.md` is anchored AND single-star ON PURPOSE. Git semantics that
-# made this subtle are documented in the header: an unanchored `!` matches at
-# every depth, and a single `*` does not cross a `/`. So this line whitelists
-# exactly the three config files sitting directly in `.agents/` and leaves the
-# ~40 vendored SKILL.md files underneath `.agents/skills/` ignored. Untracking
-# the vendor tree is the existing policy for `.opencode/` (ADL-0013/0014): it is
-# reproducible from `skills-lock.json` plus the pinned upstream, so committing
-# ~40 third-party files would add review surface for no provenance gain.
-!/.agents/*.md
-!/GLOSSARY.md
-
-# --- conventional repository files ---
-# None of these three exists yet; the negations are permissions, not files.
-# README.md and CONTRIBUTING.md are whitelisted here by explicit directive even
-# though AGENTS.md §4.6 currently says "no README.md or other root-level
-# document is authorized" — a contradiction recorded in MEMORY.md ADL-0024
-# rather than resolved unilaterally here, because the two documents disagree
-# about intent and only one of them is a code contract.
 !/README.md
 !/CONTRIBUTING.md
-
-# LICENSE has no .md extension, so the rule above never matches it. It is named
-# anyway, because a reader of this file should not have to work that out: the
-# complete set of tracked documentation-adjacent files is the seven, these two,
-# and the licence.
 !/LICENSE
+
+# --- tracked but NOT whitelisted, and why that is not a contradiction ---
+# Four of the seven Essential Vibe Coding Files - DESIGN_SYSTEM.md, ROADMAP.md,
+# TASKS.md, MEMORY.md - plus GLOSSARY.md and the three .agents/*.md config files
+# are tracked in HEAD while this file no longer whitelists them.
+#
+# THIS IS NOT A LIE, IT IS GIT SEMANTICS: an ignore rule only ever governs
+# UNTRACKED files. A tracked file stays tracked no matter what .gitignore says,
+# so dropping these negations denies every FUTURE .md file without untracking a
+# single existing one. The working set is unchanged.
+#
+# Actually untracking them is a SEPARATE, DESTRUCTIVE step (`git rm --cached`)
+# and was NOT taken here, for two reasons that are load-bearing rather than
+# stylistic:
+#
+#   * scripts/ci/doc-sync-gate.sh greps
+#     `^(AGENTS|PRD|ROADMAP|ARCHITECTURE|DESIGN_SYSTEM|TASKS|MEMORY)\.md$`
+#     over `git diff --name-only`, which only ever lists TRACKED files. Untrack
+#     those four and the gate can never match, so every commit touching cmd/ or
+#     internal/ would fail CI permanently - the gate would reject correct work
+#     for the reason that the work carried no documentation, which is the
+#     opposite of what AGENTS.md 4.6 asks of it.
+#   * MEMORY.md is the append-only ADL ledger. ADL-0015 - the rule that makes
+#     origin/main canonical and forbids force-pushing it - lives there, so
+#     untracking it removes the provenance rule the repository is built on.
+#
+# To genuinely slim the public surface, the change belongs in doc-sync-gate.sh
+# and AGENTS.md 4.6, not in this file.
+
+# --- local agent scratch ---
+# HANDOFF.md and anything like it: working notes for one session, never state.
+# A handoff should POINT at TASKS.md or MEMORY.md, both of which are tracked.
+/HANDOFF.md
