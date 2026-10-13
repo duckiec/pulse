@@ -75,7 +75,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse [flags]")
 		fmt.Fprintln(stderr, "       pulse mcp")
-		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked]")
+		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent]")
 		fmt.Fprintln(stderr, "       pulse vault init|encrypt|decrypt <file> [--key-id ID]")
 		fmt.Fprintln(stderr, "mcp mode exposes: "+describeTools())
 		fs.PrintDefaults()
@@ -128,12 +128,22 @@ func runTest(ctx context.Context, args []string, stderr io.Writer) int {
 		timeout       = fs.Duration("timeout", engine.DefaultTestTimeout, "per-request timeout")
 		strictBlocked = fs.Bool("strict-blocked", false,
 			"fail the run when any test is BLOCKED and reported as a skip")
+		formatFlag = fs.String("format", "tap", "output format: tap or json")
+		silent     = fs.Bool("silent", false,
+			"suppress all stdout output; the exit code still reflects the run")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: pulse test <dir>")
+		fmt.Fprintln(stderr, "usage: pulse test <dir> [--format tap|json] [--silent]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	// An unknown format is a usage error: halt BEFORE any test executes so a
+	// typo cannot report a green run.
+	format, err := app.ParseTestFormat(*formatFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse test: %v\n", err)
 		return exitUsage
 	}
 	root := fs.Arg(0)
@@ -143,8 +153,8 @@ func runTest(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 
 	// `pulse test` is a single-shot command and never installs the stdout
-	// lock, so its TAP output is ordinary stdout and there is no JSON-RPC
-	// stream to corrupt (ROADMAP.md §4.1.3, G-hyg).
+	// lock, so its report output (TAP or JSON) is ordinary stdout and there
+	// is no JSON-RPC stream to corrupt (ROADMAP.md §4.1.3, G-hyg).
 	application, err := app.New(ctx, appConfig())
 	if err != nil {
 		fmt.Fprintf(stderr, "pulse: %v\n", err)
@@ -159,7 +169,7 @@ func runTest(ctx context.Context, args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
 	}
 
-	code, err := application.TestDir(ctx, root, os.Stdout, *parallel, *timeout, *strictBlocked)
+	code, err := application.TestDirEx(ctx, root, os.Stdout, *parallel, *timeout, *strictBlocked, format, *silent)
 	if err != nil {
 		fmt.Fprintf(stderr, "pulse test: %v\n", err)
 		// A parse failure is exit 2, a secret failure exit 3, and anything

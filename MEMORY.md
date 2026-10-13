@@ -1709,6 +1709,45 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0027 — `pulse test` gains JSON and silent formatters with exit-code purity
+
+- **Date:** 2026-10-13
+- **Status:** ACCEPTED
+- **Context:** Move 12 left `pulse test` TAP-only (ADL-0025 consequences): no
+  `--format json` / `--silent`, although the engine/runner split was built
+  precisely so a second formatter costs no engine change. HANDOFF.md §4.2
+  sequenced this first because it has zero open design questions.
+- **Decision:**
+  - `internal/app` owns a `TestFormat` (`tap` default, `json`) with
+    `ParseTestFormat` failing closed on anything else; `TestDirEx` validates
+    the format BEFORE any request dispatches (unknown → exit 2, zero bytes,
+    zero requests) and `RunTest` renders BOTH documents from the same
+    redacted entries. `--silent` returns the report's exit with zero writes.
+  - Exit mapping is UNCHANGED and still `engine.ExitCodeFor`'s pure function
+    (0 pass-or-skipped, 1 failure, 2 parse/usage, 3 secret-first): the
+    formatter copies `total`/`passed`/`failed`/`skipped`/`exit` from the
+    report and never recomputes them, so TAP and JSON cannot disagree.
+  - Redaction parity is structural, not assumed: JSON is built from the same
+    entry stream TAP consumes, and `TestJSONRedactsSecrets` drives the one
+    runner path that echoes response content (a header-equality failure,
+    assert.go `%s is %q, want %q`) carrying a vault value.
+  - Mutation pool advances to M69 (total mapped into `passed`) and M70
+    (`--silent` falls through to TAP), proven in
+    `scripts/mutation-proof-formatters.sh` with cmp-verified restore.
+    `ARCHITECTURE.md` is untouched: no package, data flow, or schema moved.
+- **Consequences:**
+  - `pulse test --format json` is available to CI dashboards; `--silent` is
+    safe for wrappers that only need the exit status. Neither weakens
+    fail-closed parse/secret semantics.
+  - Remaining Move 12 gaps are unchanged: SIGINT plan-tail, `--strict-blocked`
+    skip-source design call, PVLT2 recipient model (before vault resolution
+    per the sequencing constraint), then P4.1c.9 vault resolution.
+- **Refs:** internal/app/test.go, test_test.go; cmd/pulse/main.go (`--format`,
+  `--silent`); scripts/mutation-proof-formatters.sh (M69–M70); TASKS.md
+  P4.1c.10; ROADMAP.md §4.1.3/§4.1.4 (contracts unmoved).
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,37 @@ import (
 // incrementally, so a writer that buffers and flushes at exit breaks a streaming
 // dashboard.
 
+// TestFormat selects the `pulse test` output format.
+//
+// TAP is the default CI-dashboard format (ROADMAP.md §4.1.3); JSON is the
+// machine-readable sibling for the same report. The format changes what is
+// WRITTEN, never what is concluded: the exit code is a pure function of the
+// report (engine.ExitCodeFor) and is identical in every format.
+type TestFormat string
+
+const (
+	// TestFormatTAP renders TAP 13.
+	TestFormatTAP TestFormat = "tap"
+	// TestFormatJSON renders one JSON object per run.
+	TestFormatJSON TestFormat = "json"
+)
+
+// ParseTestFormat maps a `--format` flag value to a TestFormat.
+//
+// Empty selects TAP so the flag can be omitted. Anything else fail-closed
+// with an error the CLI maps to exit 2 WITHOUT executing any tests: an
+// unknown format is a usage error, not a test failure.
+func ParseTestFormat(s string) (TestFormat, error) {
+	switch TestFormat(strings.ToLower(strings.TrimSpace(s))) {
+	case "", TestFormatTAP:
+		return TestFormatTAP, nil
+	case TestFormatJSON:
+		return TestFormatJSON, nil
+	default:
+		return "", fmt.Errorf("app: unknown test format %q (want \"tap\" or \"json\")", s)
+	}
+}
+
 // TestResult is the outcome of a `pulse test` run.
 type TestResult struct {
 	// Exit is the process exit code.
@@ -41,6 +73,8 @@ type TestResult struct {
 	Report *engine.TestReport
 	// TAP is the rendered TAP 13 document.
 	TAP string
+	// JSON is the rendered single-object JSON document.
+	JSON string
 }
 
 // RunTest executes the .http files under root and returns the outcome.
@@ -76,10 +110,16 @@ func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout ti
 		report.ExitCode = engine.ExitFailed
 	}
 
+	jsonDoc, err := RenderJSONReport(report, rep.entries)
+	if err != nil {
+		return nil, err
+	}
+
 	return &TestResult{
 		Exit:   report.ExitCode,
 		Report: report,
 		TAP:    rep.Document(),
+		JSON:   jsonDoc,
 	}, nil
 }
 
@@ -102,14 +142,112 @@ func WriteTestReport(w io.Writer, tap string) error {
 // NOT reachable in MCP-serving contexts: only `pulse mcp` installs the stdout
 // lock, and `pulse test` is a single-shot command (ROADMAP.md §4.1.3, G-hyg).
 func (a *App) TestDir(ctx context.Context, root string, out io.Writer, parallel int, timeout time.Duration, strictBlocked bool) (int, error) {
+	return a.TestDirEx(ctx, root, out, parallel, timeout, strictBlocked, TestFormatTAP, false)
+}
+
+// TestDirEx is TestDir with a format and a silent switch.
+//
+// `silent` suppresses ALL stdout output — zero bytes — while the returned exit
+// code is still the report's own: silence changes what is written, never what
+// is concluded. An unknown format fails closed with exit 2 BEFORE any test
+// executes, so a typo cannot report a green run.
+func (a *App) TestDirEx(ctx context.Context, root string, out io.Writer, parallel int, timeout time.Duration, strictBlocked bool, format TestFormat, silent bool) (int, error) {
+	if format != TestFormatTAP && format != TestFormatJSON {
+		return engine.ExitUsage, fmt.Errorf("app: unknown test format %q (want \"tap\" or \"json\")", string(format))
+	}
 	res, err := a.RunTest(ctx, root, parallel, timeout, strictBlocked)
 	if err != nil {
 		return engine.ExitUsage, err
 	}
-	if err := WriteTestReport(out, res.TAP); err != nil {
-		return engine.ExitFailed, err
+	if silent {
+		return res.Exit, nil
+	}
+	switch format {
+	case TestFormatJSON:
+		if err := WriteJSONReport(out, res.JSON); err != nil {
+			return engine.ExitFailed, err
+		}
+	default:
+		if err := WriteTestReport(out, res.TAP); err != nil {
+			return engine.ExitFailed, err
+		}
 	}
 	return res.Exit, nil
+}
+
+// WriteJSONReport writes one JSON document to w plus a trailing newline.
+func WriteJSONReport(w io.Writer, doc string) error {
+	if doc == "" {
+		return errors.New("app: refusing to write an empty JSON report")
+	}
+	if !strings.HasSuffix(doc, "\n") {
+		doc += "\n"
+	}
+	_, err := io.WriteString(w, doc)
+	return err
+}
+
+// JSONTestPoint is one test point in the JSON document.
+type JSONTestPoint struct {
+	File       string            `json:"file"`
+	Request    string            `json:"request"`
+	Assertion  string            `json:"assertion,omitempty"`
+	OK         bool              `json:"ok"`
+	Skip       bool              `json:"skip,omitempty"`
+	SkipReason string            `json:"skip_reason,omitempty"`
+	Detail     string            `json:"detail,omitempty"`
+	Fields     map[string]string `json:"fields,omitempty"`
+}
+
+// JSONReport is the single-object `pulse test --format json` document.
+type JSONReport struct {
+	Total   int             `json:"total"`
+	Passed  int             `json:"passed"`
+	Failed  int             `json:"failed"`
+	Skipped int             `json:"skipped"`
+	Exit    int             `json:"exit"`
+	Tests   []JSONTestPoint `json:"tests"`
+}
+
+// RenderJSONReport renders one JSON object for a completed run.
+//
+// It is built from the SAME redacted entries the TAP reporter consumes, so a
+// secret scrubbed from TAP is scrubbed here too: the engine redacts details
+// before they reach any reporter, and this function adds no new sources. The
+// aggregates are copied from the report rather than recomputed, so the two
+// documents cannot disagree about what the run meant.
+func RenderJSONReport(report *engine.TestReport, entries []engine.Entry) (string, error) {
+	if report == nil {
+		return "", errors.New("app: refusing to render a JSON report for a nil TestReport")
+	}
+	points := make([]JSONTestPoint, 0, len(entries))
+	for _, e := range entries {
+		points = append(points, JSONTestPoint{
+			File:       e.File,
+			Request:    e.Request,
+			Assertion:  e.Assertion,
+			OK:         e.OK,
+			Skip:       e.Skip,
+			SkipReason: e.SkipReason,
+			Detail:     e.Detail,
+			Fields:     e.Fields,
+		})
+	}
+	if points == nil {
+		points = []JSONTestPoint{}
+	}
+	raw, err := json.Marshal(JSONReport{
+		Total:   report.Total,
+		Passed:  report.Passed,
+		Failed:  report.Failed,
+		Skipped: report.Skipped,
+		Exit:    report.ExitCode,
+		Tests:   points,
+	})
+	if err != nil {
+		return "", fmt.Errorf("app: render the JSON report: %w", err)
+	}
+	return string(raw), nil
 }
 
 // ---- the TAP reporter -----------------------------------------------------
