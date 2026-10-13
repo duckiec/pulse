@@ -95,6 +95,7 @@ runtime; they are the only two consumers of `internal/app`.
 | `cmd/pulse` | Flags, mode selection, wiring, exit codes | `app`, `ui`, `mcp`, `golang.org/x/term` | — (leaf wiring only) |
 | `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
 | `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport. **Constructs no dependencies** (Move 10) — everything is injected | `ast`, `engine`, `fuzz` | `ui`, `secrets`, `store` |
+| `internal/wasm` | Untrusted-code sandbox: zero-capability wazero runtime, memory ABI, time + call budgets | `github.com/tetratelabs/wazero` (interpreter, no cgo) | everything internal; no host modules, so no sibling can be imported by a guest either |
 | `internal/rag` | Codebase indexing: bounded walker, per-language chunking, structural embedder | stdlib only (`go/parser`) | everything internal; **`store` and `mcp` both depend on this layer's OUTPUT, not on it** |
 | `internal/fuzz` | OpenAPI subset reader (JSON + hand-rolled YAML), deterministic boundary matrix, GCRA rate limiter, TAP 13 emitter | stdlib only (`encoding/json`, `regexp`, `math/rand` seed) | everything internal; it builds payloads and never sends one |
 | `internal/app` | **Composition root** (Move 10): the only package that names a concrete dependency for another package. Builds store, secrets chain + redactor, embedder, retriever, binder, executor, fuzz runner; owns lifecycle and context | `ast`, `engine`, `fuzz`, `mcp`, `rag`, `secrets`, `store` | `ui` |
@@ -103,6 +104,17 @@ runtime; they are the only two consumers of `internal/app`.
 | `internal/store` | SQLite schema, migrations, history persistence | stdlib + `modernc.org/sqlite` | everything internal |
 | `internal/secrets` | Keychain backends, ephemeral env, resolver chain, redaction | stdlib + sanctioned backends (§7) | everything internal |
 | `internal/devtools/importaudit` | Static, offline dependency + stdout-hygiene audit (dev tooling) | stdlib only | everything internal; never imported by shipped code |
+
+**Move 11 added one dependency: `github.com/tetratelabs/wazero v1.12.0`.** It is the
+WebAssembly runtime for the auth/signing sandbox (§15), pure Go, and compiled in
+interpreter mode — no JIT, no cgo, so it cross-compiles CGO-free to every target in the
+build matrix. There is no stdlib WebAssembly runtime, and the feature is a hard
+requirement of Goal 3: an untrusted signing script must be confined, and confinement
+means running it where it cannot reach the host. It adds no indirect dependency.
+**wazero v1.12 exposes no fuel API and its `FunctionListener` is bound at
+CompileModule rather than Call time — a measurement recorded in
+`config/allowed-modules.txt` and MEMORY.md ADL-0024, because the sandbox's security
+posture depends on what the runtime actually enforces.**
 
 **The composition root is the only place a concrete dependency is chosen.**
 Before Move 10, `internal/mcp` constructed its own executor inside
@@ -448,7 +460,7 @@ Every non-stdlib dependency requires an explicit entry here and a MEMORY.md ADL.
 | `google.golang.org/grpc` | gRPC transport: HTTP/2 framing, metadata, status codes | No stdlib gRPC; the cgo resolver is unused and `CGO_ENABLED=0` builds the pure-Go path | G2 §2.2 |
 | `google.golang.org/grpc` + `google.golang.org/protobuf` | gRPC transport + dynamic messages | No stdlib gRPC/protobuf | G2 §2.2 |
 | `github.com/cilium/ebpf` | eBPF program loading — **build-tagged `ebpf`, not in default builds** | No stdlib eBPF | G2 §2.3 |
-| `github.com/tetratelabs/wazero` | WebAssembly runtime (interpreter mode) | No stdlib Wasm | G3 §3.4 |
+| ~~`github.com/tetratelabs/wazero`~~ | WebAssembly runtime — **now vendored (Move 11, §15)** | No stdlib Wasm | G3 §3.4 |
 | `github.com/owulveryck/onnx-go` | Pure-Go ONNX inference for local embeddings | No stdlib ML runtime | G3 §3.2 |
 | `github.com/fsnotify/fsnotify` | Filesystem watching for the RAG indexer | No stdlib recursive watcher | G3 §3.2 |
 | `github.com/grandcat/zeroconf` | mDNS/Bonjour peer discovery | No stdlib mDNS | G4 §4.2 |
@@ -925,3 +937,78 @@ What is forbidden is booting and behaving as though the subsystem had loaded.
 
 ---
 
+## 15. Wasm Sandbox (`internal/wasm`)
+
+### 15.1 Threat model
+
+A signing script is user-supplied code running inside Pulse's process, on the
+user's machine, handling bytes that authenticate the user's requests. It must not be
+able to read the filesystem, the environment, or the keychain; open or inherit a
+socket; read the clock or the randomness source; allocate without bound; run without
+bound; or hand the host a pointer it can trust.
+
+### 15.2 Every denial is an omission
+
+```
+wazero.NewRuntimeConfigInterpreter()
+    WithCloseOnContextDone(true)     tier 1: preemption
+    WithMemoryLimitPages(64)          4 MiB
+
+no host modules instantiated   -> any import fails to resolve
+no WithEnv / WithFS            -> no environment, no filesystem
+no WithSys* / WithRandSource   -> no clock, no randomness, no sleep
+no WithOsyield / WithArgs      -> no scheduling, no argv
+stdout/stderr = io.Discard     stdin = always-EOF
+WithStartFunctions()           -> clears the default _start; WASI is not linked
+```
+
+There is no capability to revoke later because none is ever granted, which is a
+stronger property than a whitelist: a guest that names a host module is not refused
+by a policy, it fails to find anything to import.
+
+### 15.3 The memory boundary
+
+```
+host:  ptr := allocate(len(envelope) + 4096)     0 is failure, and refused
+host:  memory[ptr : ptr+len] = envelope
+guest: n    := sign_request(ptr, len)            len is the ENVELOPE, not the capacity
+host:  result = copy(memory[ptr : ptr+n])        0 <= n <= len + 4096
+```
+
+**A guest-supplied LENGTH, never a pointer.** ROADMAP §3.4.2 sketched the guest
+returning `(sig_ptr, sig_len)`; a guest-returned pointer is an address the host
+must trust, and a bounds check that is wrong is a memory-safety bug in the host.
+Pinning the output to the host's own buffer leaves only a length, checked against a
+buffer the host owns.
+
+`checkRange` subtracts rather than adds: `ptr + size` wraps on uint32, so
+`ptr+size <= avail` is trivially true at `2^32-1`. `ErrBounds` (a host bug) and
+`ErrABIViolation` (a guest bug) are distinct. The result is copied out — `Read`
+returns a VIEW, and a later guest write must not mutate a signature that has
+already been verified.
+
+### 15.4 What wazero v1.12 actually enforces
+
+| Bound | Mechanism | Guarantees | Measured |
+|---|---|---|---|
+| Time | `WithCloseOnContextDone` + deadline | **termination** | 50.4ms against a 50ms deadline, `(loop br 0)` |
+| Fuel | instantiation-time call budget, cancels the module context | **detection + poisoning**; deterministic | 20,000-call guest, budget 50 — detected, module poisoned |
+| Depth | wazero's own interpreter stack bound | a clean trap for deep recursion | recursion traps, host survives |
+| Memory | 4 MiB cap | the ceiling holds | `memory.grow` REFUSES; it does not trap |
+
+Fuel is a detector, not a preemptor — the 20,000-call guest above ran to completion
+before the cancellation landed, because a straight-line body has no safe point. Its
+value is that it counts calls rather than milliseconds (so it decides identically on
+a loaded CI runner) and that a module detected over budget is never reused: a guest
+observed doing too much cannot sign later on a call where the clock happened to be
+quiet. wazero v1.12 exposes no fuel API, and a panicking listener does not abort a
+call, so neither of those was available.
+
+### 15.5 Not built
+
+`internal/wasm` has no caller. §3.4.3's host-import whitelist and the
+HMAC-by-key-id chain do not exist, so a guest cannot compute a signature. There is
+no instance pooling. Goal 3 is recorded as PARTIAL (§3.5) rather than COMPLETE, and
+these are three of the four reasons.
+
+---

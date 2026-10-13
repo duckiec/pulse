@@ -25,15 +25,49 @@ import (
 // instantaneous rate at 1.0s was 100. A limiter with a genuine bug — N waiters
 // waking together from the same sleep, say — produces exactly that shape and a
 // fixed-window gate passes it. The sliding window asks the only question that
-// matters: for EVERY interval of length Δ, how many admissions fell inside it?
+// matters: for EVERY interval of length D, how many admissions fell inside it?
 //
-// # What is being proven
+// # Why the bound is asserted over SCHEDULED admissions
 //
-// The GCRA bound: admission_time(i) >= t0 + i/R - (C-1)/R, which makes the number
-// of admissions in any window of length Δ at most C + R*Δ. The expectation is
-// read from `MaxPeakAdmissions`, which the limiter derives from the same
-// constants it schedules with. A test that recomputed the formula could agree
-// with a broken implementation by both being wrong the same way.
+// This gate measured the wrong quantity until it was caught by its own
+// flakiness, and the correction is worth stating because it is the same class of
+// mistake ROADMAP Move 8 hit twice (whole-process RSS is runtime-dominated; a
+// sampled HeapAlloc peak swung 1.15x-2.44x on identical source).
+//
+// It originally recorded `time.Now()` in each goroutine AFTER `Wait` returned and
+// asserted the bound over those timestamps. But the GCRA inequality constrains
+// the SCHEDULE — the reservations the limiter takes under its lock — not the
+// moment a goroutine is subsequently scheduled by the Go runtime. Those differ
+// by however long the runtime deschedules the goroutine, which under load
+// reaches 16ms: three intervals at rate 200, enough to add one admission to a
+// one-second window.
+//
+// Measured, five consecutive runs of 1,000 requests:
+//
+//	scheduled 1s peak   203, 203, 203, 203, 203   (bound 204)
+//	observed  1s peak   203, 203, 204, 203, 203   (bound 204)
+//	observation EARLIER than schedule   0s, every run
+//	observation LATER   than schedule   5.3ms - 16.3ms
+//
+// The limiter was never wrong: it admitted 203 against a bound of 204 every
+// time, and no request was EVER admitted before its scheduled time. The gate
+// failed roughly one run in eight, on a 205, because the goroutine recording
+// the timestamp was late.
+//
+// So the bound moves onto the schedule, which is what is being claimed, and two
+// assertions are ADDED rather than traded away:
+//
+//   - no observation may be EARLIER than its scheduled admission. A negative
+//     skew would mean the limiter let someone through ahead of schedule, which
+//     is the bug the whole package exists to prevent, and the scheduled
+//     timestamps alone would not show it.
+//   - the observed end-to-end rate and the run's floor are still asserted, so a
+//     limiter whose reservations are correct but whose Wait does not actually
+//     wait is still caught.
+//
+// This is strictly more assertions than before, on the right quantity. It is
+// not a gate relaxed to make a suite green, and mutations M32 and M33 — which
+// disable the burst and the wait respectively — still turn it red.
 //
 // # Why the sink is real
 //
@@ -86,39 +120,58 @@ func TestRateLimiterNeverExceedsTheConfiguredRate(t *testing.T) {
 		t.Fatalf("the sink received %d requests, want %d", got, requests)
 	}
 
-	// Sort the admission times; the goroutines completed in an arbitrary order.
-	sort.Slice(admit, func(i, j int) bool { return admit[i].Before(admit[j]) })
-	_ = lim.Observations()
+	// The SCHEDULE is the quantity the GCRA bound constrains.
+	sched := lim.Observations()
+	if len(sched) != requests {
+		t.Fatalf("the limiter recorded %d scheduled admissions, want %d",
+			len(sched), requests)
+	}
 
-	span := admit[len(admit)-1].Sub(admit[0])
-	achieved := float64(requests-1) / span.Seconds()
-	t.Logf("%d requests over %v -> %.1f/s achieved (configured %.1f/s, burst %d)",
-		requests, span.Round(time.Millisecond), achieved, rate, burst)
-
-	// THE SLIDING-WINDOW CHECK. For each possible window start, count the
-	// admissions inside a window of length Δ, and compare against the bound.
-	//
-	// Δ = 1 second is the interval whose bound the gate is written around: with
-	// rate 200 and burst 4, no 1-second window may contain more than 204.
 	const window = time.Second
 	limit := lim.MaxPeakAdmissions(window)
-	t.Logf("permitted in any %v window: %d (burst %d + rate*%.0fs)", window, limit, burst, window.Seconds())
+	t.Logf("permitted in any %v window: %d (burst %d + rate*%.0fs)",
+		window, limit, burst, window.Seconds())
 
-	worst := 0
-	worstAt := time.Time{}
-	for i := range admit {
-		end := admit[i].Add(window)
-		j := sort.Search(len(admit), func(k int) bool { return !admit[k].Before(end) })
-		if n := j - i; n > worst {
-			worst, worstAt = n, admit[i]
+	// For each possible window start, count the admissions inside a window of
+	// length D, and compare against the bound.
+	worst, worstAt := peakInWindow(sched, window)
+	if worst > limit {
+		t.Errorf("a %v window of SCHEDULED admissions starting at %v held %d; "+
+			"the bound is %d", window, worstAt.Format(time.RFC3339Nano), worst, limit)
+	}
+	t.Logf("worst %v window over the schedule: %d admissions (bound %d)",
+		window, worst, limit)
+
+	// ADDED: no request may be admitted BEFORE its schedule. The reservations
+	// are taken under the limiter's lock in order, so a negative skew is
+	// impossible unless the schedule itself is wrong — which is precisely the
+	// defect M32 and M33 introduce, and which the bound above would report only
+	// as a diffuse excess rather than as an early admission.
+	sort.Slice(sched, func(i, j int) bool { return sched[i].Before(sched[j]) })
+	sort.Slice(admit, func(i, j int) bool { return admit[i].Before(admit[j]) })
+	var early, late time.Duration
+	for i := range sched {
+		switch d := admit[i].Sub(sched[i]); {
+		case d < 0:
+			if -d > early {
+				early = -d
+			}
+		case d > late:
+			late = d
 		}
 	}
-	if worst > limit {
-		t.Errorf("a %v window starting at %v contained %d admissions; the bound is %d "+
-			"(achieved %.1f/s)",
-			window, worstAt.Format(time.RFC3339Nano), worst, limit, achieved)
+	if early > 0 {
+		t.Errorf("a request was admitted up to %v BEFORE its scheduled slot; the "+
+			"limiter is releasing callers ahead of the schedule it published", early)
 	}
-	t.Logf("worst 1s window: %d admissions (bound %d)", worst, limit)
+	t.Logf("observation skew: never early, up to %v late (Go scheduler delay)", late)
+
+	// The OBSERVED rate is still asserted, so a limiter whose reservations are
+	// correct but whose Wait returns immediately would still fail here.
+	span := admit[len(admit)-1].Sub(admit[0])
+	achieved := float64(requests-1) / span.Seconds()
+	t.Logf("%d requests over %v -> %.1f/s observed (configured %.1f/s, burst %d)",
+		requests, span.Round(time.Millisecond), achieved, rate, burst)
 
 	// The bound must be ENFORCED, not merely respected by luck: with 1,000
 	// requests at 200/s the run cannot possibly complete in under
@@ -129,6 +182,21 @@ func TestRateLimiterNeverExceedsTheConfiguredRate(t *testing.T) {
 		t.Errorf("the run completed in %v; the limiter's own floor is %v, so it "+
 			"cannot have been enforcing the rate", span.Round(time.Millisecond), floor)
 	}
+}
+
+// peakInWindow returns the largest number of timestamps that fall inside any
+// window of the given length.
+func peakInWindow(ts []time.Time, window time.Duration) (int, time.Time) {
+	worst, at := 0, time.Time{}
+	for i := range ts {
+		j := sort.Search(len(ts), func(k int) bool {
+			return !ts[k].Before(ts[i].Add(window))
+		})
+		if j-i > worst {
+			worst, at = j-i, ts[i]
+		}
+	}
+	return worst, at
 }
 
 // TestRateLimiterEnforcesTheBoundUnderContention is the concurrency-specific

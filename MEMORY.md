@@ -1392,6 +1392,118 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0024 — Wasm sandboxing: no fuel in wazero v1.12, and a memory ABI that returns a length
+
+- **Date:** 2026-10-13
+- **Status:** PROPOSED
+- **Context:** ROADMAP.md §3.4 asks for a sandbox for untrusted auth/signing
+  scripts on `tetratelabs/wazero` (pure Go, interpreter-only). §3.4.4 already
+  recorded that fuel metering is unavailable, and §3.4.2 sketched an ABI where the
+  guest returns `(sig_ptr, sig_len)`. Both records shaped the work, and building
+  it produced four findings the roadmap did not anticipate.
+- **Decision:**
+  - **Every capability is denied by never being offered.** No host modules are
+    instantiated, so ANY import fails to resolve and the module refuses to
+    instantiate. Interpreter mode only (`NewRuntimeConfigInterpreter`, never the
+    JIT: the compiler mmaps executable pages, is non-deterministic in cost, and
+    buys throughput a signing script does not need). Memory capped at 4 MiB,
+    stdout and stderr to `io.Discard`, stdin always-EOF, `_start` cleared.
+    Deliberately unset: `WithEnv`, `WithFS`, `WithSysWalltime`, `WithSysNanotime`,
+    `WithSysNanosleep`, `WithRandSource`, `WithOsyield`, `WithArgs`. There is no
+    capability to revoke later, because none is granted, which is a stronger
+    property than a whitelist and the reason no `pulse/env` host module exists.
+  - **The ABI returns a LENGTH, not a pointer.** The guest exports
+    `allocate(size) -> ptr`, `sign_request(ptr, size) -> i32` and `memory`. The host
+    allocates `len + 4 KiB` of headroom, writes the envelope, calls the signer, and
+    reads back.
+    The deviation from §3.4.2's `(sig_ptr, sig_len)` is the safety argument, not
+    convenience: a guest-returned pointer is an address the host must trust, and a
+    bounds check that is wrong is a memory-safety bug in the host. Pinning the
+    output to the host's own buffer leaves a LENGTH as the only guest-supplied
+    value, and a length is checked against a buffer the host owns. There is no
+    address for a malicious guest to choose.
+    The host passes the ENVELOPE length, not the capacity, so a guest cannot
+    mistake the reserved tail for content and sign the wrong bytes.
+  - **Bounds checks subtract instead of adding.** `ptr > avail` and
+    `size > avail - ptr`. `ptr + size <= avail` wraps on uint32, so it is trivially
+    true at `ptr = 2^32-1` — the first value a hostile guest would return.
+    `ErrBounds` (a host bug) and `ErrABIViolation` (a guest bug) are separate types
+    so a caller can tell whose defect it is.
+  - **wazero v1.12 has no fuel API at all.** A case-insensitive search of the whole
+    module finds the word only in an unrelated internal test helper. §3.4.4 already
+    knew; this confirms it independently.
+  - **A panicking FunctionListener does not abort a guest call.** The panic escapes
+    into the host and the call does not return, so "abort from the listener" is not
+    a fuel mechanism either.
+  - **A listener attached to the `Call` context is silently ignored.** wazero binds
+    it at `CompileModule` time. The first draft attached it per call and counted
+    nothing, which is indistinguishable from a budget that is merely generous.
+  - **A call budget is a DETECTOR, not a preemptor.** With the listener bound
+    correctly, a 20,000-call guest ran against a budget of 50 and completed: the
+    listener cancels on call 51, and a straight-line body has no safe point until
+    the end. So the two tiers do different jobs.
+    **TIMEOUT guarantees termination** (`WithCloseOnContextDone(true)`; measured
+    50.4ms against a 50ms deadline for `(loop br 0)`).
+    **FUEL guarantees that "it survived" is not mistaken for "it behaved"** — it is
+    deterministic (counts calls, not milliseconds, so it decides identically on a
+    loaded CI runner) and it poisons the module, so a guest detected over budget is
+    never reused. A timeout-only sandbox stops a hanging guest and then reuses it;
+    a fuel-only sandbox notices a runaway and does nothing.
+  - **wazero's interpreter has its own call-stack bound** which traps deep recursion
+    cleanly before any large budget could fire. That is a third, runtime-owned
+    bound, and it is recorded rather than counted as fuel.
+  - **`memory.grow` refuses, it does not trap.** A memory-cap gate asserting an error
+    was wrong and failed; the security property is that the ceiling HOLDS.
+  - **Test guests are assembled by hand.** The gates need modules no compiler emits
+    (an infinite loop, a liar about its output length, a pointer past memory, a
+    20,000-call storm). `wasmBuilder` assembles ~40 bytes per module, annotated with
+    equivalent WAT, which is cheaper than depending on TinyGo or `wat2wasm` and
+    keeps `go test` the only tool required.
+  - **`github.com/tetratelabs/wazero v1.12.0`** is sanctioned in
+    `config/allowed-modules.txt` with the no-fuel measurement recorded inline, so a
+    future reader of the allowlist sees the constraint rather than rediscovering
+    it. It is the 11th module; the sandbox adds no indirect dependency.
+- **Consequences — honest gaps, NOT claimed done:**
+  - **Goal 3 is recorded as PARTIAL, not COMPLETE.** The Move 11 directive asked for
+    Goal 3 to be marked COMPLETE; §3.5.1's own checklist lists four unmet
+    obligations, and AGENTS.md §4.5 forbids disposing a claim as green when it is
+    not. ROADMAP.md §3.5 now carries the remainder explicitly, so the next move
+    inherits four open items rather than a green facade. The four are: §3.4.3 host
+    functions and HMAC-by-key-id; the 50k-chunk latency benchmark; the
+    incremental-reindex branch-switch simulation; and fuzzing dedup plus the
+    streaming loop.
+  - **§3.4.3 zero-trust host functions are NOT built.** No host functions is
+    strictly more isolated and satisfies the whitelist gate, but a guest cannot
+    compute a signature at all, so the HMAC-by-key-id chain has no host side.
+  - **`internal/wasm` has no caller.** It is a self-contained sandbox. The
+    composition root exists as of Move 10, so the seam is available and nothing
+    uses it; `pulse --mcp` signs nothing with a guest.
+  - **No instance pooling.** §3.4.1 specifies a pool keyed by script sha. Each
+    `Module` owns its own runtime, so there is nothing to pool, and the
+    interpreter's per-guest cost is paid every time.
+  - **The limit-surface documentation test (§3.4.4) is NOT built.** Limits are
+    asserted against the code but not diffed against this document, so the two can
+    drift.
+  - **The .gitignore lockdown is recorded here for the two contradictions it
+    surfaced, neither of which `.gitignore` can resolve.** The whitelist it
+    implements omitted `DESIGN_SYSTEM.md`, one of the seven Essential Vibe Coding
+    Files (AGENTS.md §4.6) — a default-deny list missing a mandated document
+    reintroduces through the exception list the exact failure the rule exists to
+    prevent, so it was added. The same directive also whitelists `README.md` and
+    `CONTRIBUTING.md` while §4.6 says no README is authorized; both negations were
+    written (they are permissions, and neither file exists) and the disagreement is
+    recorded here rather than resolved unilaterally.
+  - **An unanchored `!README.md` matches at every depth.** The first version of the
+    rule resurrected `vendor/README.md` and `testdata/fixture/README.md` — the
+    exact failure it was meant to prevent — and it did so silently until
+    `git check-ignore` was run rather than assumed. Every negation is now anchored
+    with a leading slash.
+- **Refs:** internal/wasm/runtime.go, memory.go, runtime_test.go, wasmgen_test.go;
+  scripts/mutation-proof-wasm.sh (M50–M59); config/allowed-modules.txt;
+  ARCHITECTURE.md §15; ROADMAP.md §3.4.1–§3.4.4, §3.5; .gitignore.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

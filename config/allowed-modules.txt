@@ -38,6 +38,21 @@ modernc.org/mathutil/
 modernc.org/memory
 modernc.org/memory/
 
+# github.com/tetratelabs/wazero — the WebAssembly runtime for the auth/signing
+# sandbox (ROADMAP.md §3.4). Pure Go, interpreter mode, no cgo and no JIT, so it
+# cross-compiles CGO-free to every target in the build matrix. Required because
+# there is no stdlib WebAssembly runtime and the feature is a hard requirement
+# of Goal 3: an untrusted signing script must be confined, and confinement means
+# running it somewhere it cannot reach the host.
+#
+# v1.12.0 exposes NO fuel API and NO working FunctionListener-on-Call: the
+# listener is bound at CompileModule time, not Call time. The sandbox is built
+# around what the runtime actually provides — a context deadline for
+# preemption, and an instantiation-time call budget for detection — and that
+# measurement is recorded in MEMORY.md ADL-0024 rather than papered over.
+github.com/tetratelabs/wazero
+github.com/tetratelabs/wazero/
+
 # Transitive dependencies of the two modules above.
 github.com/dustin/go-humanize
 github.com/google/uuid

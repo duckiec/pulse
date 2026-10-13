@@ -7,6 +7,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/mark3labs/mcp-go v1.2.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	google.golang.org/grpc v1.83.0

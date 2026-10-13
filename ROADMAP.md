@@ -1442,6 +1442,36 @@ before it is an architectural one.
 - **Verify:** Instantiation/pool benchmark; trap-recovery test (guest traps →
   structured error, instance discarded, next run unaffected); race detector across
   concurrent pooled guests.
+- **SHIPPED (Move 11, MEMORY.md ADL-0024).** `internal/wasm` builds the
+  interpreter runtime with the memory cap at 4 MiB, `CloseOnContextDone(true)`,
+  and **no host modules instantiated at all** — which is what makes every import
+  fail to resolve and the guest refuse to instantiate. `WithStartFunctions()` is
+  cleared explicitly, stdin is always-EOF, stdout and stderr are `io.Discard`,
+  and `WithEnv`/`WithFS`/`WithSysWalltime`/`WithSysNanotime`/`WithSysNanosleep`/
+  `WithRandSource`/`WithOsyield`/`WithArgs` are all unset. There is no capability
+  to revoke later, because none is ever granted.
+  Gates: `TestAGuestCannotReachTheHost`, `TestTheABIIsRequired`,
+  `TestDefaultLimitsAreTheDocumentedOnes`, `TestCloseIsIdempotent`.
+  Mutations M54 (WASI linked in) and M59 (the memory-ABI check skipped) red.
+  NOT met: the instantiation-cost benchmark and the pooling of instances keyed by
+  script sha. Each `Module` owns its own runtime, so there is nothing to pool yet;
+  the interpreter's cost is paid per guest, which is correct for a tool running a
+  few hundred requests a second and wrong for a hot path.
+- **SHIPPED (Move 11, MEMORY.md ADL-0024).** `internal/wasm` builds the
+  interpreter runtime with the memory cap at 4 MiB, `CloseOnContextDone(true)`,
+  and **no host modules instantiated at all** — which is what makes every import
+  fail to resolve and the guest refuse to instantiate. `WithStartFunctions()` is
+  cleared explicitly, stdin is always-EOF, stdout and stderr are `io.Discard`,
+  and `WithEnv`/`WithFS`/`WithSysWalltime`/`WithSysNanotime`/`WithSysNanosleep`/
+  `WithRandSource`/`WithOsyield`/`WithArgs` are all unset. There is no capability
+  to revoke later, because none is ever granted.
+  Gates: `TestAGuestCannotReachTheHost`, `TestTheABIIsRequired`,
+  `TestDefaultLimitsAreTheDocumentedOnes`, `TestCloseIsIdempotent`.
+  Mutations M54 (WASI linked in) and M59 (the memory-ABI check skipped) red.
+  NOT met: the instantiation-cost benchmark and the pooling of instances keyed by
+  script sha. Each `Module` owns its own runtime, so there is nothing to pool yet;
+  the interpreter's cost is paid per guest, which is correct for a tool running a
+  few hundred requests a second and wrong for a hot path.
 
 ### 3.4.2 Host/guest memory passing conventions
 
@@ -1463,6 +1493,56 @@ before it is an architectural one.
   guest call can clobber them.
 - **Verify:** Malformed-guest fuzz: bogus pointers/huge lengths → structured
   `ErrGuestBounds`, never a panic; ASAN-adjacent stress under the race detector.
+- **SHIPPED (Move 11), WITH A DELIBERATE DEVIATION (ADL-0024).** The guest
+  exports `allocate(size) -> ptr`, `sign_request(ptr, size) -> i32` and `memory`.
+  The host allocates `len + 4 KiB`, writes the envelope, calls the signer, and
+  reads back.
+
+  **The `(sig_ptr, sig_len)` sketch above is not what was built, and the reason
+  is the safety argument rather than convenience.** A guest-returned pointer is
+  an address the host must trust, and a bounds check that is wrong is a
+  memory-safety bug in the host. Pinning the output to the buffer the host
+  already allocated leaves only a LENGTH as guest-supplied, and a length is
+  checked against a buffer the host owns — there is no address for a malicious
+  guest to choose. The host passes the ENVELOPE length rather than the capacity,
+  so a guest cannot mistake the reserved tail for content and sign the wrong
+  bytes.
+
+  Ranges are checked as `ptr > avail` and `size > avail - ptr`. The subtraction
+  is not stylistic: `ptr + size` wraps on uint32, so the obvious form is
+  trivially true at `ptr = 2^32-1`, which is the first value a hostile guest
+  would return. `ErrBounds` (a host bug) and `ErrABIViolation` (a guest bug) are
+  distinct types for the same reason.
+  Gates: `TestSignRoundTripIsTheExecutionGate`,
+  `TestTheHostCanSeeTheEnvelopeBeforeSigning`, `TestABIViolationsAreRefused`,
+  `TestBoundsCheckSurvivesTheWrapCase`, `TestMemorySizeIsReadLive`,
+  `TestEnvelopeCeilingIsEnforced`.
+  Mutations M55b, M56, M57b red.
+- **SHIPPED (Move 11), WITH A DELIBERATE DEVIATION (ADL-0024).** The guest
+  exports `allocate(size) -> ptr`, `sign_request(ptr, size) -> i32` and `memory`.
+  The host allocates `len + 4 KiB`, writes the envelope, calls the signer, and
+  reads back.
+
+  **The `(sig_ptr, sig_len)` sketch above is not what was built, and the reason
+  is the safety argument rather than convenience.** A guest-returned pointer is
+  an address the host must trust, and a bounds check that is wrong is a
+  memory-safety bug in the host. Pinning the output to the buffer the host
+  already allocated leaves only a LENGTH as guest-supplied, and a length is
+  checked against a buffer the host owns — there is no address for a malicious
+  guest to choose. The host passes the ENVELOPE length rather than the capacity,
+  so a guest cannot mistake the reserved tail for content and sign the wrong
+  bytes.
+
+  Ranges are checked as `ptr > avail` and `size > avail - ptr`. The subtraction
+  is not stylistic: `ptr + size` wraps on uint32, so the obvious form is
+  trivially true at `ptr = 2^32-1`, which is the first value a hostile guest
+  would return. `ErrBounds` (a host bug) and `ErrABIViolation` (a guest bug) are
+  distinct types for the same reason.
+  Gates: `TestSignRoundTripIsTheExecutionGate`,
+  `TestTheHostCanSeeTheEnvelopeBeforeSigning`, `TestABIViolationsAreRefused`,
+  `TestBoundsCheckSurvivesTheWrapCase`, `TestMemorySizeIsReadLive`,
+  `TestEnvelopeCeilingIsEnforced`.
+  Mutations M55b, M56, M57b red.
 
 ### 3.4.3 Zero-trust host functions (keys never enter the sandbox)
 
@@ -1486,6 +1566,20 @@ before it is an architectural one.
 - **Verify:** Import-whitelist test (guest declaring anything else fails to
   instantiate); stdout-in-guest test asserts zero bytes on the wire; end-to-end
   HMAC and AWS-v4 canonical-request tests against Go reference implementations.
+- **NOT BUILT (Move 11).** The sandbox Move 11 shipped registers NO host
+  functions at all, which is strictly more isolated than the closed whitelist
+  above and satisfies this section's whitelist gate — `TestAGuestCannotReachTheHost`
+  proves it — but it also means a guest cannot compute a signature. The
+  HMAC-by-key-id chain has no host side, and the end-to-end HMAC and AWS-v4
+  canonical-request tests against Go reference implementations do not exist.
+  Tracked as TASKS.md P3.4.6.
+- **NOT BUILT (Move 11).** The sandbox Move 11 shipped registers NO host
+  functions at all, which is strictly more isolated than the closed whitelist
+  above and satisfies this section's whitelist gate — `TestAGuestCannotReachTheHost`
+  proves it — but it also means a guest cannot compute a signature. The
+  HMAC-by-key-id chain has no host side, and the end-to-end HMAC and AWS-v4
+  canonical-request tests against Go reference implementations do not exist.
+  Tracked as TASKS.md P3.4.6.
 
 ### 3.4.4 Sandbox limits, traps, and metering
 
@@ -1501,22 +1595,174 @@ before it is an architectural one.
 - **Verify:** Infinite-loop guest test asserts deadline-bounded unwind and instance
   discard; memory-cap test (guest exceeding 4 MiB traps); limit-surface documentation
   test (a golden doc snippet matching the enforced config).
+- **SHIPPED (Move 11), WITH THREE MEASUREMENTS THAT CHANGED THE DESIGN (ADL-0024).**
+  The contract above is right that fuel is unavailable; three findings beyond it
+  are worth recording, because each produced code that would otherwise have been
+  confidently wrong.
+
+  1. **A panicking `FunctionListener` does not abort a guest call.** The panic
+     escapes into the host and the call does not return, so "abort from the
+     listener" is not a fuel mechanism either.
+  2. **A listener attached to the context passed to `Call` is silently ignored.**
+     wazero binds it at `CompileModule` time. The first draft attached it per
+     call and counted nothing — indistinguishable, from the logs, from a budget
+     that was merely generous.
+  3. **A call budget is a DETECTOR, not a preemptor.** With the listener bound
+     correctly, a 20,000-call guest ran against a budget of 50 and completed:
+     the listener cancels the context on call 51 and the guest runs to the end
+     of its straight-line body, because there is no safe point until there is.
+
+  So the two tiers do different jobs, and the "compensating controls" list above
+  was incomplete. **TIMEOUT is what guarantees termination** (measured 50.4ms
+  against a 50ms deadline for `(loop br 0)`). **FUEL guarantees that "it
+  survived" is not mistaken for "it behaved"**: it is deterministic — it counts
+  calls, not milliseconds, so it decides the same way on a loaded CI runner as on
+  an idle laptop — and it poisons the module, so a guest detected over budget is
+  never reused. A timeout-only sandbox stops a hanging guest and then reuses it;
+  a fuel-only sandbox would notice a runaway and do nothing.
+
+  wazero's interpreter additionally enforces its own call-stack bound, which
+  traps deep recursion cleanly before any large budget could fire. That is a
+  third, runtime-owned bound, and `TestDeepRecursionTrap` records it rather than
+  letting fuel appear to cover depth.
+
+  The memory-cap "traps" wording above is also imprecise as built:
+  WebAssembly's `memory.grow` REFUSES an over-limit growth (returns -1) rather
+  than trapping, so the security property is that the ceiling HOLDS, not that the
+  call fails.
+  Gates: `TestInfiniteLoopIsStoppedByTheTimeBudget`,
+  `TestTimeBudgetIsBoundedNotMerelyConfigured`,
+  `TestCallBudgetIsDetectedAndTheModuleIsPoisoned`,
+  `TestAGuestUnderBudgetIsNotPoisoned`, `TestDeepRecursionTrap`,
+  `TestFuelBudgetIsEnforcedAcrossCalls`, `TestSpentModuleIsNotReused`,
+  `TestMemoryLimitIsEnforced`, `TestUnlimitedIsNotConfigurable`,
+  `TestASpentTimeoutDoesNotLeaveTheHostRunning`.
+  Mutations M50, M51, M52, M53, M58 red.
+
+  NOT met: the golden limit-surface documentation test. The limits are asserted
+  against the code (`TestDefaultLimitsAreTheDocumentedOnes`) but not diffed
+  against this document, so the two can drift without failing anything.
+- **SHIPPED (Move 11), WITH THREE MEASUREMENTS THAT CHANGED THE DESIGN (ADL-0024).**
+  The contract above is right that fuel is unavailable; three findings beyond it
+  are worth recording, because each produced code that would otherwise have been
+  confidently wrong.
+
+  1. **A panicking `FunctionListener` does not abort a guest call.** The panic
+     escapes into the host and the call does not return, so "abort from the
+     listener" is not a fuel mechanism either.
+  2. **A listener attached to the context passed to `Call` is silently ignored.**
+     wazero binds it at `CompileModule` time. The first draft attached it per
+     call and counted nothing — indistinguishable, from the logs, from a budget
+     that was merely generous.
+  3. **A call budget is a DETECTOR, not a preemptor.** With the listener bound
+     correctly, a 20,000-call guest ran against a budget of 50 and completed:
+     the listener cancels the context on call 51 and the guest runs to the end
+     of its straight-line body, because there is no safe point until there is.
+
+  So the two tiers do different jobs, and the "compensating controls" list above
+  was incomplete. **TIMEOUT is what guarantees termination** (measured 50.4ms
+  against a 50ms deadline for `(loop br 0)`). **FUEL guarantees that "it
+  survived" is not mistaken for "it behaved"**: it is deterministic — it counts
+  calls, not milliseconds, so it decides the same way on a loaded CI runner as on
+  an idle laptop — and it poisons the module, so a guest detected over budget is
+  never reused. A timeout-only sandbox stops a hanging guest and then reuses it;
+  a fuel-only sandbox would notice a runaway and do nothing.
+
+  wazero's interpreter additionally enforces its own call-stack bound, which
+  traps deep recursion cleanly before any large budget could fire. That is a
+  third, runtime-owned bound, and `TestDeepRecursionTrap` records it rather than
+  letting fuel appear to cover depth.
+
+  The memory-cap "traps" wording above is also imprecise as built:
+  WebAssembly's `memory.grow` REFUSES an over-limit growth (returns -1) rather
+  than trapping, so the security property is that the ceiling HOLDS, not that the
+  call fails.
+  Gates: `TestInfiniteLoopIsStoppedByTheTimeBudget`,
+  `TestTimeBudgetIsBoundedNotMerelyConfigured`,
+  `TestCallBudgetIsDetectedAndTheModuleIsPoisoned`,
+  `TestAGuestUnderBudgetIsNotPoisoned`, `TestDeepRecursionTrap`,
+  `TestFuelBudgetIsEnforcedAcrossCalls`, `TestSpentModuleIsNotReused`,
+  `TestMemoryLimitIsEnforced`, `TestUnlimitedIsNotConfigurable`,
+  `TestASpentTimeoutDoesNotLeaveTheHostRunning`.
+  Mutations M50, M51, M52, M53, M58 red.
+
+  NOT met: the golden limit-surface documentation test. The limits are asserted
+  against the code (`TestDefaultLimitsAreTheDocumentedOnes`) but not diffed
+  against this document, so the two can drift without failing anything.
 
 ## 3.5 Goal 3 Exit Gates
+
+> **Goal 3 STATUS: PARTIAL — the MCP half is bridged and closed; four proof
+> obligations remain open.**
+>
+> Goal 3 asked for three capabilities: a UI-driven workbench (Goal 3.1–3.3), a
+> fully online MCP bridge (Goal 3.3), and an untrusted-code sandbox (Goal 3.4).
+> As of Move 11:
+>
+> **CLOSED.** The MCP bridge: `pulse mcp` builds the composition root
+> (`internal/app`, Move 10) and serves `execute_request` and `execute_fuzz_run`
+> end to end over stdio against real subsystems, with the redaction chokepoint
+> wired at both layers and the 5xx explanation reachable from a running server.
+> The sandbox: `internal/wasm` runs an untrusted guest with zero ambient
+> authority under a proven time budget and a detected call budget.
+>
+> **OPEN, and NOT claimed:**
+>   1. **§3.4.3 zero-trust host functions and the HMAC-by-key-id chain.** No
+>      host functions are registered, so a guest can neither read a key nor
+>      compute a signature.
+>   2. **RAG: the 50k-chunk p99 latency benchmark (§3.2.9)** — the O(N·d) cost
+>      is argued from operation count, not measured.
+>   3. **RAG: incremental reindex and the branch-switch simulation (§3.2.5)** —
+>      the primitives exist and are gated; the watcher does not.
+>   4. **Fuzzing: finding persistence and dedup (§3.3.3)** — no `findings`
+>      table, no signature, and the streaming `fuzz-start`/`fuzz-next` loop is
+>      unbuilt.
+>
+> The directive accompanying Move 11 asked for Goal 3 to be marked COMPLETE.
+> **It is recorded as PARTIAL on purpose.** AGENTS.md §4.5 requires every test and
+> every claim to be honestly disposed, and §4.6 requires ROADMAP.md to be the
+> scope authority; a goal whose own exit-gate checklist lists four unmet items
+> cannot be truthfully closed, and closing it here would launder those four items
+> out of the document that exists to track them. They are listed above so the
+> next move inherits them rather than inherit a green facade.
 
 ### 3.5.1 Gate checklist
 
 - G-hyg: zero stdout writes in MCP paths; stray-write regression test fails build.
+  **MET.** Two layers (MEMORY.md ADL-0020), three dynamic regression gates,
+  importaudit check 3, and now held through composition-root construction AND
+  serving (Move 10: `TestAppNeverWritesToStdout`,
+  `TestAppServesWithoutASingleStrayByte`). Mutation M19.
 - Lifecycle conformance against a scripted MCP client (3.1.4).
+  **MET.** Not only against a scripted client but end to end against a real one:
+  `TestCompositionRootFuzzEndToEnd` drives `mcp.Lock`, the stdio loop over
+  in-memory pipes, the tool registry, the fuzzer, the engine, and a real
+  `httptest` target, asserting that the requests actually arrived — counted at
+  the SERVER, not at the runner.
 - RAG: determinism, recall fixture, secret-free chunks, DEGRADED path when no model.
-  **Partially met (ADL-0021):** determinism, recall, secret-free chunks and the
-  DEGRADED path are green. NOT met: the 50k-chunk p99 latency benchmark, the
-  incremental-reindex branch-switch simulation (§3.2.5), and the composition root
-  that would make a 5xx explanation reachable from a running server.
+  **Partially met (ADL-0021, updated by ADL-0023).** Determinism, recall,
+  secret-free chunks and the DEGRADED path are green, and **the composition root
+  that blocked reachability from a running server shipped in Move 10** — a 5xx
+  from `pulse --mcp` now carries source context, gated by
+  `TestCompositionRootWiresTheFailureBinder`. STILL NOT MET: the 50k-chunk p99
+  latency benchmark (§3.2.9) and the incremental-reindex branch-switch
+  simulation (§3.2.5).
 - Fuzzing: determinism, dedup, cancellation, budget.
+  **Partially met.** Determinism, cancellation and budget are green; the rate
+  gate was rewritten onto the quantity it actually constrains (TASKS.md P3.3a.3)
+  and two assertions were added to it. **Dedup is NOT met** — the
+  `sha256(status + canonical response prefix)` signature, the `findings` table
+  and `run_source='fuzz'` do not exist.
 - Wasm: bounds tests, import whitelist, key-never-enters-guest proof, trap recovery.
+  **Partially met.** Bounds tests, import whitelist and trap recovery are green
+  (gates and M50–M59 listed under §3.4.2 and §3.4.4). **The
+  key-never-enters-guest proof is NOT met**: §3.4.3 registers no host functions,
+  so a guest cannot read a key — but also cannot sign at all, which is not the
+  capability the section specifies.
 - Dependency registry updated; ADLs appended; `ARCHITECTURE.md` MCP/RAG/wasm
-  sections synced same-commit.
+  sections synced same-commit. **MET.** `wazero v1.12.0` added to
+  `allowed-modules.txt` with the no-fuel measurement recorded inline;
+  ARCHITECTURE.md §15 and §7 updated in the same commit.
 
 ---
 
