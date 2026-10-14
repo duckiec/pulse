@@ -202,6 +202,7 @@ type Engine struct {
 	timeout        time.Duration
 	resolver       Resolver
 	redactor       Redactor
+	signer         Signer
 	userAgent      string
 	teardownBudget time.Duration
 }
@@ -289,6 +290,22 @@ func (e *Engine) execute(ctx context.Context, req *ast.Request, sink Sink, h Run
 	if err != nil {
 		sink.Failed(err)
 		return
+	}
+
+	// Pre-dispatch signing seam (ROADMAP.md §3.4): only a request carrying
+	// @wasm-sign reaches the signer, and a missing signer fails closed —
+	// dispatching unsigned when a signature was asked for would report a
+	// secure endpoint as merely "failing auth".
+	if path := e.doc.WasmSign(req); path != "" {
+		if e.signer == nil {
+			sink.Failed(e.scrubErr(
+				fmt.Errorf("engine: line %d: @wasm-sign %q needs a signer and none is bound", req.Line, path)))
+			return
+		}
+		if err := e.signer.Sign(ContextWithSignerPath(ctx, path), httpReq); err != nil {
+			sink.Failed(e.scrubErr(fmt.Errorf("engine: line %d: sign the request: %w", req.Line, err)))
+			return
+		}
 	}
 
 	resp, err := e.client.Do(httpReq)

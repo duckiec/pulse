@@ -2082,6 +2082,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0038 — Wasm host whitelist 4/4 and pre-dispatch @wasm-sign lifecycle (#6)
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Wayfinder map duckiec/pulse#1; grilling ticket #6 (host whitelist + pre-dispatch seam, Audit P4.1b-era §3.4.3/§3.4.7). Self-resolved against ROADMAP/ARCHITECTURE: engine never imports wasm (sibling rule) so the adapter lives in app; the guest's output must be text headers, which fixes the envelope shape.
+- **Decision:** (1) Host: `now_ns()->i64`, `header_get(name_ptr,name_len,out_ptr,out_cap)->i32` (sensitive names read `[REDACTED]`; unknown/empty/absent-request/short-buffer all -1), `log(ptr,len)` (truncated at 4 KiB to `logSink`, default os.Stderr, never stdout), registered on the same `pulse/env` builder only when Resolver != nil (default-deny preserved). All ranges through subtraction-form `inBounds`. (2) `wasm.Sign` now propagates the caller's request value (`WithRequest`) and cancellation (`AfterFunc`) into the module call context, which descends from m.base for fuel semantics. (3) Engine seam: `Signer` interface + `WithSigner` + path-in-ctx; `execute()` signs iff `doc.WasmSign(req)` non-empty, fail-closed otherwise with no dispatch. (4) AST: `@wasm-sign <path>` bare-path directive (pending slot like `@name` at doc level; direct attach in header block after ≥1 header); duplicates/empty/`= ` misspelling fail closed; `wasm-signup` lookalikes stay variables. Adjacent-duplicate hole (request seals between two lines, second becomes droppable pending) closed with a TokNewline peek. (5) App: `WasmSigner` (chain-bound resolver, loader, timeout/fuel) + canonical LF envelope (`METHOD path`, sorted lowercase headers, blank, body with restore) + append-only `applySignedHeaders` (prefix equality + strict parse + non-empty delta). GRPC path untouched (REST-only seam; recorded limitation).
+- **Consequences:** Live gate `TestWasmSignInterceptionIsLive` (hand-assembled 780-byte guest calling all four host funcs; server checks hex-timestamp recency + HMAC over `ts\nMETHOD path`; 200 OK). Two guest-authoring measurements worth recording: (a) `wI32ShrU` is 0x76, not 0x78 (rotr) — same stack shape, silently wrong nibbles, caught only because the server recomputes the MAC (timestamp path survived by coincidence: rotate-by-multiple-of-4 preserves the low nibble); (b) every function body needs its own terminal `end` beyond block/loop ends. M85 red at both levels (unsigned run → 401 live / 403 unit); M86 red (additive inBounds → wrap passes); M86b green no-op (first guard holds — M55 twin). Census extended in `scripts/mutation-proof-wasm.sh`. ROADMAP §3.4.3 stale NOT-BUILT retired with deviation rationale; P3.4.6/P3.4.7 DONE.
+- **Refs:** `internal/wasm/host.go`, `internal/wasm/runtime.go`, `internal/engine/signer.go`, `internal/engine/engine.go`, `internal/ast/parser.go`, `internal/app/signer.go`, `internal/app/app.go`, gates in `internal/wasm/hostfunc_test.go`, `internal/engine/signer_test.go`, `internal/ast/wasmsign_test.go`, `internal/app/wasm_sign_test.go`, duckiec/pulse#6.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

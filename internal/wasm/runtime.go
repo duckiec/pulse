@@ -273,14 +273,31 @@ func New(ctx context.Context, cfg Config) (*Module, error) {
 	base = experimental.WithFunctionListenerFactory(base, newFuelListener(spent, fuel, cancelBase))
 
 	if resolver := cfg.Resolver; resolver != nil {
-		hostFn := newHMACHostFunc(resolver)
+		// The CLOSED whitelist (ROADMAP.md §3.4.3): exactly these four
+		// functions under pulse/env, each chained off the same builder so
+		// there is one registration site to audit. Nil Resolver registers
+		// NOTHING and any guest import fails (default-deny).
 		if _, err := rt.NewHostModuleBuilder(HostModuleName).
 			NewFunctionBuilder().
-			WithGoModuleFunction(hostFn, []api.ValueType{
+			WithGoModuleFunction(newHMACHostFunc(resolver), []api.ValueType{
 				api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
 				api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
 			}, []api.ValueType{api.ValueTypeI32}).
 			Export(HostFuncHMACSHA256).
+			NewFunctionBuilder().
+			WithGoModuleFunction(newNowNSFunc(), nil, []api.ValueType{api.ValueTypeI64}).
+			Export(HostFuncNowNS).
+			NewFunctionBuilder().
+			WithGoModuleFunction(newHeaderGetFunc(), []api.ValueType{
+				api.ValueTypeI32, api.ValueTypeI32,
+				api.ValueTypeI32, api.ValueTypeI32,
+			}, []api.ValueType{api.ValueTypeI32}).
+			Export(HostFuncHeaderGet).
+			NewFunctionBuilder().
+			WithGoModuleFunction(newLogFunc(), []api.ValueType{
+				api.ValueTypeI32, api.ValueTypeI32,
+			}, nil).
+			Export(HostFuncLog).
 			Instantiate(ctx); err != nil {
 			cancelBase()
 			_ = rt.Close(ctx)
@@ -449,6 +466,16 @@ func (m *Module) Sign(ctx context.Context, payload []byte) ([]byte, error) {
 	// module — which is why a spent guest is not reused.
 	callCtx, cancel := context.WithTimeout(m.base, m.timeout)
 	defer cancel()
+
+	// The caller's VALUES propagate (notably the pre-flight request for
+	// header_get, attached via WithRequest): m.base cannot carry them because
+	// it predates the call. Cancellation propagates too, so a caller that
+	// goes away stops paying for its signature.
+	if r := requestFromContext(ctx); r != nil {
+		callCtx = context.WithValue(callCtx, requestKey{}, r)
+	}
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
 
 	// The counter is reset per call so a caller can read the cost of one
 	// request rather than a running total.

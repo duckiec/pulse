@@ -4,6 +4,11 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -24,6 +29,76 @@ const HostFuncHMACSHA256 = "hmac_sha256"
 type SecretResolver interface {
 	Resolve(key string) (string, error)
 }
+
+// Host function names under HostModuleName. Together with HostFuncHMACSHA256
+// they are the CLOSED import whitelist (ROADMAP.md §3.4.3): a guest declaring
+// any other import fails to instantiate with ErrIsolationViolation.
+const (
+	// HostFuncNowNS is now_ns() -> i64: wall-clock nanoseconds for
+	// timestamped auth headers.
+	HostFuncNowNS = "now_ns"
+	// HostFuncHeaderGet is header_get(name_ptr, name_len, out_ptr, out_cap)
+	// -> i32: read-only access to the pre-flight request headers attached to
+	// the call context via WithRequest. Returns bytes written, -1 on any
+	// failure (bad range, no request attached, unknown or sensitive header).
+	HostFuncHeaderGet = "header_get"
+	// HostFuncLog is log(ptr, len): a bounded diagnostic sink. It writes to
+	// logSink (default os.Stderr), NEVER to os.Stdout: in MCP mode stdout is
+	// the JSON-RPC channel and a stray byte corrupts the stream (AGENTS.md
+	// §3.3). Over-long messages are truncated, out-of-bounds ones dropped.
+	HostFuncLog = "log"
+)
+
+// maxLogBytes bounds one guest log message. A diagnostic sink without a bound
+// is a memory pipe a malicious guest can hold open.
+const maxLogBytes = 4096
+
+// requestKey carries the pre-flight *http.Request for header_get. It is
+// unexported so only WithRequest can set it; a guest can never forge it.
+type requestKey struct{}
+
+// WithRequest attaches the pre-flight request to ctx so the header_get host
+// function can serve it. The host never mutates it: the value is read-only
+// access, and the signed headers travel back through the memory ABI.
+func WithRequest(ctx context.Context, r *http.Request) context.Context {
+	return context.WithValue(ctx, requestKey{}, r)
+}
+
+// requestFromContext returns the attached request, or nil when the caller did
+// not attach one. A nil here fails the header_get call closed (-1), never
+// with a Header map the guest should not see.
+func requestFromContext(ctx context.Context) *http.Request {
+	if ctx == nil {
+		return nil
+	}
+	r, _ := ctx.Value(requestKey{}).(*http.Request)
+	return r
+}
+
+// redactedHeaders are header names whose VALUES a guest must never see.
+// header_get answers them with "[REDACTED]": the guest learns the header
+// exists (so a signature can attest to its presence) without learning the
+// secret it carries. The set mirrors the engine's sensitiveHeaders; it is
+// duplicated rather than imported because sibling imports are forbidden
+// (AGENTS.md §3.1) and this list is a security boundary that must read
+// explicitly at the enforcement site.
+var redactedHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"set-cookie":          true,
+	"x-api-key":           true,
+}
+
+// redactedValue is what a sensitive header reads as through header_get.
+const redactedValue = "[REDACTED]"
+
+// logSink is where the log host function writes. It is a variable (not a
+// const, not os.Stdout) so tests can capture it — and so the invariant reads
+// as code: nothing in this file names os.Stdout, ever.
+var logSink interface {
+	Write([]byte) (int, error)
+} = os.Stderr
 
 // newHMACHostFunc returns the Go side of the HMAC-by-key-id ABI.
 //
@@ -98,6 +173,104 @@ func newHMACHostFunc(resolver SecretResolver) api.GoModuleFunc {
 		}
 		stack[0] = uint64(len(sig))
 	}) // close GoModuleFunc and newHMACHostFunc
+}
+
+// newNowNSFunc returns the Go side of the now_ns ABI: () -> i64.
+//
+// Wall-clock nanoseconds. The sandbox denies the guest a clock by never
+// offering WASI or syscalls; this single i64 is the ONLY time a signing script
+// can observe, and it is what makes an HMAC timestamped rather than replayable.
+func newNowNSFunc() api.GoModuleFunc {
+	return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		stack[0] = uint64(time.Now().UnixNano())
+	})
+}
+
+// newHeaderGetFunc returns the Go side of the header_get ABI:
+// header_get(name_ptr, name_len, out_ptr, out_cap) -> i32.
+//
+// It returns the bytes written, or -1 on ANY failure: a range outside linear
+// memory, no request attached to the context, or an unknown header. Sensitive
+// headers (Authorization, Cookie, ...) read as "[REDACTED]" — presence
+// without content, so a signature can attest to a header the guest may not
+// exfiltrate. The request itself is never mutated and never handed over.
+func newHeaderGetFunc() api.GoModuleFunc {
+	return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		mem := mod.Memory()
+		if mem == nil {
+			stack[0] = failCode()
+			return
+		}
+		namePtr := uint32(stack[0])
+		nameLen := uint32(stack[1])
+		outPtr := uint32(stack[2])
+		outCap := uint32(stack[3])
+
+		if !inBounds(mem, namePtr, nameLen) || !inBounds(mem, outPtr, outCap) {
+			stack[0] = failCode()
+			return
+		}
+		nameView, ok := mem.Read(namePtr, nameLen)
+		if !ok {
+			stack[0] = failCode()
+			return
+		}
+		req := requestFromContext(ctx)
+		if req == nil {
+			stack[0] = failCode()
+			return
+		}
+		name := string(append([]byte(nil), nameView...))
+		val := req.Header.Get(name)
+		if val == "" {
+			// Unknown header, or present-but-empty: indistinguishable by
+			// design, so a guest cannot probe for header names by length.
+			stack[0] = failCode()
+			return
+		}
+		if redactedHeaders[strings.ToLower(name)] {
+			val = redactedValue
+		}
+		if uint32(len(val)) > outCap {
+			stack[0] = failCode()
+			return
+		}
+		if !mem.Write(outPtr, []byte(val)) {
+			stack[0] = failCode()
+			return
+		}
+		stack[0] = uint64(len(val))
+	})
+}
+
+// newLogFunc returns the Go side of the log ABI: log(ptr, len).
+//
+// Bounded (truncated at maxLogBytes) and stderr-only by construction: the
+// sink is logSink, which defaults to os.Stderr and is never os.Stdout. An
+// out-of-bounds range is dropped silently — log returns nothing, so there is
+// no channel to report on, and a diagnostic that could crash the host would
+// be worse than a diagnostic lost.
+func newLogFunc() api.GoModuleFunc {
+	return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		mem := mod.Memory()
+		if mem == nil {
+			return
+		}
+		ptr := uint32(stack[0])
+		n := uint32(stack[1])
+		if !inBounds(mem, ptr, n) {
+			return
+		}
+		view, ok := mem.Read(ptr, n)
+		if !ok {
+			return
+		}
+		msg := append([]byte(nil), view...)
+		if len(msg) > maxLogBytes {
+			msg = msg[:maxLogBytes]
+		}
+		_, _ = fmt.Fprintf(logSink, "pulse: wasm: %s\n", msg)
+	})
 }
 
 // inBounds reports whether [ptr, ptr+size) stays inside linear memory. The

@@ -176,6 +176,10 @@ type App struct {
 	Executor mcp.Executor
 	// FuzzRunner backs `execute_fuzz_run`.
 	FuzzRunner mcp.FuzzRunner
+	// Signer backs the @wasm-sign pre-dispatch seam (ROADMAP.md §3.4.7).
+	// It is bound here — never constructed by the engine — so the secret
+	// chain it resolves through is the same one every executor uses.
+	Signer engine.Signer
 	// Watcher is the incremental RAG reindexer (Audit 1C, P4.1b.11). Nil when
 	// no corpus is configured. Started by StartWatcherIfConfigured, stopped
 	// deterministically by Close before the store closes.
@@ -435,6 +439,9 @@ func (a *App) buildRetrieval() error {
 // the bridge carried a nil Redactor, so MCP mode scrubbed by header name only
 // and a token in a response body reached the model intact.
 func (a *App) buildTools() error {
+	// The pre-dispatch signer binds the App's secret chain so hmac_sha256
+	// resolves Vault keys dynamically at sign time (ROADMAP.md §3.4.7).
+	a.Signer = &WasmSigner{Resolver: chainResolver{lookup: a.Chain.Lookup}}
 	a.Executor = &mcp.EngineExecutor{
 		Redactor:  a.Redactor,
 		Resolver:  a.resolver(),
@@ -497,6 +504,7 @@ func (a *App) newRouter(doc *ast.Document) engine.ProtocolEngine {
 		REST: []engine.Option{
 			engine.WithRedactor(a.Redactor),
 			engine.WithResolver(a.resolver()),
+			engine.WithSigner(a.Signer),
 			engine.WithTimeout(a.cfg.RunTimeout),
 			engine.WithUserAgent("pulse/" + Version),
 		},

@@ -1577,19 +1577,17 @@ before it is an architectural one.
 - **Verify:** Import-whitelist test (guest declaring anything else fails to
   instantiate); stdout-in-guest test asserts zero bytes on the wire; end-to-end
   HMAC and AWS-v4 canonical-request tests against Go reference implementations.
-- **NOT BUILT (Move 11).** The sandbox Move 11 shipped registers NO host
-  functions at all, which is strictly more isolated than the closed whitelist
-  above and satisfies this section's whitelist gate — `TestAGuestCannotReachTheHost`
-  proves it — but it also means a guest cannot compute a signature. The
-  HMAC-by-key-id chain has no host side, and the end-to-end HMAC and AWS-v4
-  canonical-request tests against Go reference implementations do not exist.
-  Tracked as TASKS.md P3.4.6.
-- **NOT BUILT (Move 11).** The sandbox Move 11 shipped registers NO host
-  functions at all, which is strictly more isolated than the closed whitelist
-  above and satisfies this section's whitelist gate — `TestAGuestCannotReachTheHost`
-  proves it — but it also means a guest cannot compute a signature. The
-  HMAC-by-key-id chain has no host side, and the end-to-end HMAC and AWS-v4
-  canonical-request tests against Go reference implementations do not exist.
+- **SHIPPED (#6, ADL-0038): all four host functions implemented.** `pulse/env`
+  exposes `hmac_sha256(key_id_ptr,key_id_len,msg_ptr,msg_len,out_ptr,out_cap)->i32`,
+  `now_ns()->i64`, `header_get(name_ptr,name_len,out_ptr,out_cap)->i32`, and
+  `log(ptr,len)` (stderr sink, never stdout). Two deliberate deviations from
+  the contract sketch above, both in the direction of §3.4.2's in-place
+  philosophy: (1) hmac and header_get take explicit `(out_ptr,out_cap)` ranges
+  rather than returning an `i64` handle, so no guest-chosen pointer is ever
+  trusted — only lengths against host-checked buffers; (2) header_get answers
+  sensitive headers (Authorization, Cookie, …) as `[REDACTED]`, presence
+  without content. Every range uses subtraction-form bounds checks, proven by
+  `TestHostBoundsChecksAreSubtractionForm` (mutation M86 red→green).
   Tracked as TASKS.md P3.4.6.
 
 ### 3.4.4 Sandbox limits, traps, and metering

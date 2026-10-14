@@ -16,7 +16,7 @@ BACKUP="${TMPDIR:-/tmp}/pulse-mut-move11"
 rm -rf "${BACKUP}"
 mkdir -p "${BACKUP}"
 
-FILES="internal/wasm/runtime.go internal/wasm/memory.go"
+FILES="internal/wasm/runtime.go internal/wasm/memory.go internal/wasm/host.go internal/engine/engine.go"
 for f in ${FILES}; do
     cp "${f}" "${BACKUP}/$(echo "${f}" | tr / _)"
 done
@@ -42,6 +42,11 @@ mutate() { # mutate <file> <marker>
     fi
 }
 
+run_xpkg() { # run_xpkg <regex> <pkg>: cross-package gates (M85 lives in engine/app, not wasm)
+    CGO_ENABLED=0 go test -count=1 -timeout 300s -run "$1" "$2" 2>&1 |
+        grep -E -- '--- FAIL|^FAIL|^ok' | head -10
+}
+
 run_gate() { # run_gate <regex>
     CGO_ENABLED=0 go test -count=1 -timeout 300s -run "$1" ./internal/wasm/ 2>&1 |
         grep -E -- '--- FAIL|^FAIL|^ok|^\s+runtime_test\.go|stack overflow|fatal error' | head -10
@@ -51,6 +56,8 @@ BOUND='TestInfiniteLoop|TestTimeBudget|TestASpentTimeout'
 FUELG='TestCallBudget|TestAGuestUnderBudget|TestDeepRecursionTrap|TestFuelBudget'
 MEMG='TestSignRoundTrip|TestTheHostCanSee|TestABIViolations|TestBoundsCheck|TestMemorySizeIsReadLive|TestMemoryLimitIsEnforced|TestEnvelopeCeiling|TestSpentModule'
 ISOG='TestAGuestCannotReachTheHost|TestTheABIIsRequired|TestUnlimitedIsNotConfigurable'
+HOSTG='TestNowNS|TestHeaderGet|TestLogGoes|TestLogTruncates|TestHostBounds|TestZeroTrustHostGate|TestHostFunctionIsRegistered'
+XPKG='TestWasmSignInterceptionIsLive|TestSignerRunsPreDispatch'
 ALL="TestSignRoundTrip|TestTheHostCanSee|TestInfiniteLoop|TestTimeBudget|TestCallBudget|TestAGuestUnderBudget|TestDeepRecursionTrap|TestFuelBudget|TestAGuestCannotReachTheHost|TestTheABIIsRequired|TestABIViolations|TestBoundsCheck|TestMemorySizeIsReadLive|TestMemoryLimitIsEnforced|TestUnlimitedIsNotConfigurable|TestEnvelopeCeiling|TestSpentModule|TestCloseIsIdempotent|TestASpentTimeout|TestDefaultLimits"
 
 echo "############################################################"
@@ -375,6 +382,83 @@ open(p, 'w').write(s)
 PY
 mutate internal/wasm/runtime.go '// MUTANT-59'
 run_gate "${ISOG}"
+restore
+echo
+
+echo "############################################################"
+echo "# MUTATION 85: the pre-dispatch signer is bypassed in the engine, so a"
+echo "# request carrying @wasm-sign dispatches UNSIGNED"
+echo "############################################################"
+python3 - <<'PY'
+p = 'internal/engine/engine.go'
+s = open(p).read()
+before = s
+s = s.replace('if path := e.doc.WasmSign(req); path != "" {',
+              'if path := e.doc.WasmSign(req); path != "" && false { // MUTANT-85', 1)
+if s == before:
+    raise SystemExit('M85 PATTERN DID NOT MATCH')
+open(p, 'w').write(s)
+PY
+mutate internal/engine/engine.go '// MUTANT-85'
+run_xpkg "${XPKG}" ./internal/engine/
+run_xpkg "TestWasmSignInterceptionIsLive" ./internal/app/
+restore
+echo
+
+echo "############################################################"
+echo "# MUTATION 86: the host bounds check is additive-only, so ptr+size"
+echo "# wraps past 2^32 and an out-of-bounds guest range reads as in-bounds"
+echo "############################################################"
+python3 - <<'PY'
+p = 'internal/wasm/host.go'
+s = open(p).read()
+before = s
+s = s.replace('''func inBounds(mem api.Memory, ptr, size uint32) bool {
+	avail := mem.Size()
+	if ptr > avail {
+		return false
+	}
+	if size > avail-ptr {
+		return false
+	}
+	return true
+}''', '''func inBounds(mem api.Memory, ptr, size uint32) bool {
+	avail := mem.Size()
+	if ptr+size > avail { // MUTANT-86: wraps
+		return false
+	}
+	return true
+}''', 1)
+if s == before:
+    raise SystemExit('M86 PATTERN DID NOT MATCH')
+open(p, 'w').write(s)
+PY
+mutate internal/wasm/host.go '// MUTANT-86'
+run_gate "${HOSTG}"
+restore
+echo
+
+echo "############################################################"
+echo "# MUTATION 86b: only the SECOND guard goes additive; the first"
+echo "# (ptr > avail) still stands. EXPECTED GREEN, recorded as a"
+echo "# structural no-op like M55: the wrap case never reaches the broken"
+echo "# line, which is the defense-in-depth argument for keeping both."
+echo "############################################################"
+python3 - <<'PY'
+p = 'internal/wasm/host.go'
+s = open(p).read()
+before = s
+s = s.replace('''	if size > avail-ptr {
+		return false
+	}''', '''	if ptr+size > avail { // MUTANT-86b: wraps, but unreachable while ptr > avail stands
+		return false
+	}''', 1)
+if s == before:
+    raise SystemExit('M86b PATTERN DID NOT MATCH')
+open(p, 'w').write(s)
+PY
+mutate internal/wasm/host.go '// MUTANT-86b'
+run_gate "${HOSTG}"
 restore
 echo
 

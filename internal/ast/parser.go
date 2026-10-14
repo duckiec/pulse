@@ -146,9 +146,13 @@ type Request struct {
 	Headers              []Header
 	VarStart, VarCount   int32
 	AsrtStart, AsrtCount int32
-	Body                 Body
-	Method               Method
-	Line                 int32
+	// WasmSignStart/WasmSignEnd span the script path of a `@wasm-sign <path>`
+	// directive attached to this request, or -1/-1 when the request asks for
+	// no signing. Read via Document.WasmSign, never directly.
+	WasmSignStart, WasmSignEnd int32
+	Body                       Body
+	Method                     Method
+	Line                       int32
 }
 
 // Document is the root AST node. It owns no memory of its own: every byte it
@@ -191,6 +195,41 @@ func (d *Document) Str(start, end int32) string { return d.arena.str(start, end)
 
 // BodyText returns the raw body bytes for b (nil when b has no body).
 func (d *Document) BodyText(b Body) []byte { return d.arena.bytes(b.Start, b.End) }
+
+// wasmSignDirective is the directive name (after '@') selecting Wasm signing.
+const wasmSignDirective = "wasm-sign"
+
+// parseWasmSignLine interprets a `@...` line (without the '@') as
+// `wasm-sign <path>` and returns the path span. ok is false when the line is
+// some other directive — the caller keeps its own meaning for those. An
+// explicit `wasm-sign` with no path is a hard error, never an empty signer:
+// an empty path would resolve against the working directory by accident.
+func parseWasmSignLine(src []byte, start, end int32) (ps, pe int32, ok bool, err *SyntaxError) {
+	s, e := trimSpan(src, start, end)
+	if !hasPrefixSpan(src, s, e, wasmSignDirective) {
+		return 0, 0, false, nil
+	}
+	rest := s + int32(len(wasmSignDirective))
+	if rest >= e || (src[rest] != ' ' && src[rest] != '\t') {
+		// `wasm-signup = x` is a variable, not this directive: the name must
+		// end at a blank. Anything else here is not wasm-sign at all.
+		return 0, 0, false, nil
+	}
+	ps, pe = trimSpan(src, rest, e)
+	if pe <= ps {
+		return 0, 0, true, &SyntaxError{Kind: ErrMalformedVar, Offset: s, Expected: "wasm-sign script path"}
+	}
+	return ps, pe, true, nil
+}
+
+// WasmSign returns the @wasm-sign script path attached to r, or "" when the
+// request asks for no signing.
+func (d *Document) WasmSign(r *Request) string {
+	if r == nil || r.WasmSignStart < 0 || r.WasmSignEnd <= r.WasmSignStart {
+		return ""
+	}
+	return d.arena.str(r.WasmSignStart, r.WasmSignEnd)
+}
 
 // VarsOf returns the request-scoped variables of r (a sub-slice; no copy).
 func (d *Document) VarsOf(r *Request) []Variable {
@@ -303,6 +342,7 @@ type parser struct {
 	seenSeparator  bool
 
 	pendingNameStart, pendingNameEnd int32 // -1 when unset
+	pendingWasmStart, pendingWasmEnd int32 // -1 when unset: @wasm-sign path for the next request
 
 	collect bool          // ParseDiag mode: record and resync, don't stop
 	diags   []SyntaxError // accumulated diagnostics (collect mode)
@@ -387,6 +427,7 @@ func parseSource(arena *Arena, collect bool, path string) (*Document, []SyntaxEr
 	p.lx = getLexer()
 	p.lx.Reset(src)
 	p.pendingNameStart, p.pendingNameEnd = -1, -1
+	p.pendingWasmStart, p.pendingWasmEnd = -1, -1
 	p.advance()
 
 	err := p.parseDocument()
@@ -497,6 +538,7 @@ func (p *parser) step() (bool, error) {
 		p.blockVarStart = p.nVar
 		p.blockAsrtStart = p.nAsrt
 		p.pendingNameStart, p.pendingNameEnd = -1, -1
+		p.pendingWasmStart, p.pendingWasmEnd = -1, -1
 		return false, nil
 	case TokMethod:
 		return false, p.parseRequest()
@@ -508,8 +550,10 @@ func (p *parser) step() (bool, error) {
 }
 
 // parseVariable consumes `@name = value`. A definition line without '=' is a
-// hard, fail-closed error: a variable we cannot split is a variable we must
-// never guess at.
+// hard, fail-closed error — with ONE exception: the `@wasm-sign <path>`
+// directive, which takes a bare path rather than an assignment and attaches
+// to the next request (pending slot, like `@name`). A `@wasm-sign` inside a
+// request's header block is handled by parseRequest instead.
 func (p *parser) parseVariable() error {
 	tok := p.cur
 	eq := int32(-1)
@@ -520,12 +564,30 @@ func (p *parser) parseVariable() error {
 		}
 	}
 	if eq < 0 {
-		return p.errorAt(ErrMissingAssign, "variable name '=' value", tok)
+		ps, pe, ok, serr := parseWasmSignLine(p.src, tok.Start+1, tok.End)
+		if serr != nil {
+			serr.Line, serr.Col = tok.Line, tok.Col
+			return serr
+		}
+		if !ok {
+			return p.errorAt(ErrMissingAssign, "variable name '=' value", tok)
+		}
+		if p.pendingWasmStart >= 0 {
+			return p.errorAt(ErrSyntax, "one @wasm-sign per request", tok)
+		}
+		p.pendingWasmStart, p.pendingWasmEnd = ps, pe
+		return nil
 	}
 	nameStart, nameEnd := trimSpan(p.src, tok.Start+1, eq)
 	valStart, valEnd := trimSpan(p.src, eq+1, tok.End)
 	if nameEnd <= nameStart {
 		return p.errorAt(ErrMalformedVar, "variable name", tok)
+	}
+	// `@wasm-sign = x` is a directive misspelled as an assignment. Accepting
+	// it as a variable would silently NOT sign; refuse with direction.
+	if nameEnd-nameStart == int32(len(wasmSignDirective)) &&
+		hasPrefixSpan(p.src, nameStart, nameEnd, wasmSignDirective) {
+		return p.errorAt(ErrSyntax, "@wasm-sign <path> (no '=')", tok)
 	}
 	if p.nVar >= len(p.doc.allVar) {
 		return p.internalErr("variable capacity")
@@ -582,9 +644,11 @@ func (p *parser) parseRequest() error {
 		Line:      meth.Line,
 		NameStart: p.pendingNameStart, NameEnd: p.pendingNameEnd,
 		VarStart: int32(p.blockVarStart), AsrtStart: int32(p.blockAsrtStart),
+		WasmSignStart: p.pendingWasmStart, WasmSignEnd: p.pendingWasmEnd,
 	}
 	p.nReq++
 	p.pendingNameStart, p.pendingNameEnd = -1, -1
+	p.pendingWasmStart, p.pendingWasmEnd = -1, -1
 
 	// Target: at least one URL/INTERP token is mandatory.
 	p.advance()
@@ -603,6 +667,24 @@ func (p *parser) parseRequest() error {
 	// Header block and body.
 	for {
 		switch p.cur.Kind {
+		case TokVariable:
+			// The ONLY `@` line legal inside a header block is the signing
+			// directive: anything else keeps its historic syntax error, so a
+			// misplaced `@var = v` is still caught rather than silently scoped.
+			vtok := p.cur
+			ps, pe, ok, serr := parseWasmSignLine(p.src, vtok.Start+1, vtok.End)
+			if serr != nil {
+				serr.Line, serr.Col = vtok.Line, vtok.Col
+				return serr
+			}
+			if !ok {
+				return p.errorAt(ErrSyntax, "header name, blank line, or separator", vtok)
+			}
+			if req.WasmSignStart >= 0 {
+				return p.errorAt(ErrSyntax, "one @wasm-sign per request", vtok)
+			}
+			req.WasmSignStart, req.WasmSignEnd = ps, pe
+			p.advance()
 		case TokHeaderName:
 			if p.nHdr >= len(p.doc.hdrs) {
 				return p.internalErr("header capacity")
@@ -630,6 +712,22 @@ func (p *parser) parseRequest() error {
 			switch p.cur.Kind {
 			case TokHeaderName, TokNewline, TokBlankLine:
 				continue
+			}
+			// An adjacent `@wasm-sign` line after an in-block attach would
+			// otherwise seal the request and become a forward-pending
+			// directive that EOF silently drops — a second signer claim on
+			// this request that vanishes instead of erroring. Peek: if the
+			// boundary token claims a signer this request already has,
+			// refuse. (A blank-line-separated directive stays forward
+			// pending for the next request, like `@name`.)
+			if p.cur.Kind == TokVariable && req.WasmSignStart >= 0 {
+				if _, _, ok, serr := parseWasmSignLine(p.src, p.cur.Start+1, p.cur.End); serr != nil || ok {
+					if serr != nil {
+						serr.Line, serr.Col = p.cur.Line, p.cur.Col
+						return serr
+					}
+					return p.errorAt(ErrSyntax, "one @wasm-sign per request", p.cur)
+				}
 			}
 			p.unget() // the boundary token belongs to the document loop
 			return p.finishRequest(req, hdrStart)
@@ -764,6 +862,7 @@ func (p *parser) record(err error) bool {
 // keep collecting instead of stopping at the first one.
 func (p *parser) resync() {
 	p.pendingNameStart, p.pendingNameEnd = -1, -1
+	p.pendingWasmStart, p.pendingWasmEnd = -1, -1
 	for {
 		switch p.cur.Kind {
 		case TokSeparator:
