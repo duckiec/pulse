@@ -36,8 +36,7 @@ AST and persists structured history to SQLite — with no UI and no network.
 ### 1.1 Module & Toolchain
 - [x] P1.1.1 Initialize `go.mod` with `go 1.27`; `CGO_ENABLED=0` build verified on linux/amd64, linux/arm64, darwin/arm64, windows/amd64
 - [x] P1.1.2 Establish `cmd/pulse` skeleton with flag parsing, semantic exit codes (0/1/2/3), and stub mode selection
-- [ ] P1.1.3 Add `modernc.org/sqlite` to the dependency allowlist; CI audit rejects any dependency not sanctioned in ARCHITECTURE.md §7
-  - REMAINDER: the audit mechanism is complete and green (P1.1.4); `modernc.org/sqlite` is admitted with `internal/store` in P1.2.
+- [x] P1.1.3 Add `modernc.org/sqlite` to the dependency allowlist; CI audit rejects any dependency not sanctioned in ARCHITECTURE.md §7 — **DONE (Wave 1).** `config/allowed-modules.txt` admits `modernc.org/sqlite` (+ `/` prefix form) with its transitive shims (`libc`, `mathutil`, `memory`); enforcement is `internal/devtools/importaudit` via `scripts/ci/banned-import-audit.sh`, green in `all-gates.sh`. The old REMAINDER is retired: admission and audit are both landed.
 - [x] P1.1.4 Configure `go vet`, `gofmt`, and CI banned-import lint (`mattn/go-sqlite3`, `gorilla/mux`)
 - [x] P1.1.5 Enforcement scripts: `scripts/ci/{build-matrix,tidy-check,doc-sync-gate,banned-import-audit,test-gates}.sh` + `scripts/all-gates.sh` runner
 - [x] P1.1.6 GitHub Actions CI workflow (`build-matrix`, `audit`, `doc-sync`, `test`, `race` jobs; race detector documented as a test-time-only cgo exception, MEMORY.md ADL-0010)
@@ -47,9 +46,9 @@ AST and persists structured history to SQLite — with no UI and no network.
 - [x] P1.1.10 MCP stdio isolation guard: `redirectStdout` swap + `/dev/null` default + `PULSE_STDOUT_AUDIT=1` tripwire; regression test `TestMCPStdoutIsolation`
 
 ### 1.2 SQLite Store
-- [ ] P1.2.1 Implement `internal/store` schema per ARCHITECTURE.md §8 (`collections`, `requests`, `history`) with embedded migrations
-- [ ] P1.2.2 Verify zero credential columns exist (CI grep over migrations)
-- [ ] P1.2.3 Store APIs: upsert collection/request, record history run, query history with redaction at read time
+- [x] P1.2.1 Implement `internal/store` schema per ARCHITECTURE.md §8 (`collections`, `requests`, `history`) with embedded migrations — **DONE (Wave 1, reconciled).** `internal/store/sqlite.go` `schema` + `applySchema` at `Open`; gates `TestCollectionAndRequestRoundTrip`, `TestHistoryRoundTrip`.
+- [x] P1.2.2 Verify zero credential columns exist (CI grep over migrations) — **DONE (Wave 1, reconciled).** Stronger than a grep: `AuditSchema` reads live `sqlite_master` at every `Open` and rejects `header/auth/token/cookie/password/secret/apikey/credential/bearer` columns; gates `TestSchemaHasNoSecretColumns` + positive control `TestAuditSchemaRejectsAWidenedSchema` + `TestSchemaHasNoBodyColumns`.
+- [x] P1.2.3 Store APIs: upsert collection/request, record history run, query history with redaction at read time — **DONE (Wave 1, reconciled).** `UpsertCollection`/`UpsertRequest`/`InsertHistory`/`History` all landed with round-trip gates; the read-time half is structural (the audited schema has no secret-capable column to redact) plus the write boundary (`ErrSecretInPayload` anchor refusal, `SanitizeURL` userinfo/fragment strip, gate `TestHistoryRefusesUnresolvedAnchors`).
 
 ### 1.3 .http AST Parser
 - [x] P1.3.1 Lexer over `[]byte` with offset-based tokens (no per-token allocs)
@@ -223,7 +222,7 @@ routing to a spec-conformant JSON-RPC stdio server via `mark3labs/mcp-go`.
 ### 4.1 Mode Routing
 - [x] P4.1.1 Mode precedence per ARCHITECTURE.md §2.1: `pulse mcp`/`--mcp` → MCP; bare + isatty(stdout) → TUI; bare + non-TTY → stderr message, exit 2 — gated by `TestRunModeMatrix` (flag × isatty matrix, asserting mode *and* exit code) and `TestMCPBootLeavesStdoutEmpty`
 - [x] P4.1.2 isatty detection before any stdout-capable initialization — `main()` evaluates `term.IsTerminal(os.Stdout.Fd())` and passes it in; `run()` decides mode from the passed-in value and never probes the terminal itself
-- [ ] P4.1.3 Mode immutability: no runtime mode switching; architecture test asserts `ui` and `mcp` are never both wired — **BLOCKED on Phase 3**, not on effort: `internal/ui` does not exist, so there is nothing to assert against. Mode is already immutable by construction (`run` returns once; there is no dispatch loop), but the *architecture test* cannot be written until the UI package lands. Left unchecked on purpose.
+- [x] P4.1.3 Mode immutability: no runtime mode switching; architecture test asserts `ui` and `mcp` are never both wired — **DONE (Wave 1).** Unblocked: `internal/ui` landed in Move 14. Gate `TestModeImmutabilityAndHeadlessIsolation` (`cmd/pulse/mode_immutability_test.go`): selection purity/repeatability + interleave non-interference, source-scan proving `app/ast/engine/fuzz/mcp/rag/secrets/store/wasm` never import `internal/ui`/`bubbletea`/`bubbles`/`lipgloss`/`huh`, and alt-screen-sequence absence across headless runs. Mutation: planted `bubbletea` import in `internal/fuzz` fails the gate; restored clean.
 
 ### 4.1c CI/CD Loop & Vault Cryptography (Move 12)
 - [x] P4.1c.1 `internal/engine/assert.go`: the assertion model. Six operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in lo..hi`, `contains`) over five subjects (`status`, `code`, `body`, `header <name>`, `duration`) and nothing else — no variables, no functions, no short-circuit operators, no arithmetic. Every input either parses into exactly one `Assertion` or fails closed with the offending text. `in lo..hi` is inclusive at BOTH ends and `<` is strict; both are pinned by boundary tests rather than by prose. `EvalBody(res, body)` takes the body SEPARATELY: `RunResult` is a bounded summary carrying Bytes and a Digest but not the body, so `body contains` cannot be evaluated against it, and a Digest-based assertion is a different and much weaker statement. A subject that cannot be read FAILS rather than passing vacuously, so a typo'd subject cannot report green for a file. Gates: `TestAssertionGrammarIsTotal` (24 expressions), `TestAssertionBoundarySemantics`, `TestBodyAssertionsFailWithoutABody`, `TestHeaderAssertionCanonicalises` (a `.http` file written `content-type` matches a canonical header).

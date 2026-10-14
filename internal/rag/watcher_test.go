@@ -25,7 +25,7 @@ func openRAGStore(t *testing.T) *store.Store {
 	return s
 }
 
-func indexOneFile(t *testing.T, s *store.Store, root, rel, content string) {
+func indexOneFile(t *testing.T, s *store.Store, rel, content string) {
 	t.Helper()
 	ctx := context.Background()
 	emb := NewHashingEmbedder()
@@ -60,7 +60,7 @@ func TestReaperGate(t *testing.T) {
 	}
 
 	s := openRAGStore(t)
-	indexOneFile(t, s, root, rel, "package main\n\nfunc Foo() int { return 42 }\n")
+	indexOneFile(t, s, rel, "package main\n\nfunc Foo() int { return 42 }\n")
 
 	stats, err := s.RagStats(ctx)
 	if err != nil || stats.Chunks == 0 {

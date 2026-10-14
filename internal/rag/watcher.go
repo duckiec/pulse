@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -24,7 +23,6 @@ type Watcher struct {
 	Embedder Embedder
 	Redact   func(string) string
 
-	mu      sync.Mutex
 	watcher *fsnotify.Watcher
 	done    chan struct{}
 }

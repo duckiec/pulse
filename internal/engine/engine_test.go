@@ -914,26 +914,51 @@ func BenchmarkStreamSteadyState(b *testing.B) {
 	// streaming path itself rather than one-time pool bookkeeping.
 	const size = 16 << 20
 	e := &Engine{}
-	drain := benchmarkDrain(b)
 	ctx := benchmarkCtx(b)
 	// One reader, reset between iterations: allocating it inside the loop
 	// would count as streaming cost and mask the real number.
 	r := &patternReader{remaining: size}
-	// Warm the pools so the first measured iteration is already steady state.
-	for range 2 {
+	// Single-goroutine consumer topology (Wave 1 root-cause fix). The old
+	// shape recycled through a background drain goroutine: Gets ran on the
+	// benchmarking P while Recycle-Puts ran on the drain P, so every op
+	// pushed buffers through sync.Pool's shared cross-P chain and its
+	// growth/steal bookkeeping landed inside the timed window on some runs
+	// and not others (proven: GOMAXPROCS=1 reports 0 allocs/op 10/10,
+	// multi-P oscillates 0/1/2). Those allocations belong to the harness's
+	// extra goroutine, not to engine code. The oversized channel (512 data
+	// chunks + final sentinel per op, so stream never blocks) plus a
+	// synchronous post-op recycle keeps every Get/Put on this P while
+	// exercising the full path: acquireChunk, ReadFull, sendFinal,
+	// queueing, Recycle. Production concurrency stays covered by
+	// TestMemoryCeilingInvariant and the leak gates, not by this number.
+	chunks := make(chan *Chunk, size/chunkSize+maxInFlightChunks+1)
+	recycle := func() {
+		for len(chunks) > 0 {
+			(<-chunks).Recycle()
+		}
+	}
+	// Settle GC/pool state FIRST: a GC drains sync.Pool into its victim
+	// cache (and a second consecutive GC empties it), so any warmup done
+	// before this point can be wiped before the clock starts. Warming AFTER
+	// the collection, across 2 streams per P, leaves every per-P private
+	// pool populated deterministically.
+	runtime.GC()
+	for range 2 * runtime.GOMAXPROCS(0) {
 		r.remaining = size
-		if _, err := e.stream(ctx, r, drain); err != nil {
+		if _, err := e.stream(ctx, r, chunks); err != nil {
 			b.Fatal(err)
 		}
+		recycle()
 	}
 	b.ReportAllocs()
 	b.SetBytes(size)
 	b.ResetTimer()
 	for range b.N {
 		r.remaining = size
-		if _, err := e.stream(ctx, r, drain); err != nil {
+		if _, err := e.stream(ctx, r, chunks); err != nil {
 			b.Fatal(err)
 		}
+		recycle()
 	}
 }
 

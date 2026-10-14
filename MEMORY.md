@@ -2060,6 +2060,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0036 — Wave 1 hygiene cut: dead code, benchmark determinism, P4.1.3 mode-immutability proof
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Wayfinder map duckiec/pulse#1; decision tickets #5 (research, closed: API dossier unblocking #6/#9/#10) and #2 (this cut). Post15rewrite Wave 1: remove dead code, eradicate the `BenchmarkStreamSteadyState` 0/1-alloc oscillation, write the P4.1.3 gate unblocked by Move 14's `internal/ui`, reconcile TASKS.md P1.1.3/P1.2.1–P1.2.3.
+- **Decision:** (1) Deleted the unreferenced `Watcher.mu` mutex (`internal/rag/watcher.go`, plus its `sync` import) and the unused `root` parameter of `indexOneFile` (`internal/rag/watcher_test.go`). (2) Fixed the benchmark with a measured root cause, not the assumed one: the first theory (cold per-P pools + GC wiping warmup, fixed by GC-then-warm + drain-wait) still failed 9/20 runs. The decisive experiment was GOMAXPROCS=1 → 10/10 zero vs multi-P → 6/10 zero, proving the allocator is cross-P `sync.Pool` chain traffic between the benchmark's stream-producer goroutine and its background drain goroutine. The fix is a single-goroutine consumer topology (oversized channel + synchronous post-op recycle) exercising the identical engine path (acquireChunk/ReadFull/sendFinal/queue/Recycle); proven 20/20 `0 allocs/op` with the prompt's exact command. Production concurrency stays covered by `TestMemoryCeilingInvariant` and the leak gates. Pre-fix red evidence: `-count=3` runs reported 0/1/2 allocs/op; post-first-fix `-count=20` had 9 nonzero. (3) Wrote `TestModeImmutabilityAndHeadlessIsolation` (`cmd/pulse/mode_immutability_test.go`): selection purity/repeatability + interleave non-interference, source-scan over app/ast/engine/fuzz/mcp/rag/secrets/store/wasm against `internal/ui`+Charm imports, alt-screen-sequence absence across headless runs. Mutation: planted `bubbletea` blank import in `internal/fuzz/boundary.go` fails the gate with the naming assertion; restored byte-clean. (One process note: a botched early mutation left an untracked `internal/fuzz/fuzz.go` containing a bare import line; caught by `git status`, deleted, build verified clean — stray-file hygiene is part of the mutation protocol now.) (4) Ledger: P1.1.3/P1.2.1/P1.2.2/P1.2.3 checked DONE on the strength of existing gates (allowlist + importaudit; schema + round-trips; live `AuditSchema` + positive control; CRUD + anchor-refusal/URL-sanitize boundary), P4.1.3 checked DONE on the new gate.
+- **Consequences:** The G-alloc streaming gate is deterministic under autotuned benchtime, not just CI's 200x; future pool-topology flakes have a recorded diagnostic (GOMAXPROCS=1 bisection + memprofile). P4.1.3's BLOCKED note is retired. No product behavior changed.
+- **Refs:** `internal/rag/watcher.go`, `internal/rag/watcher_test.go`, `internal/engine/engine_test.go`, `cmd/pulse/mode_immutability_test.go`, TASKS.md P1.1.3/P1.2.1–P1.2.3/P4.1.3, duckiec/pulse#2.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown
