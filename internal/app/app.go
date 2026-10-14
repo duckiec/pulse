@@ -500,6 +500,15 @@ func (a *App) newRouter(doc *ast.Document) engine.ProtocolEngine {
 	})
 }
 
+// RouterFor exposes the composed protocol router for one document so the TUI
+// runs the SAME pipeline (resolver with exit-3 translation, redactor,
+// timeout) as MCP and `pulse test`. The router is built by newRouter — this
+// method only widens its visibility, so the three modes cannot drift apart
+// (ARCHITECTURE.md invariant 11: UI and MCP hold only ProtocolEngine).
+func (a *App) RouterFor(doc *ast.Document) engine.ProtocolEngine {
+	return a.newRouter(doc)
+}
+
 func (a *App) degrade(msg string) {
 	if a.Redactor != nil {
 		msg = a.Redactor.String(msg)

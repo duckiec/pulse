@@ -109,3 +109,40 @@ github.com/yosida95/uritemplate/v3
 github.com/yosida95/uritemplate/v3/
 github.com/golang/protobuf
 github.com/golang/protobuf/
+
+# --- Move 14: 60-FPS TUI (MEMORY.md ADL-0033) --------------------------------
+#
+# github.com/charmbracelet/bubbletea — the Elm-architecture TUI loop
+# (Model/Msg/Update/View). Required because terminal event loops are not a
+# stdlib concern (AGENTS.md §2.3 sanctions the Charm stack); pure Go,
+# CGO-free on all four build-matrix targets.
+# github.com/charmbracelet/lipgloss — styling, truecolor, layout. No raw ANSI.
+# github.com/charmbracelet/bubbles — component library (viewport used).
+# huh is NOT admitted: forms belong to a future move, and admitting it now
+# would sanction a dependency nothing imports.
+github.com/charmbracelet/bubbles
+github.com/charmbracelet/bubbles/
+github.com/charmbracelet/bubbletea
+github.com/charmbracelet/bubbletea/
+github.com/charmbracelet/lipgloss
+github.com/charmbracelet/lipgloss/
+
+# Transitive dependencies of the three modules above (terminal I/O, unicode
+# widths, color profiles). All pure Go; verified by CGO scan (no `import "C"`).
+github.com/aymanbagabas/go-osc52/v2
+github.com/charmbracelet/colorprofile
+github.com/charmbracelet/x/ansi
+github.com/charmbracelet/x/cellbuf
+github.com/charmbracelet/x/term
+github.com/clipperhouse/displaywidth
+github.com/clipperhouse/stringish
+github.com/clipperhouse/uax29/v2
+github.com/erikgeiser/coninput
+github.com/lucasb-eyer/go-colorful
+github.com/mattn/go-localereader
+github.com/mattn/go-runewidth
+github.com/muesli/ansi
+github.com/muesli/cancelreader
+github.com/muesli/termenv
+github.com/rivo/uniseg
+github.com/xo/terminfo

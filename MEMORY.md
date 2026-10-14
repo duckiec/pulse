@@ -1954,6 +1954,70 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0033 — 60-FPS TUI: Bubble Tea over the composed router; G-frame MET
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Every subsystem was gated but nothing watchable existed;
+  G-frame was carried forward from Goal 1 (TASKS.md) and Goal 2 (ROADMAP
+  §2.x table) as NOT MET because the frame budget is a property of a render
+  loop that did not exist. Move 14 builds it: `internal/ui` (Elm model,
+  dual-pane views, central keymap, telemetry strip), `App.RouterFor` so the
+  TUI drives the SAME pipeline as MCP/`pulse test`, and `pulse <file.http>`
+  CLI wiring replacing the Move 0 stub.
+- **Decision:**
+  - Multiplexing: `uiSink` (an `engine.Sink` on the dispatch goroutine)
+    COPIES each chunk, recycles the pool buffer synchronously, and Sends a
+    UI-owned `chunkMsg`. No `RecycleMsg` type — the pool never waits on a
+    frame (deviation from the P3.3.2 sketch, strictly stronger). Arrival
+    accounting happens in Update at receipt, not at render: an earlier
+    revision accounted at coalesce time and undercounted by the backlog
+    overflow — the 50 MiB gate names that defect.
+  - Frame governor: 16 ms `tickMsg`, each handled tick coalescing the
+    backlog and scheduling exactly its successor; backlog over 32 chunks
+    drops with visible counts. View is pure (no I/O, clock, or map
+    iteration); sizes arrive via WindowSizeMsg, time via tickMsg.
+  - Memory: 10k-line / 1 MiB viewport tail + 1 MiB transient (32 pending ×
+    32 KiB) = 2 MiB UI ceiling matching the engine's in-flight bound.
+    Tail evictions and backlog drops share the `droppedLines` counter;
+    stream totals stay exact (`totalLines` counts dropped newlines too —
+    whole-line-aligned floods are exact, mid-line splits cost ≤1 line per
+    overflow, documented in code).
+  - Telemetry without engine changes: the UI Acquires its own report and
+    attaches it via the exported `engine.Attach` (ctx values survive into
+    the transport); it Ends the report on terminal and the CLI Releases it.
+    Unrun phases render as "—", never fabricated zeros.
+  - CLI pins honored: `TestRunModeMatrix` demands exit 1 for bare-TTY and
+    for `pulse somefile.http` (missing file), so unreadable files exit 1
+    (generic failure) while malformed `.http` exits 2 (parse error, §4.4)
+    and sub-80x24 terminals exit 2 (§3.2 refusal).
+  - Deps: bubbletea v1.3.10 + lipgloss v1.1.0 + bubbles v1.0.0 with 17
+    transitive pure-Go modules, all named in `config/allowed-modules.txt`;
+    `huh` deliberately absent. CGO-free verified by source scan + 4-target
+    matrix.
+  - Mutation pool: M79 (100 ms Update sleep → p95 ≈ 102 ms vs 16 ms
+    budget), M80 (every second chunk dropped → 2048 of 4000 lines).
+    Proven in `scripts/mutation-proof-ui.sh`, cmp-verified restores.
+  - G-frame marked MET in TASKS.md (Goals 1+2) and the Goal 2 table;
+    ROADMAP §§1.4.1/1.2.5/2.1.5 updated. P3.1.1/P3.1.5/P3.2.3/P3.3.1–P3.3.4
+    checked; P3.1.2–P3.1.4/P3.2.1–P3.2.2/P3.2.4 recorded as REMAINDER/PARTIAL
+    with exact missing halves. No golden snapshots exist yet (§9 open).
+- **Consequences:** The TUI runs real requests fullscreen today; tree,
+  editor, forms, search, finder, theme/glyph goldens, and the Stream tab
+  remain future work with seams in place (keymap, focus model, viewport).
+  p99 is asserted over 25 full-size samples (p95 360µs, 44× under budget),
+  not a literal 50 MB render loop — retention is size-independent by
+  construction, so 50 MB of tail would measure an unreachable path; the
+  50 MiB E2E flood covers the byte half instead.
+- **Refs:** `internal/ui/` (ui.go, app.go, views.go, keys.go, telemetry.go,
+  app_test.go — 6 gates); `internal/app/app.go` (`RouterFor`);
+  `cmd/pulse/main.go` (`runTUI`); `config/allowed-modules.txt` (Move 14);
+  `scripts/mutation-proof-ui.sh` (M79–M80); TASKS.md P3.1.1/P3.1.5/P3.2.3/
+  P3.3.x; ROADMAP §§1.4.1/1.2.5/2.1.5 + Goal 2 table; ARCHITECTURE.md §4/§7;
+  DESIGN_SYSTEM.md §10.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

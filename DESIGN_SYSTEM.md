@@ -209,4 +209,22 @@ default profile is a test failure.
 
 ---
 
+## 10. Implementation Status (Move 14, ADL-0033)
+
+First implementation of this document. Built: Elm skeleton (`internal/ui`:
+Model/Msg/Update/View), central keymap (`keys.go` — footer and `?` overlay
+render from it), dual-pane ≥100 cols / single-pane 80–99 / refusal <80x24
+(CLI pre-check plus in-model refusal), response viewport over a bounded
+10k-line / 1 MiB tail, timing strip (status + DNS/TCP/TLS/first-byte/total
+from `TelemetrySnapshot`), status bar with byte/line/drop counters, help
+overlay, and the wired subset of §5 (`q`/`ctrl+c` quit, `ctrl+s` send,
+`ctrl+x` cancel, `tab` focus, `j/k/g/G/ctrl+d/u` scroll, `?` help).
+
+Deliberately not built (TASKS.md P3.1.2–P3.1.4, P3.2.1–P3.2.2, P3.2.4
+remainders): tree pane, theme-token degradation ladder + per-profile
+goldens, glyph-mode goldens, `/` search, `Ctrl+P` finder, huh forms, request
+editor/insert mode, spinner/progress/toasts, Stream tab with pause/resume.
+No breakpoint or color-profile golden snapshots exist yet — §9's golden rows
+are open, not silently passed.
+
 *UI pattern changes require updating this document in the same commit (AGENTS.md §4.6).*

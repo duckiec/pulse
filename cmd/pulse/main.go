@@ -2,10 +2,10 @@
 // for humans and a headless MCP server for local AI agents (AGENTS.md §1,
 // ARCHITECTURE.md §2).
 //
-// Three modes are wired: `pulse mcp` serves the MCP server, `pulse test <dir>`
-// runs a headless pipeline, and `pulse vault ...` manages encrypted
-// configuration. The TUI (ROADMAP.md Goal 1; TASKS.md Phase 3.1) is still a stub
-// that fails closed.
+// Four modes are wired: `pulse mcp` serves the MCP server, `pulse test <dir>`
+// runs a headless pipeline, `pulse vault ...` manages encrypted
+// configuration, and `pulse <file.http>` starts the fullscreen TUI over the
+// same composition root the other modes share.
 //
 // This file wires modes and maps outcomes to exit codes. It does not open a
 // store, read a keychain or build a domain service: that is internal/app's work,
@@ -27,9 +27,13 @@ import (
 	"golang.org/x/term"
 
 	"pulse/internal/app"
+	"pulse/internal/ast"
 	"pulse/internal/engine"
 	"pulse/internal/mcp"
 	"pulse/internal/secrets"
+	"pulse/internal/ui"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Semantic exit codes (AGENTS.md §4.4).
@@ -75,6 +79,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse [flags]")
+		fmt.Fprintln(stderr, "       pulse <file.http>")
 		fmt.Fprintln(stderr, "       pulse mcp")
 		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent]")
 		fmt.Fprintln(stderr, "       pulse vault init|encrypt|decrypt <file> [--key-id ID]")
@@ -98,13 +103,85 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stderr, "pulse: use `pulse mcp` for MCP mode (json-rpc over stdio)")
 		return exitUsage
 	default:
-		return runTUI(stdin, stdout, stderr)
+		if len(fs.Args()) > 1 {
+			fmt.Fprintln(stderr, "pulse: one .http file at a time (usage: pulse <file.http>)")
+			return exitUsage
+		}
+		return runTUI(ctx, stdin, stdout, stderr, fs.Arg(0))
 	}
 }
 
-func runTUI(_ io.Reader, _, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "pulse: tui mode is not yet implemented (ROADMAP.md Goal 1; TASKS.md Phase 3)")
-	return exitFail
+// runTUI starts the fullscreen Bubble Tea program over one .http file.
+//
+// The TUI shares the composition root with every other mode: the same App
+// builds the store, chain and redactor, and App.RouterFor hands the UI the
+// same protocol router MCP and `pulse test` drive, so an interactive run and
+// a headless run cannot disagree about resolution, redaction or timeout.
+// Exit mapping: a missing file or an empty document is exit 1 (generic
+// failure — the invocation was well-formed; the former is pinned by
+// TestRunModeMatrix), a malformed .http file is exit 2 (parse error,
+// AGENTS.md §4.4), and a too-small terminal is exit 2 (DESIGN_SYSTEM.md
+// §3.2 refuses to render half-broken UI). A clean interactive session exits
+// 0; the TUI reports verdicts on screen, not in its exit code.
+func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file string) int {
+	if file == "" {
+		fmt.Fprintln(stderr, "pulse: a .http file is required (usage: pulse <file.http>)")
+		return exitFail
+	}
+	doc, err := ast.ParseFile(file)
+	if err != nil {
+		var se *ast.SyntaxError
+		if errors.As(err, &se) {
+			fmt.Fprintf(stderr, "pulse: %v\n", err)
+			return exitUsage
+		}
+		fmt.Fprintf(stderr, "pulse: cannot read %s: %v\n", file, err)
+		return exitFail
+	}
+	defer doc.Release()
+	hasRequest := false
+	for range doc.Requests() {
+		hasRequest = true
+		break
+	}
+	if !hasRequest {
+		fmt.Fprintf(stderr, "pulse: %s holds no requests\n", file)
+		return exitFail
+	}
+	// Refuse a half-broken frame before starting: below 80x24 the model
+	// renders a refusal line, but entering fullscreen to show it would
+	// flicker the terminal for no reason. Untestable outputs (anything that
+	// is not an *os.File) skip the probe; production stdout is always one.
+	if f, ok := stdout.(*os.File); ok {
+		if w, h, serr := term.GetSize(int(f.Fd())); serr == nil && (w < 80 || h < 24) {
+			fmt.Fprintf(stderr, "pulse: terminal is %dx%d; the TUI needs 80x24\n", w, h)
+			return exitUsage
+		}
+	}
+
+	application, err := app.New(ctx, appConfig())
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		if code := app.SecretExitCode(err); code != 0 {
+			return code
+		}
+		return exitFail
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		}
+	}()
+
+	model := ui.New(ctx, application.RouterFor(doc), doc, true)
+	prog := tea.NewProgram(model, tea.WithAltScreen())
+	model.Bind(prog.Send)
+	if _, err := prog.Run(); err != nil {
+		fmt.Fprintf(stderr, "pulse: tui: %v\n", err)
+		return exitFail
+	}
+	engine.ReleaseTelemetry(model.Report())
+	return exitOK
 }
 
 // describeTools is used only by `--help`, and exists so the CLI and the MCP

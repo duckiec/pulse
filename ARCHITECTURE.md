@@ -93,7 +93,7 @@ runtime; they are the only two consumers of `internal/app`.
 | Package | Responsibility | Depends on | Never imports |
 |---|---|---|---|
 | `cmd/pulse` | Flags, mode selection, wiring, exit codes | `app`, `ui`, `mcp`, `golang.org/x/term` | — (leaf wiring only) |
-| `internal/ui` | Bubble Tea models, Lip Gloss styling, Huh forms | `app` | `mcp`, `store`, `engine` directly |
+| `internal/ui` | Bubble Tea models, Lip Gloss styling, central keymap, telemetry strip (Move 14). Holds executors only as `engine.ProtocolEngine`; no Huh forms yet | `app`, `ast`, `engine` + Charm stack (§7) | `mcp`, `store` |
 | `internal/mcp` | JSON-RPC lifecycle, tool registry, stdio transport. **Constructs no dependencies** (Move 10) — everything is injected | `ast`, `engine`, `fuzz` | `ui`, `secrets`, `store` |
 | `internal/wasm` | Untrusted-code sandbox: zero-capability wazero runtime, memory ABI, time + call budgets | `github.com/tetratelabs/wazero` (interpreter, no cgo) | everything internal; no host modules, so no sibling can be imported by a guest either |
 | `internal/rag` | Codebase indexing: bounded walker, per-language chunking, structural embedder | stdlib only (`go/parser`) | everything internal; **`store` and `mcp` both depend on this layer's OUTPUT, not on it** |
@@ -115,6 +115,15 @@ means running it where it cannot reach the host. It adds no indirect dependency.
 CompileModule rather than Call time — a measurement recorded in
 `config/allowed-modules.txt` and MEMORY.md ADL-0024, because the sandbox's security
 posture depends on what the runtime actually enforces.**
+
+**Move 14 added three dependencies: `github.com/charmbracelet/bubbletea
+v1.3.10`, `github.com/charmbracelet/lipgloss v1.1.0`,
+`github.com/charmbracelet/bubbles v1.0.0`.** They are the AGENTS.md §2.3 UI
+engine (Elm loop, styling, viewport) plus 17 transitive pure-Go modules
+(terminal I/O, unicode widths, color profiles), each named in
+`config/allowed-modules.txt`. `huh` is deliberately absent: forms belong to
+a future move. All three are CGO-free on every build-matrix target (verified
+by source scan for `import "C"` and by the 4-target matrix itself).
 
 **The composition root is the only place a concrete dependency is chosen.**
 Before Move 10, `internal/mcp` constructed its own executor inside
