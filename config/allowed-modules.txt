@@ -159,3 +159,27 @@ github.com/xo/terminfo
 # Move 15: fsnotify for RAG watcher (pure Go)
 github.com/fsnotify/fsnotify
 github.com/fsnotify/fsnotify/
+
+# Wave 7 (Issue #10, MEMORY.md ADL-0043): mDNS peer discovery for P2P sync.
+#
+# github.com/grandcat/zeroconf v1.0.0 — pure-Go mDNS advertisement and
+# browsing for _pulse-sync._tcp.local. No stdlib mDNS exists; v1.0.0 is the
+# only tagged release (later work is untagged master — untagged floats are
+# not reproducible, so the tag wins). CGO-free (verified by build matrix).
+# Its transitive deps (miekg/dns wire codec, cenkalti/backoff retry) are
+# indirect-only: Pulse code never imports them, so only the zeroconf rows
+# below are load-bearing for the audit; the comments record the rest.
+github.com/grandcat/zeroconf
+github.com/grandcat/zeroconf/
+
+# Wave 7 transitive deps of zeroconf (all indirect-only; Pulse code never
+# imports them — sanctioned so the tree resolves, per the modernc precedent
+# of listing transitive pure-Go deps explicitly):
+# miekg/dns (mDNS wire codec), cenkalti/backoff (query retry),
+# golang.org/x/crypto (dns dependency). All pure Go, CGO-free.
+github.com/miekg/dns
+github.com/miekg/dns/
+github.com/cenkalti/backoff
+github.com/cenkalti/backoff/
+golang.org/x/crypto
+golang.org/x/crypto/

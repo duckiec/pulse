@@ -1932,6 +1932,8 @@ are corrected in place; nothing under 4.1 remains open.
       Body    BodyValue                  // opaque: {Sha256, Bytes} LWW by HLC
       Removed map[uint64]bool           // OR-Set tombstones (add tags)
       Adds    map[uint64]HLC
+      // Wave 7 adds RemovedAt HLC (last-removal stamp): digests must observe
+      // removals or a remover and an untouched peer agree forever (ADL-0043).
   }
   ```
 - **Challenge:** Concurrent edits to the *same* line of a `.http` file must merge
@@ -1959,6 +1961,13 @@ are corrected in place; nothing under 4.1 remains open.
 - **Verify:** Convergence test under partition-and-heal simulation (no message loss
   beyond in-flight); idempotence test (applying the same state twice is a no-op);
   canonical-encoding byte-equality test.
+- **Status (Wave 7, ADL-0043): BUILT.** Two contract refinements, both gate-proven:
+  the digest root hashes (id, item-content-hash) pairs rather than (id, HLC) —
+  skewed clocks let concurrent updates share a maximum while differing below it,
+  which blinds a max-stamp digest; and items carry a `RemovedAt` tombstone stamp
+  so removals advance the digest (a stampless removal is invisible to
+  anti-entropy). The `Digest` shape and the digest→ids→state protocol are
+  otherwise exactly as contracted.
 
 ### 4.2.3 Peer discovery and transport
 
@@ -1966,7 +1975,9 @@ are corrected in place; nothing under 4.1 remains open.
   as a manual backend (no tsnet dependency — decision recorded, size rationale).
 - **Contract:**
   ```go
-  // LAN: advertise/browse "_pulse._tcp." with TXT {node=<id>, hlc=<packed>, proto=1}
+  // LAN: advertise/browse "_pulse-sync._tcp." with TXT {node=<id>, hlc=<packed>, proto=1}
+  // (Wave 7: the grilling resolution fixes the `-sync` infix over the sketch's
+  // bare `_pulse` so sync advertisements are unambiguous on a shared LAN.)
   // Tailscale: peers listed in pulse.toml [sync.peers] (100.x addresses), dialed directly
   // wire: length-prefixed frames; TLS 1.3 mutual auth with device Ed25519 certs;
   // TOFU: peer fingerprints pinned in git-tracked peers.txt, mismatch → refuse.

@@ -1,0 +1,12 @@
+# peers.txt — the Git-tracked Trust-On-First-Use fingerprint ledger for P2P
+# sync (ROADMAP §4.2.3, Issue #10, MEMORY.md ADL-0043).
+#
+# One pin per line: `<node-id> <sha256hex-of-ed25519-pubkey>`.
+# The node id is hex(sha256(pubkey)[:8]); the fingerprint is hex(sha256(pubkey)).
+# A peer whose node id is absent here is DISCOVERED ONLY FOR DISPLAY and is
+# refused at the TLS handshake; a present id with a mismatched key is
+# refused as a possible impersonation. Pinning is this file's edit history:
+# trust enters through a commit, never through the network.
+#
+# No pins are filed yet (empty ledger): every peer refuses every peer until
+# the first out-of-band exchange. That is the correct initial state.

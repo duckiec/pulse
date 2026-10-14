@@ -121,6 +121,37 @@ invoke; a function that wipes what it was handed cannot be composed or called tw
 _Avoid_: wiping, scrubbing, clearing (clearing is a language primitive; zeroisation is
 the security obligation)
 
+## Sync
+
+**Item**:
+One request as sync sees it: an id, per-field LWW registers, one opaque body,
+and an OR-Set of add tags under tombstones. Sync never sees `.http` text —
+text merging is sidestepped by construction, not solved.
+_Avoid_: request (a request is the `.http` thing; an item is its synced shadow)
+
+**HLC**:
+Hybrid Logical Clock: wall milliseconds plus a counter plus the node id. The
+counter carries monotonicity when the wall will not (drift, regression, lies).
+_Avoid_: timestamp, Lamport clock (a Lamport clock has no wall; an HLC does)
+
+**OR-Set**:
+Observed-Remove Set: liveness is "any add tag not covered by a tombstone". A
+remover kills only tags it observed, so a concurrent unseen add survives
+(add-wins); a fully tombstoned item is dead on every peer.
+_Avoid_: tombstone list (tombstones alone are not the set; the adds are)
+
+**Digest**:
+The anti-entropy summary: Merkle root over sorted (id, item-content-hash)
+pairs plus count plus high-water mark. Equal digests mean equal states;
+differing digests route to the id-set exchange, then states for differing ids.
+_Avoid_: checksum, version vector
+
+**TOFU**:
+Trust On First Use: a peer's Ed25519 key fingerprint enters the Git-tracked
+`peers.txt` ledger through a commit, and the TLS handshake refuses any key
+the ledger does not file. There is no network path to trust.
+_Avoid_: pinning (pinning is the mechanism; TOFU is the policy)
+
 ## See also
 
 Decisions are not in this file. They are `ADL-nnnn` entries in `MEMORY.md`; see

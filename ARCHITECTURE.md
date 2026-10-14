@@ -103,6 +103,7 @@ runtime; they are the only two consumers of `internal/app`.
 | `internal/ast` | Lexer, parser, zero-allocation AST, `iter.Seq` traversal | stdlib only | everything internal |
 | `internal/store` | SQLite schema, migrations, history persistence | stdlib + `modernc.org/sqlite` | everything internal |
 | `internal/secrets` | Keychain backends, ephemeral env, resolver chain, redaction | stdlib + sanctioned backends (§7) | everything internal |
+| `internal/sync` | P2P collection sync (Wave 7): HLC, item CRDT + secret filter, TOFU mTLS, zeroconf discovery, gossip engine. Domain logic only — unwired (no listener yet); `app` binds identity/scanner/network next wave | `secrets` (identity shapes, sensitive-header names), `grandcat/zeroconf` (§7) | `app`, `mcp`, `store`, `engine` (nothing imports sync yet) |
 | `internal/devtools/importaudit` | Static, offline dependency + stdout-hygiene audit (dev tooling) | stdlib only | everything internal; never imported by shipped code |
 
 **Move 11 added one dependency: `github.com/tetratelabs/wazero v1.12.0`.** It is the
@@ -485,7 +486,7 @@ Every non-stdlib dependency requires an explicit entry here and a MEMORY.md ADL.
 | ~~`github.com/tetratelabs/wazero`~~ | WebAssembly runtime — **now vendored (Move 11, §15)** | No stdlib Wasm | G3 §3.4 |
 | `github.com/owulveryck/onnx-go` | Pure-Go ONNX inference for local embeddings | No stdlib ML runtime | G3 §3.2 |
 | `github.com/fsnotify/fsnotify` | Filesystem watching for the RAG indexer | No stdlib recursive watcher | G3 §3.2 |
-| `github.com/grandcat/zeroconf` | mDNS/Bonjour peer discovery | No stdlib mDNS | G4 §4.2 |
+| `github.com/grandcat/zeroconf` v1.0.0 | mDNS/Bonjour peer discovery (`_pulse-sync._tcp.local.`) — **exercised (Wave 7, ADL-0043)** | No stdlib mDNS | G4 §4.2 |
 | `github.com/getkin/kin-openapi` | OpenAPI 3.0/3.1 parsing for auto-fuzzing — **NOT VENDORED**; Move 9 reads the needed subset directly (§13) and no YAML module is permitted | No stdlib OpenAPI | G3 §3.3 |
 | `github.com/santhosh-tekuri/jsonschema/v6` | MCP payload validation | No stdlib JSON Schema | G3 §3.1 |
 | ~~`github.com/tetratelabs/wazero`~~ | (Move 11, §15) | — | — |
