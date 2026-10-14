@@ -1703,8 +1703,9 @@ before it is an architectural one.
 
 ## 3.5 Goal 3 Exit Gates
 
-> **Goal 3 STATUS: PARTIAL — the MCP half is bridged and closed; four proof
-> obligations remain open.**
+> **Goal 3 STATUS: COMPLETE (Move 15) — zero-trust host functions, incremental
+> RAG reindex, and fuzz finding persistence/dedup are shipped and gated. The
+> 50k-chunk p99 latency benchmark remains an argued, not measured, bound.**
 >
 > Goal 3 asked for three capabilities: a UI-driven workbench (Goal 3.1–3.3), a
 > fully online MCP bridge (Goal 3.3), and an untrusted-code sandbox (Goal 3.4).

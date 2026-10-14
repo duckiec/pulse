@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_request ON history(request_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS fuzz_findings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    signature   TEXT NOT NULL UNIQUE,
+    op_id       TEXT NOT NULL DEFAULT '',
+    status_code INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fuzz_findings_sig ON fuzz_findings(signature);
 `
 
 // forbiddenColumnSubstrings are the fragments that must never appear in any

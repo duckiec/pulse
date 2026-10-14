@@ -2018,6 +2018,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0034 — Move 15 Final Sweep: zero-trust host functions, incremental RAG reindex, fuzz persistence (project completion)
+
+- **Date:** 2026-10-13
+- **Status:** ACCEPTED
+- **Context:** Goal 3 had four open proof obligations after Move 11: §3.4.3 host functions and the HMAC-by-key-id chain, the incremental reindex/watcher, fuzz finding persistence/dedup, plus the 50k-chunk latency bound. Move 15 closes the first three with real implementations and gates; the latency bound remains argued.
+- **Decision:** `internal/wasm/host.go` registers a `pulse/env` wazero host module (only when a SecretResolver is supplied) exposing `hmac_sha256(key_id_ptr,key_id_len,msg_ptr,msg_len,out_ptr,out_cap)`, which resolves the key id through the Vault SecretResolver, computes HMAC-SHA256 in Go, and writes only the 32-byte digest into guest memory. `internal/rag/watcher.go` adds a recursive fsnotify watcher that incrementally re-chunks and re-embeds a modified file and reaps stale chunks before rewriting, including full deletion. `internal/fuzz/persistence.go` defines `FindingSignature` (sha256(status + canonical response prefix)) and `PersistFindings` through a `FindingStore` interface, backed by the dedup `fuzz_findings` table (signature-keyed, idempotent); `fuzz.Progress` plus `FuzzOptions.Progress` give the Bubble Tea interface a non-blocking stream of Pass/Fail/Skip events.
+- **Consequences:** Goal 3 is COMPLETE except the 50k-chunk p99 latency bound, which stays argued from operation count. Mutation IDs M81 and M82 were exercised red→restored→green: M81 leaked the raw secret into guest memory (caught by TestZeroTrustHostGate); M82 skipped reaping (caught by TestReaperGate). fsnotify added to allowed modules.
+- **Refs:** `internal/wasm/host.go`, `internal/wasm/host_test.go`; `internal/rag/watcher.go`, `internal/rag/watcher_test.go`; `internal/fuzz/persistence.go`; `internal/store/fuzz.go`, `internal/store/sqlite.go`; `TASKS.md` (P3.2.5, P3.3a.10, P3.4.6); `ROADMAP.md` §3.5; `AGENTS.md` §3.1.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

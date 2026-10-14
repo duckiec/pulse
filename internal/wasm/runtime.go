@@ -166,6 +166,12 @@ type Config struct {
 
 	// MemoryPages caps linear memory. Zero selects DefaultMemoryPages.
 	MemoryPages uint32
+
+	// Resolver (or SecretResolver) optionally enables the zero-trust host
+	// functions in internal/wasm/host.go. Nil leaves the sandbox with no host
+	// imports at all.
+	Resolver        SecretResolver
+	SecretResolver  SecretResolver
 }
 
 // Module is an instantiated guest.
@@ -266,6 +272,25 @@ func New(ctx context.Context, cfg Config) (*Module, error) {
 	spent := &atomic.Uint64{}
 	base = experimental.WithFunctionListenerFactory(base, newFuelListener(spent, fuel, cancelBase))
 
+	resolver := cfg.Resolver
+	if resolver == nil {
+		resolver = cfg.SecretResolver
+	}
+	if resolver != nil {
+		hostFn := newHMACHostFunc(resolver)
+		if _, err := rt.NewHostModuleBuilder(HostModuleName).
+			NewFunctionBuilder().
+			WithGoModuleFunction(hostFn, []api.ValueType{
+				api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
+				api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
+			}, []api.ValueType{api.ValueTypeI32}).
+			Export(HostFuncHMACSHA256).
+			Instantiate(ctx); err != nil {
+			cancelBase()
+			_ = rt.Close(ctx)
+			return nil, fmt.Errorf("wasm: instantiate host module: %w", err)
+		}
+	}
 	// No host modules are instantiated, so ANY import the guest declares fails
 	// to resolve and the module refuses to instantiate. This is the structural
 	// denial of the filesystem, the network, the clock, randomness and WASI:

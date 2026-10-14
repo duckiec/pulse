@@ -146,3 +146,7 @@ github.com/muesli/cancelreader
 github.com/muesli/termenv
 github.com/rivo/uniseg
 github.com/xo/terminfo
+
+# Move 15: fsnotify for RAG watcher (pure Go)
+github.com/fsnotify/fsnotify
+github.com/fsnotify/fsnotify/

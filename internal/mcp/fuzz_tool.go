@@ -92,6 +92,9 @@ type FuzzOptions struct {
 	Rate float64
 	// Concurrency bounds in-flight requests.
 	Concurrency int
+	// Progress receives one notification per payload as it completes. Optional,
+	// and always non-blocking: a nil callback disables streaming.
+	Progress func(fuzz.Progress)
 }
 
 // ValidateFuzzOptions checks and defaults the options.
@@ -309,6 +312,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			res.OK = true
 			res.Description += " (not run: " + err.Error() + ")"
 			results[i] = res
+		if opts.Progress != nil {
+			opts.Progress(fuzz.Progress{
+				Index:   p.Index,
+				Total:   len(payloads),
+				Passed:  res.OK && !res.Skip,
+				Failed:  !res.OK && !res.Skip,
+				Skipped: res.Skip,
+			})
+		}
 			continue
 		}
 
@@ -317,6 +329,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			res.OK = true
 			res.Description += " (not run: " + err.Error() + ")"
 			results[i] = res
+		if opts.Progress != nil {
+			opts.Progress(fuzz.Progress{
+				Index:   p.Index,
+				Total:   len(payloads),
+				Passed:  res.OK && !res.Skip,
+				Failed:  !res.OK && !res.Skip,
+				Skipped: res.Skip,
+			})
+		}
 			continue
 		}
 
@@ -344,6 +365,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			res.OK = true
 			res.Description += " (not run: " + runErr.Error() + ")"
 			results[i] = res
+		if opts.Progress != nil {
+			opts.Progress(fuzz.Progress{
+				Index:   p.Index,
+				Total:   len(payloads),
+				Passed:  res.OK && !res.Skip,
+				Failed:  !res.OK && !res.Skip,
+				Skipped: res.Skip,
+			})
+		}
 			continue
 		}
 
@@ -378,6 +408,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			}
 		}
 		results[i] = res
+		if opts.Progress != nil {
+			opts.Progress(fuzz.Progress{
+				Index:   p.Index,
+				Total:   len(payloads),
+				Passed:  res.OK && !res.Skip,
+				Failed:  !res.OK && !res.Skip,
+				Skipped: res.Skip,
+			})
+		}
 	}
 
 	out.ElapsedMS = time.Since(start).Milliseconds()
