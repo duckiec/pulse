@@ -2093,6 +2093,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0039 — 6/6 MCP tool surface, Redactor history chokepoint, iterative fuzz cursor (#7)
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Wayfinder map duckiec/pulse#1; grilling ticket #7 (5-tool MCP surface + iterative fuzz + chunked delivery, P3.3a.11/P4.1b.10/P4.3.2/P4.3.4). Self-resolved against ROADMAP/ARCHITECTURE: snake_case wins over the ticket's kebab-case (ADL-0020 precedent); mcp never imports store (sibling rule) so queries cross via interface + adapter; `get_run` binds to the history store rather than ARCHITECTURE's "in-flight run" sketch (Pulse persists terminal metadata, not live handles); `get_request` returns the stored definition row, not a live AST re-parse.
+- **Decision:** (1) Store: `internal/store/queries.go` (`ListCollections`/`ListRequests`/`GetRequest`/`GetRun`/`RecentHistory` with `ErrNotFound`; `HistoryEntry.ID` added and populated everywhere, including the pre-existing `History()` — which also fixes a latent unit bug: duration_ms was scanned straight into `time.Duration`, reading 5ms back as 5ns). (2) Bridge: `internal/mcp/history.go` registers `list_collections`/`list_requests`/`get_request`/`get_run`/`get_history` via `RegisterHistoryTools`; `mcp.HistoryStore` interface + `mcp.Config.History`; `scrubRunRecord` is the single chokepoint every get_run/get_history payload passes (digests untouched, error/run_source scrubbed). (3) Iterative: `internal/mcp/iterative.go` (`FuzzSessions` registry, crypto/rand handles, cursor-advances-exactly-once per consumed probe, limiter-before-dispatch ordering shared with ExecuteFuzz, 5xx RAG explanation via Retriever + redacted chunks, finding persistence fail-closed, per-probe `FuzzOptions.Progress` + bounded 64-event ring, Report-then-discard). (4) Root: `internal/app/history.go` `storeHistory` adapter; `App.Sessions` registry surviving across `MCPServer()` constructions; `Config` gains History/Sessions/Retriever.
+- **Consequences:** Gates `TestSecretConfinementGateIsTheHistoryChokepoint` (vault value in error column redacted in both text and structuredContent, via real server dispatch), `TestHistoryToolsAreAdvertised`, `TestGetRunMissIsStructured`, `TestCollectionAndRunQueriesRoundTrip`, `TestIterativeFuzzAdvancesWithoutDuplicatesOrStalls` (index-spy on target-received payloads), `TestIterativeFuzzBindsExplanationsAndPersistsFindings`, `TestIterativeProgressStreamsEveryProbe`. M87 red (raw value in both framings); M88 first form GREEN for a structural reason (gate asserted counter uniqueness, mutant preserved it) → gate strengthened with dispatch spy → red (`payload index 0 reached the target 10 times`); both restored cmp-clean. Census extended (`scripts/mutation-proof-mcp.sh` M87/M88). TASKS P3.3a.11/P4.1b.10/P4.3.2/P4.3.4 DONE; ARCHITECTURE §9 table retired to BUILT.
+- **Refs:** `internal/store/queries.go`, `internal/store/sqlite.go`, `internal/mcp/history.go`, `internal/mcp/iterative.go`, `internal/mcp/server.go`, `internal/app/history.go`, `internal/app/app.go`, `internal/app/mcp.go`, duckiec/pulse#7.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

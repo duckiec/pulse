@@ -51,6 +51,15 @@ type Config struct {
 	FuzzFindings fuzz.FindingStore
 	// Redactor scrubs agent-visible text. Optional; see the type's contract.
 	Redactor Redactor
+	// History backs list_collections, list_requests, get_request, get_run,
+	// and get_history. Nil omits all five.
+	History HistoryStore
+	// Sessions backs fuzz_start, fuzz_next, and fuzz_report. Nil omits all
+	// three.
+	Sessions *FuzzSessions
+	// Retriever binds RAG context to 5xx probe failures in fuzz_next. Nil
+	// means steps carry no explanation — a stated degradation, not silence.
+	Retriever Retriever
 	// Options are shared register options, e.g. WithFailureBinder.
 	Options []Option
 }
@@ -88,6 +97,12 @@ func NewServerWithConfig(cfg Config) (*Server, error) {
 		if err := RegisterFuzzTool(srv, cfg.FuzzRunner, cfg.Redactor, opts...); err != nil {
 			return nil, err
 		}
+	}
+	if err := RegisterHistoryTools(srv, cfg.History, cfg.Redactor); err != nil {
+		return nil, err
+	}
+	if err := RegisterIterativeFuzzTools(srv, cfg.Sessions, cfg.FuzzRunner, cfg.Redactor, cfg.Retriever, cfg.FuzzFindings); err != nil {
+		return nil, err
 	}
 	return &Server{mcp: srv}, nil
 }

@@ -546,8 +546,9 @@ CREATE TABLE history(id INTEGER PK AUTOINCREMENT, request_id TEXT FK, started_at
 
 ## 9. MCP Server (`internal/mcp`)
 
-**Implementation status: `execute_request` is complete and gated. The remaining
-tools below are not built** — see the status column and TASKS.md §4.3.
+**Implementation status: `execute_request`, the five collection/history tools,
+and the three iterative-fuzz tools are complete and gated (#7). `explain_failure`
+remains unbuilt** — see the status column and TASKS.md §4.3.
 
 - Library: `github.com/mark3labs/mcp-go` v1.2.1 (sanctioned in §7).
 - Transport: stdio, spec-compliant lifecycle (`initialize` → `initialized` →
@@ -560,15 +561,15 @@ tools below are not built** — see the status column and TASKS.md §4.3.
 | Tool | Params | Returns | Status |
 |---|---|---|---|
 | `execute_request` | exactly one of `payload` \| `path`, plus `index?`, `env?`, `timeout_ms?`, `body_mode?`, `include_body?` | status, timing, size, checksum, bounded body (redacted) | **BUILT** |
-| `list_collections` | — | collection roots and file counts | not built |
-| `list_requests` | `collection?`, `filter?` | request refs (file, name, method, url template) | not built |
-| `get_request` | `ref` | full AST view of the request (secrets redacted) | not built |
-| `get_run` | `run_id` | status of an in-flight run (from the streaming engine) | not built |
-| `get_history` | `limit?` | recent executions with redaction applied | not built |
+| `list_collections` | — | collection roots and file counts | **BUILT (#7)** |
+| `list_requests` | `collection?` | request refs (file, name, method, url template) | **BUILT (#7)** |
+| `get_request` | `ref` | stored request definition (raw template; secrets never stored) | **BUILT (#7)** |
+| `get_run` | `run_id` | execution details of one run by id, redacted via scrubRunRecord | **BUILT (#7)** |
+| `get_history` | `limit?`, `offset?` | recent executions newest-first, redacted via scrubRunRecord | **BUILT (#7)** |
 | `explain_failure` | `run_id` \| `ref` | top-k indexed code chunks correlated to a 5xx (ROADMAP.md §3.2.4) | not built |
-| `fuzz_start` | `openapi_ref`, `strategy`, `budget` | fuzz session handle (ROADMAP.md §3.3.3) | not built |
-| `fuzz_next` | `session` | next generated payload (deterministic seed) | not built |
-| `fuzz_report` | `session` | deduplicated findings, redacted | not built |
+| `fuzz_start` | `schema_path`, `op?`, `target`, `seed?`, `budget?`, `rate?`, `concurrency?` | fuzz session handle (ROADMAP.md §3.3.3) | **BUILT (#7)** |
+| `fuzz_next` | `session` | next probe verdict + RAG-bound 5xx context + finding id | **BUILT (#7)** |
+| `fuzz_report` | `session` | TAP 13 + deduplicated findings, redacted; discards the session | **BUILT (#7)** |
 
 ### 9.1 Boot ordering (the isolation boundary)
 

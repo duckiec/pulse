@@ -180,6 +180,10 @@ type App struct {
 	// It is bound here — never constructed by the engine — so the secret
 	// chain it resolves through is the same one every executor uses.
 	Signer engine.Signer
+	// Sessions is the live iterative-fuzz registry (fuzz_start/next/report).
+	// It lives on the App rather than on one server so campaigns survive
+	// across MCPServer() constructions within the process lifetime.
+	Sessions *mcp.FuzzSessions
 	// Watcher is the incremental RAG reindexer (Audit 1C, P4.1b.11). Nil when
 	// no corpus is configured. Started by StartWatcherIfConfigured, stopped
 	// deterministically by Close before the store closes.

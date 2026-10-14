@@ -183,11 +183,17 @@ func (a *App) MCPServer() (*mcp.Server, error) {
 		// Failing at construction makes that impossible to ship by accident.
 		return nil, fmt.Errorf("app: refusing to serve MCP without a redactor")
 	}
+	if a.Sessions == nil {
+		a.Sessions = mcp.NewFuzzSessions()
+	}
 	return mcp.NewServerWithConfig(mcp.Config{
 		Exec:         a.Executor,
 		FuzzRunner:   a.FuzzRunner,
 		Redactor:     a.Redactor,
 		FuzzFindings: a.Store,
+		History:      &storeHistory{db: a.Store},
+		Sessions:     a.Sessions,
+		Retriever:    a.Retriever,
 		Options:      []mcp.Option{mcp.WithFailureBinder(a.Binder)},
 	})
 }

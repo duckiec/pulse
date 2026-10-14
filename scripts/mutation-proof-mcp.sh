@@ -25,11 +25,13 @@ SERVER=internal/mcp/server.go
 TOOLS=internal/mcp/tools.go
 VALIDATE=internal/mcp/validate.go
 ERRORS=internal/mcp/errors.go
+HISTORY=internal/mcp/history.go
+ITERATIVE=internal/mcp/iterative.go
 
 BACKUP="${TMPDIR:-/tmp}/pulse-move7-backup"
 rm -rf "${BACKUP}"
 mkdir -p "${BACKUP}"
-cp "${STDIO}" "${SERVER}" "${TOOLS}" "${VALIDATE}" "${ERRORS}" "${BACKUP}/"
+cp "${STDIO}" "${SERVER}" "${TOOLS}" "${VALIDATE}" "${ERRORS}" "${HISTORY}" "${ITERATIVE}" "${BACKUP}/"
 
 restore() {
     cp "${BACKUP}/stdio.go" "${STDIO}"
@@ -37,9 +39,12 @@ restore() {
     cp "${BACKUP}/tools.go" "${TOOLS}"
     cp "${BACKUP}/validate.go" "${VALIDATE}"
     cp "${BACKUP}/errors.go" "${ERRORS}"
+    cp "${BACKUP}/history.go" "${HISTORY}"
+    cp "${BACKUP}/iterative.go" "${ITERATIVE}"
     local pair src dst
     for pair in "stdio.go:${STDIO}" "server.go:${SERVER}" "tools.go:${TOOLS}" \
-                "validate.go:${VALIDATE}" "errors.go:${ERRORS}"; do
+                "validate.go:${VALIDATE}" "errors.go:${ERRORS}" \
+                "history.go:${HISTORY}" "iterative.go:${ITERATIVE}"; do
         src="${pair%%:*}"; dst="${pair##*:}"
         if ! cmp -s "${BACKUP}/${src}" "${dst}"; then
             echo "RESTORE FAILED for ${dst}"
@@ -202,6 +207,48 @@ if ! grep -qF '// MUTANT-24' "${ERRORS}"; then
     echo "MUTATION NOT APPLIED: missing marker // MUTANT-24"; restore; exit 1
 fi
 CGO_ENABLED=0 go test -count=1 -timeout 300s -run 'TestParseFailureCarriesItsOwnCode' ./internal/mcp/ 2>&1 | grep -E 'line:col|mention|--- FAIL|^FAIL|^ok' | head -8
+restore
+echo
+
+echo "############################################################"
+echo "# MUTATION 87: the get_run handler bypasses the history"
+echo "# Redactor chokepoint, so a vault value in the error column"
+echo "# reaches the MCP client unredacted"
+echo "############################################################"
+python3 - <<'PY'
+p = 'internal/mcp/history.go'
+s = open(p).read()
+s = s.replace('''		rec = scrubRunRecord(red, rec)''', '''		_ = scrubRunRecord // MUTANT-87: history served raw''')
+open(p, 'w').write(s)
+PY
+if ! grep -qF '// MUTANT-87' "${HISTORY}"; then
+    echo "MUTATION NOT APPLIED: missing marker // MUTANT-87"; restore; exit 1
+fi
+CGO_ENABLED=0 go test -count=1 -timeout 300s -run 'TestSecretConfinementGateIsTheHistoryChokepoint' ./internal/mcp/ 2>&1 | grep -E 'leaked the raw|REDACTED|--- FAIL|^FAIL|^ok' | head -8
+restore
+echo
+
+echo "############################################################"
+echo "# MUTATION 88: the fuzz_next cursor is hardcoded to 0, so"
+echo "# every step dispatches probe 0 while the counter advances"
+echo "############################################################"
+# NOTE: the first M88 form (stepIndex frozen alongside the payload) was GREEN
+# for a structural reason — the gate then asserted counter uniqueness, which
+# the mutant preserved. The gate was strengthened with an index spy on what
+# the TARGET receives; this form freezes the payload while the counter still
+# advances, and the spy names the duplicate.
+python3 - <<'PY'
+p = 'internal/mcp/iterative.go'
+s = open(p).read()
+s = s.replace('''	p := s.payloads[s.cursor]
+	stepIndex := s.cursor''', '''	p := s.payloads[0] // MUTANT-88: the cursor never advances
+	stepIndex := s.cursor''')
+open(p, 'w').write(s)
+PY
+if ! grep -qF '// MUTANT-88' "${ITERATIVE}"; then
+    echo "MUTATION NOT APPLIED: missing marker // MUTANT-88"; restore; exit 1
+fi
+CGO_ENABLED=0 go test -count=1 -timeout 300s -run 'TestIterativeFuzzAdvancesWithoutDuplicatesOrStalls' ./internal/mcp/ 2>&1 | grep -E 'M88:|distinct payloads|--- FAIL|^FAIL|^ok' | head -8
 restore
 echo
 

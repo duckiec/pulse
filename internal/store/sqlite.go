@@ -396,6 +396,8 @@ type Request struct {
 // carries content: request_bytes is a COUNT, like response_bytes. The digest is
 // a hash, which is safe to keep and useless for reconstruction.
 type HistoryEntry struct {
+	// ID is the history row id. Zero means "not yet persisted".
+	ID            int64
 	RequestID     string
 	StartedAt     time.Time
 	Duration      time.Duration
@@ -443,27 +445,15 @@ func (s *Store) History(ctx context.Context, requestID string, limit int) ([]His
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT request_id, started_at, duration_ms, status_code, request_bytes,
+		`SELECT id, request_id, started_at, duration_ms, status_code, request_bytes,
 		        response_bytes, sha256, error, run_source
-		 FROM history WHERE request_id = ? ORDER BY started_at DESC LIMIT ?`,
+		 FROM history WHERE request_id = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
 		requestID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: query history: %w", err)
 	}
 	defer rows.Close()
-
-	var out []HistoryEntry
-	for rows.Next() {
-		var e HistoryEntry
-		var started int64
-		if err := rows.Scan(&e.RequestID, &started, &e.Duration, &e.StatusCode,
-			&e.RequestBytes, &e.ResponseBytes, &e.SHA256, &e.Error, &e.RunSource); err != nil {
-			return nil, fmt.Errorf("store: scan history: %w", err)
-		}
-		e.StartedAt = time.UnixMilli(started)
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return scanRuns(rows)
 }
 
 // SanitizeURL strips credentials and fragment data before a URL is written
