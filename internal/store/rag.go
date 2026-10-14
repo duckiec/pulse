@@ -343,11 +343,29 @@ func (s *Store) Search(ctx context.Context, query string, queryVec []int8, limit
 		return nil, ftsErr
 	}
 
-	// ---- leg 2: structural (brute-force cosine) ----
+	// ---- leg 2: structural (brute-force cosine, candidate-bounded) ----
+	//
+	// When the lexical leg matched, the cosine scores only those candidates
+	// (at most maxFTSCandidates rows) instead of the whole table: this is the
+	// bound the package header promises ("Search bounds the candidate set
+	// with the FTS5 leg first", MEMORY.md ADL-0021) and what keeps retrieval
+	// sub-50ms at the 50k-chunk ceiling. A full scan per query would cost
+	// O(N·d) unconditionally — measured at ~300ms of the ~600ms hybrid total
+	// before this bound existed (MEMORY.md ADL-0041).
+	//
+	// When the lexical leg matched NOTHING, the full scan still runs: a
+	// query whose terms are absent from the index (a pure shape query, a
+	// renamed symbol) must not return empty just because FTS5 found no
+	// foothold. Recall is preserved on the slow path; the fast path is for
+	// queries the index can already see lexically.
 	var vecHits []vectorHit
 	if len(queryVec) > 0 {
 		var err error
-		vecHits, err = s.searchVector(ctx, queryVec, maxFTSCandidates)
+		if len(ftsHits) > 0 {
+			vecHits, err = s.searchVectorCandidates(ctx, queryVec, ftsHits)
+		} else {
+			vecHits, err = s.searchVector(ctx, queryVec, maxFTSCandidates)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -490,12 +508,16 @@ func (s *Store) searchFTS(ctx context.Context, terms []string, limit int) ([]Rag
 	return out, rows.Err()
 }
 
-// searchVector runs the structural leg: a bounded full scan with an int8 dot
+// searchVector runs the structural leg as a full scan with an int8 dot
 // product per row.
 //
 // A full scan rather than an ANN index because there is no ANN index available
 // (no CGO), and because at the ROADMAP's ceiling it is fast enough that the
 // complexity of a bespoke approximate structure would not pay for itself.
+//
+// This is the FALLBACK, not the common path: Search calls it only when the
+// lexical leg matched nothing. Otherwise searchVectorCandidates scores the
+// FTS candidates alone.
 func (s *Store) searchVector(ctx context.Context, q []int8, limit int) ([]vectorHit, error) {
 	if len(q) == 0 {
 		return nil, nil
@@ -506,11 +528,51 @@ func (s *Store) searchVector(ctx context.Context, q []int8, limit int) ([]vector
 	}
 	defer rows.Close()
 
-	type acc struct {
-		id    string
-		score float32
+	all, err := scoreVectorRows(ctx, rows, q)
+	if err != nil {
+		return nil, err
 	}
-	var all []acc
+	return topVector(all, limit), nil
+}
+
+// searchVectorCandidates scores the structural leg over exactly the FTS hit
+// set: the candidate bound that keeps hybrid retrieval interactive at the
+// 50k-chunk ceiling. At most maxFTSCandidates rows are read, so the leg
+// costs O(200·d) instead of O(N·d).
+func (s *Store) searchVectorCandidates(ctx context.Context, q []int8, cands []RagHit) ([]vectorHit, error) {
+	if len(q) == 0 || len(cands) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(cands))
+	args := make([]any, len(cands))
+	for i, h := range cands {
+		placeholders[i] = "?"
+		args[i] = h.ID
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, vec FROM rag_chunks WHERE id IN (`+strings.Join(placeholders, ",")+`) AND vec IS NOT NULL`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: vector candidate scan: %w", err)
+	}
+	defer rows.Close()
+
+	all, err := scoreVectorRows(ctx, rows, q)
+	if err != nil {
+		return nil, err
+	}
+	return topVector(all, len(cands)), nil
+}
+
+type vectorAcc struct {
+	id    string
+	score float32
+}
+
+// scoreVectorRows consumes the open row set, scoring each blob. Shared by the
+// full scan and the candidate scan so the two legs cannot disagree on the
+// scoring itself — only on the candidate set.
+func scoreVectorRows(ctx context.Context, rows *sql.Rows, q []int8) ([]vectorAcc, error) {
+	var all []vectorAcc
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -524,11 +586,18 @@ func (s *Store) searchVector(ctx context.Context, q []int8, limit int) ([]vector
 		if len(v) == 0 {
 			continue
 		}
-		all = append(all, acc{id: id, score: CosineInt8(q, v)})
+		all = append(all, vectorAcc{id: id, score: CosineInt8(q, v)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return all, nil
+}
+
+// topVector ranks descending by score (id tie-break for determinism) and
+// keeps the head. The tie-break matches the fusion sort's contract: two
+// equally-scored chunks must not swap places between identical queries.
+func topVector(all []vectorAcc, limit int) []vectorHit {
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].score != all[j].score {
 			return all[i].score > all[j].score
@@ -542,7 +611,7 @@ func (s *Store) searchVector(ctx context.Context, q []int8, limit int) ([]vector
 	for _, a := range all {
 		out = append(out, vectorHit{id: a.id, score: a.score})
 	}
-	return out, nil
+	return out
 }
 
 // CosineInt8 returns the cosine similarity of two L2-normalized int8 vectors.

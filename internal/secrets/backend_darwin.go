@@ -43,16 +43,15 @@ func (d darwinBackend) Available() error {
 	return nil
 }
 
-// Resolve reads one generic password from the login keychain.
+// Resolve reads one generic password from the login keychain. The argv is
+// built by the hermetic constructor: it carries the service and account
+// names (lookup keys, not secrets) and the password returns on stdout.
 func (d darwinBackend) Resolve(key string) (string, error) {
 	if err := d.Available(); err != nil {
 		return "", err
 	}
-	cmd := exec.Command("/usr/bin/security", "find-generic-password",
-		"-s", ServiceName, "-a", key, "-w")
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd := newDarwinFindCmd(ServiceName, key, &stdout, &stderr)
 	if err := cmd.Run(); err != nil {
 		// The stderr text names the item but never its value; it is safe to
 		// surface for diagnosis.

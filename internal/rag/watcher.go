@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -42,13 +43,20 @@ func NewWatcher(root string, st *store.Store, embedder Embedder, redact func(str
 	return &Watcher{Root: root, Store: st, Embedder: embedder, Redact: redact, watcher: w}, nil
 }
 
+// debounceWindow coalesces editor save bursts: one save often arrives as
+// several events (create, write, chmod) within milliseconds, and every
+// HandleEvent is a delete-plus-reindex transaction. Handling each raw event
+// would reindex the same file several times for one save; holding the burst
+// for a quiet window collapses it to a single handling of the latest state.
+const debounceWindow = 100 * time.Millisecond
+
 // Start begins background event processing. It is safe to call once.
 func (w *Watcher) Start(ctx context.Context) error {
 	if err := w.addRecursive(w.Root); err != nil {
 		return err
 	}
 	w.done = make(chan struct{})
-	go w.loop(ctx)
+	go w.runLoop(ctx, w.watcher.Events, w.watcher.Errors)
 	return nil
 }
 
@@ -94,18 +102,53 @@ func deniedDir(name string) bool {
 	return ok
 }
 
-func (w *Watcher) loop(ctx context.Context) {
+// runLoop is the production event loop over injectable channels: Start wires
+// the live fsnotify channels, and the synctest gate wires synthetic ones —
+// the same function, the same debounce, the same cancellation. Events
+// arriving within a debounceWindow collapse per path with the latest op
+// winning; the quiet edge flushes through HandleEvent.
+//
+// Resetting a live timer with a possibly-undrained channel can only flush
+// EARLY, never late or never: the worst case is one extra HandleEvent for a
+// burst, which is still correct (reindexing is idempotent) and still
+// bounded by the burst rate. The direction of the race is the safe one, so
+// no drain dance is needed.
+func (w *Watcher) runLoop(ctx context.Context, events <-chan fsnotify.Event, errs <-chan error) {
 	defer close(w.done)
+	var pending map[string]fsnotify.Event
+	var timer *time.Timer
+	var timerCh <-chan time.Time
+	flush := func() {
+		for _, ev := range pending {
+			_ = w.HandleEvent(ctx, ev)
+		}
+		pending = nil
+		timerCh = nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case ev, ok := <-w.watcher.Events:
+		case ev, ok := <-events:
 			if !ok {
+				// The watcher closed with events still held: flush them
+				// rather than dropping the last save on the floor.
+				flush()
 				return
 			}
-			_ = w.HandleEvent(ctx, ev)
-		case err, ok := <-w.watcher.Errors:
+			if pending == nil {
+				pending = make(map[string]fsnotify.Event)
+			}
+			pending[ev.Name] = ev
+			if timer == nil {
+				timer = time.NewTimer(debounceWindow)
+			} else {
+				timer.Reset(debounceWindow)
+			}
+			timerCh = timer.C
+		case <-timerCh:
+			flush()
+		case err, ok := <-errs:
 			if !ok {
 				return
 			}

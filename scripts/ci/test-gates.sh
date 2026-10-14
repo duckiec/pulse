@@ -48,3 +48,19 @@ for gate in BenchmarkLexer BenchmarkParseCached BenchmarkStreamSteadyState; do
     fi
     echo "test-gates: PASS (${gate} zero-allocation gate green: ${bop} B/op, 0 allocs/op)"
 done
+
+echo "== synctest mandate (P3.3.6, AGENTS.md §2.2)"
+# Every concurrent package must bubble its timing properties on the synthetic
+# clock: the import must be present AND synctest.Test must execute. A removal
+# of either fails this gate.
+for pkg in internal/ui internal/fuzz internal/rag internal/engine; do
+    if ! grep -rq '"testing/synctest"' "${pkg}/" --include='*_test.go'; then
+        echo "test-gates: FAIL (${pkg} imports no testing/synctest bubble)"
+        exit 1
+    fi
+    if ! grep -rqE 'synctest\.Test\(' "${pkg}/" --include='*_test.go'; then
+        echo "test-gates: FAIL (${pkg} never executes synctest.Test)"
+        exit 1
+    fi
+    echo "test-gates: PASS (${pkg} synctest bubble live)"
+done

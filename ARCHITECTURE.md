@@ -1145,9 +1145,23 @@ commit holding keychain-shaped material must fail CI), and the contract-form
 `*.vault`-reference detection in collections (§4.3.3 — superseded by
 boot-time resolution, recorded as a deliberate deviation in ADL-0032). The
 three real keychain write backends (darwin `security`, windows `CredWriteW`,
-linux Secret Service) compile on every cross-compile target and are BLOCKED
-in this environment: no darwin or windows host, and no Secret Service daemon
-in WSL.
+linux Secret Service) compile on every cross-compile target and their
+last-mile syscalls remain BLOCKED in this environment: no darwin or windows
+host, and no Secret Service daemon in WSL. What CHANGED (Issue #9, MEMORY.md
+ADL-0041): everything AROUND the syscalls is now hermetically covered — the
+argv construction (darwin, `internal/secrets/cmdbuilder.go`, untagged), the
+D-Bus framing (linux, `internal/secrets/dbusframe.go`, linux-tagged — godbus's
+own darwin/windows files do not compile under Go 1.27, so the seam stays
+where the backend is), and the credential encoding (windows,
+`internal/secrets/credencode.go`, untagged) — each at 100% statement coverage
+with no daemon (`internal/secrets/boundary_test.go`, `dbusframe_test.go`).
+The audit also closed two real defects: the darwin write passed the secret as
+an argv element (now stdin via trailing bare `-w`, plus the absolute
+`/usr/bin/security` pin the read path already had), and the linux write
+stored under `{ServiceName: key}` while the read searched
+`{service, account}` (items no read could find — now one shared
+constructor). Live-daemon verification stays BLOCKED per platform, reported
+with reason, never papered over (AGENTS.md §4.5).
 
 ---
 

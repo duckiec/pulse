@@ -28,13 +28,8 @@ import (
 // environment it runs in has no Secret Service daemon. That is recorded as a
 // BLOCKED gate rather than papered over (AGENTS.md §4.5).
 
-// dbusSecret mirrors the Secret Service Secret struct.
-type dbusSecret struct {
-	Session     dbus.ObjectPath
-	Parameters  []byte
-	Value       []byte
-	ContentType []byte
-}
+// dbusSecret lives in dbusframe.go, shared with the hermetic tests that pin
+// its wire signature.
 
 type linuxStore struct{ backend *dbusBackend }
 
@@ -56,33 +51,26 @@ func (s *linuxStore) Store(key, value string) error {
 	if err != nil {
 		return err
 	}
-	svc := conn.Object(secretServiceName, dbus.ObjectPath(secretServicePath))
+	svc := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
 
 	// The plain (unencrypted) session is the service's own path, which is what
 	// SearchItems uses for a read; CreateItem takes the same.
 	var session dbus.ObjectPath
-	if err := svc.Call("org.freedesktop.DBus.Properties.Get", 0,
-		"org.freedesktop.Secret.Service", "DefaultCollection").Store(&session); err != nil {
+	if err := svc.Call(dbusPropertiesIface+".Get", 0,
+		dbusSecretServiceIface, "DefaultCollection").Store(&session); err != nil {
 		return fmt.Errorf("secrets: read default collection: %w", err)
 	}
 
-	// Attributes identify the item so the read path can find it again by
-	// account name.
-	attributes := map[string]string{
-		ServiceName: key,
-	}
-	secret := dbusSecret{
-		Session:     session,
-		Parameters:  []byte{},
-		Value:       []byte(value),
-		ContentType: []byte("text/plain"),
-	}
+	// Attributes, secret struct, and the replace flag come from the shared
+	// constructor: the write stores under exactly the attributes the read
+	// searches for. (Previously this map was {ServiceName: key} while the
+	// read searched {service, account} — items were written that no read
+	// could ever find. MEMORY.md ADL-0041.)
+	attributes, secret, replace := createItemParams(session, ServiceName, key, value)
 
-	// replace=true so `vault init` on a machine that already holds a key
-	// updates the item instead of failing on a duplicate.
 	var prompt string
-	if err := svc.Call("org.freedesktop.Secret.Service.CreateItem", 0,
-		attributes, secret, true).Store(&prompt); err != nil {
+	if err := svc.Call(dbusSecretServiceIface+".CreateItem", 0,
+		attributes, secret, replace).Store(&prompt); err != nil {
 		return fmt.Errorf("secrets: CreateItem failed: %w", err)
 	}
 	if prompt != "" && prompt != "/" {

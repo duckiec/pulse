@@ -28,13 +28,13 @@ import (
 // nobody to prompt, so that path reports BLOCKED rather than failing silently.
 
 const (
-	secretServiceName  = "org.freedesktop.secrets"
-	secretServicePath  = "/org/freedesktop/secrets"
-	secretServiceIface = "org.freedesktop.Secret.Service"
-	secretItemIface    = "org.freedesktop.Secret.Item"
 	// DefaultCollection is the login keyring's default alias.
 	DefaultCollection = "default"
 )
+
+// The D-Bus service, path, and interface names live in dbusframe.go, shared
+// with the write path so the two cannot drift into addressing different
+// services.
 
 // dbusBackend is the Linux Secret Service backend.
 type dbusBackend struct {
@@ -57,10 +57,10 @@ func (b *dbusBackend) Available() error {
 	if err != nil {
 		return err
 	}
-	obj := conn.Object(secretServiceName, dbus.ObjectPath(secretServicePath))
+	obj := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
 	// Reading a property the service itself publishes is the cheapest probe
 	// that proves the daemon is on the bus AND speaking the expected API.
-	if _, err := obj.GetProperty(secretServiceIface + ".DefaultCollection"); err != nil {
+	if _, err := obj.GetProperty(dbusSecretServiceIface + ".DefaultCollection"); err != nil {
 		return fmt.Errorf("secrets: secret service not reachable on the session bus: %w", err)
 	}
 	return nil
@@ -89,39 +89,37 @@ func (b *dbusBackend) Resolve(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	svc := conn.Object(secretServiceName, dbus.ObjectPath(secretServicePath))
+	svc := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
 
 	// Resolve the collection alias (the login keyring).
 	var aliasPath dbus.ObjectPath
-	if err := svc.Call("org.freedesktop.DBus.Properties.Get",
-		0, "org.freedesktop.Secret.Service", "DefaultCollection").Store(&aliasPath); err != nil {
+	if err := svc.Call(dbusPropertiesIface+".Get",
+		0, dbusSecretServiceIface, "DefaultCollection").Store(&aliasPath); err != nil {
 		return "", fmt.Errorf("secrets: read default collection: %w", err)
 	}
 
 	// Open an algorithm-agnostic session.
 	var sessionPath dbus.ObjectPath
 	var result dbus.Variant
-	if err := svc.Call(secretServiceIface+".OpenSession", 0, "plain", &sessionPath, &result).Store(); err != nil {
+	if err := svc.Call(dbusSecretServiceIface+".OpenSession", 0, "plain", &sessionPath, &result).Store(); err != nil {
 		return "", fmt.Errorf("secrets: open session: %w", err)
 	}
 	defer func() {
 		// Best-effort close; a leaked session is a daemon-side resource, not a
 		// correctness problem for the caller.
-		conn.Object(secretServiceName, sessionPath).Call(secretServiceIface+".Close", 0)
+		conn.Object(dbusSecretServiceName, sessionPath).Call(dbusSecretServiceIface+".Close", 0)
 	}()
 	if result.Value() == nil || result.Value() == "" {
 		return "", fmt.Errorf("secrets: open session returned no algorithm result")
 	}
 	b.session = sessionPath
 
-	// Search the collection for an unlocked item with our account label. The
-	// attributes Pulse stores under: {service: "pulse", account: key}.
-	attrs := map[string]string{
-		"service": ServiceName,
-		"account": key,
-	}
+	// Search the collection for an unlocked item with our account label, using
+	// the same constructor the write path stores under: the two agree by
+	// construction, not by convention (MEMORY.md ADL-0041).
+	attrs := searchAttrs(ServiceName, key)
 	var unlocked, locked []dbus.ObjectPath
-	if err := svc.Call(secretServiceIface+".SearchItems", 0, attrs, &unlocked, &locked).Store(); err != nil {
+	if err := svc.Call(dbusSecretServiceIface+".SearchItems", 0, attrs, &unlocked, &locked).Store(); err != nil {
 		return "", fmt.Errorf("secrets: search keyring: %w", err)
 	}
 	switch {
@@ -140,7 +138,7 @@ func (b *dbusBackend) Resolve(key string) (string, error) {
 func (b *dbusBackend) readItem(conn *dbus.Conn, item, session dbus.ObjectPath) (string, error) {
 	var sess dbus.ObjectPath
 	var password, contentType []byte
-	call := conn.Object(secretServiceName, item).Call(secretItemIface+".GetSecret", 0, session)
+	call := conn.Object(dbusSecretServiceName, item).Call(dbusSecretItemIface+".GetSecret", 0, session)
 	if err := call.Store(&sess, &password, &contentType); err != nil {
 		return "", fmt.Errorf("secrets: read secret: %w", err)
 	}

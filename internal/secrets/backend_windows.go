@@ -109,6 +109,5 @@ func (w windowsBackend) Resolve(key string) (string, error) {
 	return string(utf16.Decode(units)), nil
 }
 
-// credTarget builds the Credential Manager target name for a key. The
-// "pulse/" prefix namespaces Pulse's entries inside the user's credential store.
-func credTarget(key string) string { return ServiceName + "/" + key }
+// credTarget lives in credencode.go, shared with the hermetic tests that pin
+// the target-name namespacing.

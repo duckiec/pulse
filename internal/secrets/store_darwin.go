@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // The darwin write path shells out to `security add-generic-password`, for the
@@ -19,13 +20,11 @@ import (
 // machine that already holds a key does not leave a stale entry behind and then
 // fail to read the new one.
 //
-// The secret is passed as an argv element to a short-lived child process. That
-// is a real, documented weakness -- argv is world-readable via /proc on Linux
-// and via `ps` on every platform -- and it is a property of the CGO-free
-// constraint, not an oversight: the alternative is an unsupported platform. It
-// is mitigated in practice by the fact that the vault key lives in the keychain
-// for the lifetime of the machine, so it is written once per `vault init`
-// rather than per request.
+// The secret reaches the child on stdin, never in argv: `add-generic-password
+// -w` with no password argument reads the password from stdin, closing the
+// argv/`ps` exposure the write path previously carried (MEMORY.md ADL-0041).
+// The argv (service and account names) and the binary path are built by the
+// hermetic constructors in cmdbuilder.go, which the headless tests pin.
 type darwinStore struct{}
 
 func newPlatformStore() SecretStore { return darwinStore{} }
@@ -33,22 +32,36 @@ func newPlatformStore() SecretStore { return darwinStore{} }
 func (darwinStore) Backend() string { return "macos-keychain-security-cli" }
 
 func (darwinStore) Available() error {
-	if _, err := exec.LookPath("security"); err != nil {
+	// Pin the system binary, exactly as the read path does: a bare
+	// "security" resolved via PATH is a hijack vector, and the write path
+	// is the one that would hand the secret to the impostor on stdin.
+	path, err := exec.LookPath("security")
+	if err != nil {
 		return fmt.Errorf("secrets: %w: `security` is not on PATH", ErrStoreUnavailable)
+	}
+	if !strings.HasPrefix(path, "/usr/bin") {
+		return fmt.Errorf("secrets: refusing non-system security binary at %s", path)
 	}
 	return nil
 }
 
 // Store implements SecretStore.
+//
+// The secret travels on the child's stdin, never in argv: `-w` trailing with
+// no argument tells `security` to read the password from stdin, so `ps` on a
+// shared machine sees only the service and account names. (MEMORY.md
+// ADL-0041; upstream provenance Apicurio/apicurio-registry#9307.)
 func (s darwinStore) Store(key, value string) error {
 	if err := s.Available(); err != nil {
 		return err
 	}
-	// -U updates an existing item instead of failing on a duplicate.
-	cmd := exec.Command("security", "add-generic-password",
-		"-s", ServiceName, "-a", key, "-w", value, "-U")
+	if value == "" {
+		// An empty write would store an empty password that the read side
+		// rejects as an error — fail here, where the cause is obvious.
+		return fmt.Errorf("secrets: refusing to store an empty value for %q", key)
+	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd := newDarwinAddCmd(ServiceName, key, strings.NewReader(value), &stderr)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("secrets: security add-generic-password failed: %w (%s)",
 			err, bytes.TrimSpace(stderr.Bytes()))

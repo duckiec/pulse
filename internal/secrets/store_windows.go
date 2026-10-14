@@ -63,7 +63,10 @@ func (winStore) Store(key, value string) error {
 	if err != nil {
 		return fmt.Errorf("secrets: encode the keychain account name: %w", err)
 	}
-	blob, err := windows.UTF16FromString(value)
+	// The blob encoding (NUL-terminated UTF-16, size in bytes) comes from the
+	// shared hermetic constructor, which the headless tests pin — including
+	// the NUL-in-value rejection, which matches windows.UTF16FromString's.
+	blob, blobSize, err := encodeCredBlob(value)
 	if err != nil {
 		return fmt.Errorf("secrets: encode the credential: %w", err)
 	}
@@ -71,7 +74,7 @@ func (winStore) Store(key, value string) error {
 	cred := credWriteW{
 		Type:               credTypeGeneric,
 		TargetName:         account,
-		CredentialBlobSize: uint32(len(blob) * 2), // UTF-16, bytes not runes
+		CredentialBlobSize: blobSize,
 		CredentialBlob:     (*byte)(unsafe.Pointer(&blob[0])),
 		Persist:            credPersistLocalMachine,
 		Comment:            target,
