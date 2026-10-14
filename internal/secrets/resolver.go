@@ -51,14 +51,13 @@ type SecretResolver interface {
 	Resolve(key string) (string, error)
 	// Backend names the implementation, for diagnostics.
 	Backend() string
-}
-
-// Chain is the ordered set of sources consulted for a lookup, terminating in a
+} // Chain is the ordered set of sources consulted for a lookup, terminating in a
 // hard error. It is the zero-trust resolution chain of ARCHITECTURE.md §6.1.
 type Chain struct {
 	mu       sync.RWMutex
 	backend  SecretResolver    // OS keychain, may be nil
 	env      map[string]string // ephemeral .env, memory only
+	vault    map[string]string // decrypted .env.vault, memory only
 	redactor *Redactor         // where every resolved value is registered
 	order    []string          // provenance, for diagnostics
 }
@@ -71,6 +70,15 @@ func WithBackend(b SecretResolver) ChainOption { return func(c *Chain) { c.backe
 
 // WithEnv binds an ephemeral, in-memory variable map (parsed from a .env).
 func WithEnv(env map[string]string) ChainOption { return func(c *Chain) { c.env = env } }
+
+// WithVaultEnv binds the decrypted vault payload: the PVLT2 container opened
+// with the device identity, parsed as .env, held in memory only. It ranks
+// BELOW the explicit .env — a developer's own machine values override the
+// team-shared vault — and above the terminal error. Values resolved here are
+// registered with the redactor exactly like every other source.
+func WithVaultEnv(vault map[string]string) ChainOption {
+	return func(c *Chain) { c.vault = vault }
+}
 
 // WithRedactor binds the redactor that every resolved value is registered with.
 func WithRedactor(r *Redactor) ChainOption { return func(c *Chain) { c.redactor = r } }
@@ -85,12 +93,18 @@ func NewChain(opts ...ChainOption) *Chain {
 	if c.env == nil {
 		c.env = map[string]string{}
 	}
+	if c.vault == nil {
+		c.vault = map[string]string{}
+	}
 	c.order = []string{}
 	if c.backend != nil {
 		c.order = append(c.order, "keychain:"+c.backend.Backend())
 	}
 	if len(c.env) > 0 {
 		c.order = append(c.order, "env")
+	}
+	if len(c.vault) > 0 {
+		c.order = append(c.order, "vault")
 	}
 	c.order = append(c.order, "error")
 	return c
@@ -143,7 +157,7 @@ func (c *Chain) backendStatusLocked() string {
 // back, so it can never escape un-scrubbed.
 func (c *Chain) Resolve(key string) (string, error) {
 	c.mu.RLock()
-	backend, env, redactor := c.backend, c.env, c.redactor
+	backend, env, vault, redactor := c.backend, c.env, c.vault, c.redactor
 	c.mu.RUnlock()
 
 	var lastErr error
@@ -169,11 +183,18 @@ func (c *Chain) Resolve(key string) (string, error) {
 		}
 		return v, nil
 	}
-	// 3. Hard error. No placeholder, no empty string.
+	// 3. Decrypted .env.vault payload (memory only, opened at boot).
+	if v, ok := vault[key]; ok {
+		if redactor != nil {
+			redactor.Register(v)
+		}
+		return v, nil
+	}
+	// 4. Hard error. No placeholder, no empty string.
 	if lastErr != nil {
 		return "", fmt.Errorf("%w: %q (%v)", ErrUnresolved, key, lastErr)
 	}
-	return "", fmt.Errorf("%w: %q (keychain, env)", ErrUnresolved, key)
+	return "", fmt.Errorf("%w: %q (keychain, env, vault)", ErrUnresolved, key)
 }
 
 // ResolveAll resolves every key, failing closed on the first miss. It is used to
@@ -319,8 +340,10 @@ func ExtractVariables(s string) []string {
 	}
 }
 
-// Clear zeroes the in-memory env map. It is called on teardown so the values do
-// not outlive the process's use of them.
+// Clear zeroes the in-memory env AND vault maps. It is called on teardown
+// (App.Close) so neither the developer's values nor the team's decrypted
+// payload outlive the process's use of them. Zeroing precedes dropping: the
+// maps are reallocated, but the old backing arrays are scrubbed first.
 func (c *Chain) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -328,6 +351,10 @@ func (c *Chain) Clear() {
 		c.env[k] = ""
 	}
 	c.env = map[string]string{}
+	for k := range c.vault {
+		c.vault[k] = ""
+	}
+	c.vault = map[string]string{}
 }
 
 // ---- keychain backend selection --------------------------------------------

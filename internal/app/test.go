@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,7 +92,7 @@ func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout ti
 
 	runner := &engine.TestRunner{
 		NewRouter: a.newRouter,
-		Resolver:  a.Chain,
+		Resolver:  a.resolver(),
 		Redactor:  a.Redactor,
 	}
 	rep := &tapReporter{}
@@ -483,6 +484,72 @@ func (a *App) VaultEncrypt(envPath string, key []byte) error {
 	plain, vault := VaultPaths(envPath)
 	if err := secrets.EncryptEnvFile(plain, vault, key); err != nil {
 		return fmt.Errorf("vault: encrypt %s: %w", envPath, err)
+	}
+	return nil
+}
+
+// VaultRotate re-seals the payload for the current recipient list.
+//
+// Rotation IS re-sealing with a fresh DEK (ADL-0031): Seal2 mints new key
+// material on every call, so there is no old-DEK path to keep working.
+// The plaintext comes from the .env when present, else from decrypting the
+// existing container with the device identity; a .env that was read is
+// REMOVED afterwards (the encrypt semantic — a vault next to its plaintext
+// protects nothing), while a vault-only rotation just overwrites the vault.
+// Revocation is removing a key from the recipients file before calling: the
+// new container holds no slot the revoked key trials.
+func (a *App) VaultRotate(envPath, keyID, recipientsFile string, r secrets.SecretResolver) error {
+	plain, vault := VaultPaths(envPath)
+	recipients, err := secrets.ParseRecipients(recipientsFile)
+	if err != nil {
+		return err
+	}
+	id, err := secrets.LoadIdentity(keyID, r)
+	if err != nil {
+		return &VaultError{Kind: VaultErrResolve, msg: err.Error(), err: err}
+	}
+	defer clear(id.X25519Priv)
+	defer clear(id.Ed25519Seed)
+	signer := ed25519.NewKeyFromSeed(id.Ed25519Seed)
+
+	var payload []byte
+	fromEnv := true
+	if _, statErr := os.Stat(plain); statErr != nil {
+		// No plaintext: decrypt the current container with the device key.
+		// This is the rotation-after-revocation path — the .env is long
+		// gone and only the vault remains.
+		fromEnv = false
+		container, err := os.ReadFile(vault)
+		if err != nil {
+			return fmt.Errorf("vault: rotate %s: no .env and no container: %w", envPath, err)
+		}
+		defer clear(container)
+		payload, err = secrets.Open2(container, id.X25519Priv)
+		if err != nil {
+			return &VaultError{Kind: kindForDecrypt(err), msg: err.Error(), err: err}
+		}
+	} else {
+		raw, err := os.ReadFile(plain)
+		if err != nil {
+			return fmt.Errorf("vault: rotate %s: %w", envPath, err)
+		}
+		payload = raw
+	}
+	defer clear(payload)
+
+	res, err := secrets.Seal2(payload, recipients, signer)
+	clear(signer)
+	if err != nil {
+		return err
+	}
+	defer clear(res)
+	if err := os.WriteFile(vault, res, 0o600); err != nil {
+		return fmt.Errorf("vault: write %s: %w", vault, err)
+	}
+	if fromEnv {
+		if err := secrets.RemovePlaintextFile(plain); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -1895,6 +1895,65 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0032 — Transparent vault resolution: boot-loaded tier, recipients file, rotate CLI; Goal 4.1 COMPLETE
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Issue 4 (ADL-0031) shipped the PVLT2 crypto core and left
+  remainders in order: `vault rotate` CLI + `pulse.recipients` file flow,
+  P4.1c.9 vault resolution against PVLT2, G-secret repo scan gate. ROADMAP
+  §4.3.3 contracts `*.vault`-reference detection in collections; §4.3.4
+  contracts rotate/re-seal/re-sign. Separately, the test runner maps ONLY
+  `engine.ErrUnresolved` to exit 3, while a bound chain fails with
+  `secrets.ErrUnresolved` — a second sentinel the runner never sees.
+- **Decision:**
+  - Resolution is BOOT-TIME, deviating deliberately from the §4.3.3 contract
+    form: `PULSE_VAULT_FILE` names the container, App init unwraps it once
+    (`openVaultTier`, identity via the SAME backend the chain resolves with)
+    into memory-only `Chain.vault`, and `Chain.Clear` (App.Close) zeroises
+    env AND vault maps. Custody is fixed: keychain → explicit .env → vault
+    → `ErrUnresolved`. Per-request vault I/O would add handle and timing
+    surface for zero benefit; the old `{{VAULTED_TOKEN}}` failure mode is
+    preserved exactly (miss everywhere = hard error, exit 3).
+  - Exit-3 translation lives in the composition root: `App.resolver()`
+    (`engineResolver`, `internal/app`) wraps the chain, mapping
+    `secrets.ErrUnresolved` onto `engine.ErrUnresolved` (both sentinels kept
+    via double-`%w`) so `ExitCodeFor` fires identically in test, REST, GRPC
+    and MCP modes. Engine may not import secrets nor vice versa (§3.1), so
+    this seam cannot live anywhere else. Without it the degrade gate proved
+    the collapse: a bound-chain miss exited 1, not 3 — caught by the gate,
+    not by review.
+  - Recipients contract: `pulse.recipients` is Git-tracked plaintext, one
+    `pulse-pub-…` per line, `#` comments, duplicate adds rejected
+    (`ParseRecipients`/`AddRecipient`, `internal/secrets/recipients.go`).
+    `pulse vault rotate` re-seals from the .env — or the current container
+    when the .env is gone — for the WHOLE list, writes 0600, removes the
+    .env it read. Revocation is list removal + rotate; no separate path.
+  - Mutation pool: M77 (vault tier bypassed in `Chain.Resolve` → seamless
+    gate prints `Chain.Resolve(vault-only) = "", secrets: variable
+    unresolved`), M78 (rotate seals `recipients[:len-1]` → `carol cannot
+    open the rotated vault`). Proven in
+    `scripts/mutation-proof-vault5.sh`, cmp-verified restores.
+  - ROADMAP Goal 4.1 marked COMPLETE: 4.1.1 (Move 12); stale 4.1.3/4.1.4
+    "NOT met" lines corrected in place to the shipped gates (P4.1c.10
+    JSON/silent, P4.1c.11 SIGINT-130, `TestStrictBlockedEscalatesTheExitCode`);
+    4.3.1/4.3.3/4.3.4 statuses updated same-commit. TASKS.md P4.1c.9 checked.
+- **Consequences:** Vault architecture closed except the G-secret repo scan
+  gate (CI must fail commits holding keychain-shaped material — still open)
+  and the superseded `*.vault`-in-collection detection (not built on purpose;
+  boot-time resolution covers the threat model). Keychain write backends
+  still BLOCKED here (no Secret Service/macOS/Windows host); keygen/vault
+  gates run against `MemoryStore`.
+- **Refs:** `internal/secrets/recipients.go` (+test), `resolver.go`
+  (`WithVaultEnv`, vault tier, `Clear` scrub); `internal/app/app.go`
+  (`openVaultTier`, `engineResolver`, `resolver()`, Close scrub), `test.go`
+  (`VaultRotate`), `vault_test.go` (8 gates); `cmd/pulse/main.go` (`vault
+  add-recipient`/`rotate`, `PULSE_VAULT_FILE`/`PULSE_VAULT_KEY_ID`);
+  `scripts/mutation-proof-vault5.sh` (M77–M78); TASKS.md P4.1c.9; ROADMAP
+  §§4.1/4.3.1/4.3.3/4.3.4; ARCHITECTURE.md §§6.1/16.4.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

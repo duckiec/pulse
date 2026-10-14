@@ -1773,7 +1773,14 @@ drive, peer-to-peer collection sync that never touches a Pulse-operated server, 
 a vault that lets teams commit production configuration to Git while private keys
 never leave their OS keychains.
 
-## 4.1 Headless Pipeline: `pulse test`
+## 4.1 Headless Pipeline: `pulse test` — COMPLETE (Issue 5, ADL-0032)
+
+**COMPLETE.** 4.1.1 shipped in Move 12; 4.1.2 shipped in Move 12; the 4.1.3
+formats and the 4.1.4 exit/signal surface shipped across P4.1c.10 (JSON/silent),
+P4.1c.11 (SIGINT-130) and Issue 5 (vault-transparent resolution: a vault-only
+run resolves through the boot-loaded tier and exits 0, an unresolvable run
+exits 3 via `App.resolver()`). The stale per-section "NOT met" lines below
+are corrected in place; nothing under 4.1 remains open.
 
 ### 4.1.1 Assertion model
 
@@ -1859,8 +1866,11 @@ never leave their OS keychains.
   `TestWriteTestReportIsOneWritePerLine`, `TestExitCodeMatrixFromTheCLIPath`.
   Mutation M67 (the plan written from a counter, the same boundary as Move 9's
   M35) red.
-  NOT met: the JSON and silent formats, the SIGINT plan tail, and a conformance
-  test against a REFERENCE consumer rather than internal assertions.
+  UPDATE (Issue 5): the JSON and silent formats shipped (TASKS.md P4.1c.10:
+  `RenderJSONReport`, `--silent` zero-byte stdout, unknown formats exit 2)
+  and the SIGINT plan tail with exit 130 shipped (TASKS.md P4.1c.11).
+  REMAINS: a conformance test against a REFERENCE TAP consumer rather than
+  internal assertions.
 
 ### 4.1.4 Exit codes and signal safety
 
@@ -1889,8 +1899,11 @@ never leave their OS keychains.
   Gates: `TestExitCodeMirrorsTAPResults`, `TestExitCodeForIsATotalFunction`,
   `TestExitCodeMatrixFromTheCLIPath` (drives the CLI seam).
   Mutations M63, M64, M65, M65b, M66 all red.
-  NOT met: SIGINT 130 plan-tail emission and the `--strict-blocked` mode's own
-  gate (`--strict-blocked` works; nothing exercises a run that HAS skips).
+  UPDATE (Issue 5): SIGINT 130 plan-tail emission shipped (TASKS.md P4.1c.11:
+  `TestSIGINTFlushesTheCompletedPointsAndExitsOneThirty`,
+  `TestInterruptedRunExitsOneThirtyAndRendersPartialDocuments`) and the
+  `--strict-blocked` mode has its gate (`TestStrictBlockedEscalatesTheExitCode`,
+  TASKS.md P4.1c.3). Nothing further remains under 4.1.4.
 
 ## 4.2 Peer-to-Peer Sync (CRDT over mDNS/Tailscale)
 
@@ -2001,8 +2014,9 @@ never leave their OS keychains.
   identity (`identity.go`: X25519 + Ed25519 halves, namespaced keychain
   accounts, `pulse-pub-…`/`pulse-sig-…`) and `pulse vault keygen` are wired.
   Gates: 3-key swarm, 12-region tamper matrix, verify-before-decrypt
-  ordering, rotation/revocation via re-seal. Mutations M75/M76 red. REMAINS:
-  `vault rotate` CLI + `pulse.recipients` flow, and resolution (§4.3.3).
+  ordering, rotation/revocation via re-seal. Mutations M75/M76 red.
+  COMPLETE (Issue 5, ADL-0032): the `vault rotate` CLI +
+  `pulse.recipients` flow and resolution (§4.3.3) shipped — see below.
   NOT met: multi-recipient round-trip, the per-field tamper MATRIX as specified
   (each region and each byte class), and a golden-bytes test for the container
   format.
@@ -2047,11 +2061,20 @@ never leave their OS keychains.
 - **Verify:** Multi-recipient fixture (each authorized member decrypts; an
   unauthorized key yields `ErrNoRecipient`); verify-before-decrypt ordering test;
   no-plaintext-on-disk assertion during resolution.
-- **NOT BUILT (Move 12).** The resolver does not detect `*.vault` references. A
-  request referencing `{{VAULTED_TOKEN}}` fails closed with an unresolved
-  variable, which is the correct SAFE behaviour and the wrong feature.
-  `pulse vault decrypt` writes the plaintext explicitly, which is the one place
-  this repo writes a secret to disk, and it is the user's requested command.
+- **SHIPPED (Issue 5, ADL-0032), WITH A DELIBERATE DEVIATION FROM THIS
+  CONTRACT.** The contract specifies `*.vault`-reference detection in
+  collections; what shipped is transparent boot-time resolution, strictly
+  stronger for the stated threat model: `PULSE_VAULT_FILE` names the PVLT2
+  container, App init unwraps it once with the device identity and holds it
+  memory-only (`Chain.vault`, zeroised by `Chain.Clear` on Close), and custody
+  is keychain → explicit .env → vault → `ErrUnresolved` → exit 3 (via
+  `App.resolver()`, which translates the secrets sentinel onto
+  `engine.ErrUnresolved`). No per-request vault I/O exists to leak timing or
+  file handles; a revoked device holds only containers no future re-seal will
+  include it in. `pulse vault decrypt` remains the one explicit
+  write-plaintext-to-disk path, and it is the user's requested command.
+  Gates: seamless vault-only run, precedence, Close-scrub, degrade-to-exit-3.
+  Mutations M77/M78 red (`scripts/mutation-proof-vault5.sh`).
 
 ### 4.3.4 Rotation and revocation
 
@@ -2067,7 +2090,14 @@ never leave their OS keychains.
 - **PRIMITIVE SHIPPED (ADL-0031).** Re-`Seal2` over a new recipient list with
   a fresh DEK is rotation and revocation; `TestRotationAndRevocation` proves
   it (revoked key absent from the new container, old containers still open).
-  REMAINS: the `vault rotate` CLI command and the `pulse.recipients` file.
+  SHIPPED (Issue 5, ADL-0032): `pulse vault rotate` re-seals from the .env —
+  or, when the .env is long gone, from the current container decrypted with
+  the device key — for every key in the Git-tracked `pulse.recipients` file
+  (one `pulse-pub-…` per line, `#` comments; `pulse vault add-recipient`
+  appends, duplicates rejected), overwrites the container at 0600, and
+  removes the .env it read. Gates: whole-list rotation (alice/bob/carol
+  open), vault-only rotation. Mutation M78 (last recipient dropped → carol
+  locked out) red.
 
 ## 4.4 Goal 4 Exit Gates
 

@@ -209,14 +209,17 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pulse vault", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		keyID  = fs.String("key-id", "", "keychain account suffix; empty selects the default")
-		envOut = fs.String("out", "", "plaintext output path for decrypt (default: the .env path)")
+		keyID      = fs.String("key-id", "", "keychain account suffix; empty selects the default")
+		envOut     = fs.String("out", "", "plaintext output path for decrypt (default: the .env path)")
+		recipients = fs.String("recipients", secrets.DefaultRecipientsFile, "recipient list for rotate")
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse vault init [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse vault keygen [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse vault encrypt <path.env> [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse vault decrypt <path.env.vault> [--key-id ID] [--out PATH]")
+		fmt.Fprintln(stderr, "       pulse vault add-recipient <pulse-pub-...> [--recipients FILE]")
+		fmt.Fprintln(stderr, "       pulse vault rotate <path.env> [--key-id ID] [--recipients FILE]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -224,7 +227,7 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	cmd := fs.Arg(0)
 	if cmd == "" {
-		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt or decrypt is required")
+		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt, decrypt, add-recipient or rotate is required")
 		return exitUsage
 	}
 
@@ -264,6 +267,33 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 		// to be copied, which stderr would discourage.
 		fmt.Fprintln(os.Stdout, decryptPub)
 		fmt.Fprintln(os.Stdout, signPub)
+		return exitOK
+
+	case "add-recipient":
+		pub := fs.Arg(1)
+		if pub == "" {
+			fmt.Fprintln(stderr, "pulse vault add-recipient: a pulse-pub-... key is required")
+			return exitUsage
+		}
+		if err := secrets.AddRecipient(*recipients, pub); err != nil {
+			fmt.Fprintf(stderr, "pulse vault add-recipient: %v\n", err)
+			return vaultExit(err)
+		}
+		fmt.Fprintf(os.Stderr, "pulse: recipient listed in %s\n", *recipients)
+		return exitOK
+
+	case "rotate":
+		path := fs.Arg(1)
+		if path == "" {
+			fmt.Fprintln(stderr, "pulse vault rotate: a .env path is required")
+			return exitUsage
+		}
+		if err := application.VaultRotate(path, *keyID, *recipients, resolver); err != nil {
+			fmt.Fprintf(stderr, "pulse vault rotate: %v\n", err)
+			return vaultExit(err)
+		}
+		_, vault := app.VaultPaths(path)
+		fmt.Fprintf(os.Stderr, "pulse: re-sealed %s for the current recipient list\n", vault)
 		return exitOK
 
 	case "encrypt", "decrypt":
@@ -385,8 +415,10 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 // is worse than a refusal to start.
 func appConfig() app.Config {
 	cfg := app.Config{
-		Home:    os.Getenv("PULSE_HOME"),
-		EnvFile: os.Getenv("PULSE_ENV_FILE"),
+		Home:       os.Getenv("PULSE_HOME"),
+		EnvFile:    os.Getenv("PULSE_ENV_FILE"),
+		VaultFile:  os.Getenv("PULSE_VAULT_FILE"),
+		VaultKeyID: os.Getenv("PULSE_VAULT_KEY_ID"),
 	}
 	if v := os.Getenv("PULSE_RAG_ROOT"); v != "" {
 		cfg.CorpusRoot = v

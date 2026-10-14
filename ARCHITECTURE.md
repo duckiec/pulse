@@ -383,9 +383,22 @@ UI goroutine                       MCP handler (streams summary + cites offsets)
    │ hit ──▶ value
    │ miss
    ▼
-3. HARD ERROR → request fails → exit 3 (headless/MCP) / error banner (TUI)
+3. Decrypted .env.vault (Issue 5: the PVLT2 container named by
+   PULSE_VAULT_FILE, unwrapped ONCE at boot with the device identity,
+   memory-only, zeroised on Close; an explicit .env wins over it)
+   │ hit ──▶ value (registered with the redactor at boot, like every tier)
+   │ miss
+   ▼
+4. HARD ERROR → request fails → exit 3 (headless/MCP) / error banner (TUI)
    (no dummy tokens, no empty-string fallback — AGENTS.md §4.4)
 ```
+
+Executors never hold the raw chain: `App.resolver()` (`engineResolver`, in
+`internal/app` — the composition root) translates `secrets.ErrUnresolved`
+onto `engine.ErrUnresolved` so the runner's exit-3 mapping fires in every
+mode. The translation cannot live anywhere else: engine may not import
+secrets and secrets may not import engine (no sibling imports, §3.1), so it
+sits in the one package where both sides are visible.
 
 ### 6.2 Platform keychain backends (CGO-free)
 
@@ -1114,13 +1127,17 @@ drift); PVLT1 still opens (magic mismatch keeps the versions apart).
 
 ### 16.4 Not built
 
-`vault rotate` CLI + `pulse.recipients` file flow, and `*.vault` resolution
-at request time (P4.1c.9 — now unblocked, builds against PVLT2).
-`pulse test --format json` / `--silent` (ADL-0027) and the SIGINT plan tail
-with exit 130 (ADL-0028) are built. The three real keychain
-write backends (darwin `security`, windows `CredWriteW`, linux Secret Service)
-compile on every cross-compile target and are BLOCKED in this environment: no
-darwin or windows host, and no Secret Service daemon in WSL.
+The `vault rotate` CLI, the `pulse.recipients` file flow, and transparent
+vault resolution all shipped (Issue 5, ADL-0032); `pulse test --format json`
+/ `--silent` (ADL-0027) and the SIGINT plan tail with exit 130 (ADL-0028)
+are built. What remains: the G-secret repo scan gate over diffs (§4.3.2 — a
+commit holding keychain-shaped material must fail CI), and the contract-form
+`*.vault`-reference detection in collections (§4.3.3 — superseded by
+boot-time resolution, recorded as a deliberate deviation in ADL-0032). The
+three real keychain write backends (darwin `security`, windows `CredWriteW`,
+linux Secret Service) compile on every cross-compile target and are BLOCKED
+in this environment: no darwin or windows host, and no Secret Service daemon
+in WSL.
 
 ---
 

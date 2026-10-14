@@ -40,6 +40,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -65,6 +66,7 @@ var (
 	_ mcp.Redactor    = (*secrets.Redactor)(nil)
 	_ engine.Redactor = (*secrets.Redactor)(nil)
 	_ engine.Resolver = (*secrets.Chain)(nil)
+	_ engine.Resolver = engineResolver{}
 	_ rag.Embedder    = (*rag.HashingEmbedder)(nil)
 	_ mcp.Executor    = (*mcp.EngineExecutor)(nil)
 	_ mcp.FuzzRunner  = (*mcp.EngineFuzzRunner)(nil)
@@ -105,6 +107,18 @@ type Config struct {
 	// probe otherwise touches the OS keychain on a headless machine, where the
 	// honest answer is DEGRADED rather than a startup failure.
 	SkipKeychainProbe bool
+	// VaultFile is a PVLT2 container decrypted at boot with the device
+	// identity into the ephemeral vault tier (memory only). Empty means no
+	// vault tier: resolution is keychain → .env → error.
+	VaultFile string
+	// VaultKeyID selects the device identity in the keychain
+	// (vault:x25519:<id>). Empty selects the default identity.
+	VaultKeyID string
+	// Backend overrides the platform keychain backend. Nil selects
+	// secrets.NewBackend(). Tests bind a MemoryStore holding a fixture
+	// identity; production never sets this — the platform backend is the
+	// only reader the vault tier may load a device key through.
+	Backend secrets.SecretResolver
 }
 
 // Defaults chosen so that an agent can launch `pulse mcp` and get a working
@@ -145,7 +159,10 @@ func DefaultHome() (string, error) {
 type App struct {
 	// Store is the SQLite handle. Closed by Close.
 	Store *store.Store
-	// Chain resolves `{{var}}` references: keychain, then the ephemeral env.
+	// Chain resolves `{{var}}` references: keychain, then the ephemeral .env,
+	// then the decrypted .env.vault payload, then a hard error. Executors never
+	// take it directly — see engineResolver: they take resolver(), which
+	// translates the chain's terminal error onto the engine's contract.
 	Chain *secrets.Chain
 	// Redactor scrubs resolved secrets out of everything reported.
 	Redactor *secrets.Redactor
@@ -275,6 +292,12 @@ func (a *App) openStore() error {
 // is registered with the redactor, so it cannot then appear in a response body,
 // a diagnostic or a retrieved chunk. Two Redactors would leave a window where a
 // resolved secret is known to the resolver and invisible to the scrubber.
+//
+// The custody order is keychain → .env → decrypted vault → error. The vault
+// tier is opened ONCE here with the device identity (never per lookup), and
+// an explicitly configured vault that cannot open is a DEGRADATION — the app
+// still serves, and a vault-only variable fails closed at request time with
+// exit 3 rather than starting the process with a half-loaded secret set.
 func (a *App) openSecrets() error {
 	red := secrets.NewRedactor()
 
@@ -291,9 +314,23 @@ func (a *App) openSecrets() error {
 		}
 	}
 
-	chainOpts := []secrets.ChainOption{secrets.WithRedactor(red)}
+	// The backend is constructed once and shared: the chain resolves through
+	// it and the vault tier loads the device identity through it. Two
+	// backends would probe the keychain twice and could disagree.
+	backend := a.cfg.Backend
+	if backend == nil {
+		backend = secrets.NewBackend()
+	}
+	chainOpts := []secrets.ChainOption{secrets.WithRedactor(red), secrets.WithBackend(backend)}
 	if env != nil {
 		chainOpts = append(chainOpts, secrets.WithEnv(env))
+	}
+	if a.cfg.VaultFile != "" {
+		if vm, err := a.openVaultTier(backend); err != nil {
+			a.degrade(fmt.Sprintf("the vault at %s could not be opened: %v", a.cfg.VaultFile, err))
+		} else {
+			chainOpts = append(chainOpts, secrets.WithVaultEnv(vm))
+		}
 	}
 	a.Chain = secrets.NewChain(chainOpts...)
 	a.Redactor = red
@@ -310,6 +347,43 @@ func (a *App) openSecrets() error {
 		}
 	}
 	return nil
+}
+
+// openVaultTier decrypts the configured PVLT2 container with the device
+// identity and parses it as .env into memory.
+//
+// The identity is loaded through the SAME backend the chain resolves with,
+// so "which device am I" cannot disagree between the vault tier and the
+// keychain tier. Every secret the tier holds is registered with the shared	// redactor before this returns, so no vault value exists un-scrubbed — the
+// same rule P2.2.4 established for the keychain tier. The returned map is
+// ephemeral: the chain owns it after WithVaultEnv, and Clear scrubs it.
+func (a *App) openVaultTier(backend secrets.SecretResolver) (map[string]string, error) {
+	id, err := secrets.LoadIdentity(a.cfg.VaultKeyID, backend)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(id.X25519Priv)
+	defer clear(id.Ed25519Seed)
+	container, err := os.ReadFile(a.cfg.VaultFile)
+	if err != nil {
+		return nil, fmt.Errorf("app: read %s: %w", a.cfg.VaultFile, err)
+	}
+	defer clear(container)
+	plain, err := secrets.Open2(container, id.X25519Priv)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plain)
+	env, err := secrets.LoadEnv(bytes.NewReader(plain))
+	if err != nil {
+		return nil, fmt.Errorf("app: the vault payload is not .env-shaped: %w", err)
+	}
+	if a.Redactor != nil {
+		for _, v := range env {
+			a.Redactor.Register(v)
+		}
+	}
+	return env, nil
 }
 
 // buildRetrieval wires the index query surface.
@@ -359,7 +433,7 @@ func (a *App) buildRetrieval() error {
 func (a *App) buildTools() error {
 	a.Executor = &mcp.EngineExecutor{
 		Redactor:  a.Redactor,
-		Resolver:  a.Chain,
+		Resolver:  a.resolver(),
 		NewEngine: a.newRouter,
 	}
 
@@ -372,6 +446,41 @@ func (a *App) buildTools() error {
 }
 
 // degrade records a condition the app booted with and could not resolve.
+// engineResolver adapts the secrets chain to the engine's resolver contract.
+//
+// It exists for ONE translation: the chain's terminal error
+// (secrets.ErrUnresolved) must arrive at the test runner as
+// engine.ErrUnresolved. The runner maps engine.ErrUnresolved to exit 3
+// ("configure your credential"); a bound resolver whose error wraps only the
+// secrets sentinel would collapse into exit 1 ("a test failed"), sending the
+// user to debug assertions when they are actually missing a credential. Both
+// sentinels stay in the chain (%w twice), so secrets-aware callers
+// (SecretExitCode) and engine-aware callers (ExitCodeFor) classify the same
+// error correctly. This is the composition root's work and nobody else's:
+// engine may not import secrets and secrets may not import engine (AGENTS.md
+// §3.1 — no sibling imports), so the translation lives in the one package
+// that knows both sides.
+type engineResolver struct{ chain *secrets.Chain }
+
+func (r engineResolver) Lookup(name string) (string, error) {
+	if r.chain == nil {
+		return "", fmt.Errorf("%w: variable %q (no resolution chain)", engine.ErrUnresolved, name)
+	}
+	v, err := r.chain.Lookup(name)
+	if err != nil {
+		if errors.Is(err, secrets.ErrUnresolved) {
+			return "", fmt.Errorf("%w: variable %q: %w", engine.ErrUnresolved, name, err)
+		}
+		return "", err
+	}
+	return v, nil
+}
+
+// resolver returns the chain translated onto the engine's contract. Every
+// executor — the test runner, REST, GRPC, MCP — takes this, never the raw
+// chain, so exit 3 means the same thing in every mode.
+func (a *App) resolver() engine.Resolver { return engineResolver{chain: a.Chain} }
+
 // newRouter builds the protocol router for one parsed document.
 //
 // It is a method rather than a closure inside buildTools because the test
@@ -383,11 +492,11 @@ func (a *App) newRouter(doc *ast.Document) engine.ProtocolEngine {
 	return engine.NewProtocolRouter(doc, engine.RouterConfig{
 		REST: []engine.Option{
 			engine.WithRedactor(a.Redactor),
-			engine.WithResolver(a.Chain),
+			engine.WithResolver(a.resolver()),
 			engine.WithTimeout(a.cfg.RunTimeout),
 			engine.WithUserAgent("pulse/" + Version),
 		},
-		GRPC: &engine.GRPCConfig{Resolver: a.Chain, Redactor: a.Redactor},
+		GRPC: &engine.GRPCConfig{Resolver: a.resolver(), Redactor: a.Redactor},
 	})
 }
 
@@ -431,6 +540,13 @@ func (a *App) Close() error {
 		a.closeMu.Lock()
 		defer a.closeMu.Unlock()
 		a.closed = true
+		// Scrub the ephemeral secret tiers (explicit .env AND the decrypted
+		// vault payload) before releasing anything else: in-flight work was
+		// already cancelled above, so no new resolution can observe the
+		// maps while they are being zeroed.
+		if a.Chain != nil {
+			a.Chain.Clear()
+		}
 		if a.Store != nil {
 			if err := a.Store.Close(); err != nil {
 				a.closeErr = fmt.Errorf("app: close the store: %w", err)
