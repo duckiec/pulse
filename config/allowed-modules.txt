@@ -127,6 +127,15 @@ github.com/charmbracelet/bubbletea/
 github.com/charmbracelet/lipgloss
 github.com/charmbracelet/lipgloss/
 
+# --- Issue #8: request editor on bubbles/textinput (MEMORY.md ADL-0040) --------
+#
+# github.com/atotto/clipboard — transitive dependency of bubbles/textinput
+# (system clipboard for line editing). Pure Go, CGO-free. huh remains NOT
+# admitted: three text fields do not justify a new form framework when the
+# already-vendored component library covers them.
+github.com/atotto/clipboard
+github.com/atotto/clipboard/
+
 # Transitive dependencies of the three modules above (terminal I/O, unicode
 # widths, color profiles). All pure Go; verified by CGO scan (no `import "C"`).
 github.com/aymanbagabas/go-osc52/v2

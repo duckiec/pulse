@@ -1,13 +1,10 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pulse/internal/ast"
@@ -159,20 +156,44 @@ type Model struct {
 
 	report *engine.TelemetryReport
 
-	body      []string
-	bodyBytes int
-	partial   []byte
-	pending   []chunkMsg
+	// stream owns the entire streaming memory contract: tail, backlog,
+	// accounting, and viewport sync (stream_view.go). The model holds no
+	// byte of the stream itself — arrival becomes Append, the frame tick
+	// becomes Flush, and every counter below delegates to Stats.
+	stream *StreamView
 
-	totalBytes   int64
-	totalLines   int
-	droppedLines int
-	droppedBytes int64
+	// Sub-models. Each owns one surface and none owns transport: the tree
+	// browses injected rows, search scans the owned StreamView, the
+	// palette filters injected labels, the editor rebuilds .http source,
+	// and the fuzz dashboard consumes bridged probe events.
+	tree    TreeModel
+	search  SearchModel
+	palette PaletteModel
+	editor  EditorModel
+	fuzz    *FuzzModel
 
-	vp     viewport.Model
+	// showFuzz swaps the right pane to the fuzz dashboard. probePoll
+	// chains bridge polls after every consumed probe event.
+	showFuzz  bool
+	probePoll func() tea.Cmd
+
+	// ascii degrades every glyph in the render path (DESIGN_SYSTEM.md
+	// §4.2): the same model renders Unicode or ASCII on demand, which is
+	// what makes glyph parity a golden test instead of a hope.
+	ascii bool
+
+	// runnerFactory rebuilds the runner when the editor swaps the
+	// document: an engine reads through its own doc reference, so a fixed
+	// runner would slice the wrong arena. Nil means the runner is fixed
+	// and editor submit fails closed instead of dispatching.
+	runnerFactory func(*ast.Document) Runner
+	// ownedDoc is the editor-built document (nil while the borrowed
+	// construction document is current). Only owned docs are released.
+	ownedDoc *ast.Document
+
 	width  int
 	height int
-	focus  int // 0 request, 1 response
+	focus  int // 0 tree, 1 response
 
 	toast          string
 	framesRendered int64
@@ -199,18 +220,129 @@ func New(baseCtx context.Context, runner Runner, doc *ast.Document, autoStart bo
 		baseCtx:   baseCtx,
 		autoStart: autoStart,
 		keys:      DefaultKeyMap(),
-		vp:        viewport.New(80, 24),
+		stream:    NewStreamView(80, 24),
+		fuzz:      NewFuzzModel(80, 24),
+		editor:    NewEditorModel(),
 	}
 	if doc != nil {
 		for r := range doc.Requests() {
 			m.req = r
-			m.method = r.Method.String()
-			m.url = doc.Str(r.URLStart, r.URLEnd)
-			m.name = doc.Str(r.NameStart, r.NameEnd)
+			m.snapshotReq(r)
 			break
 		}
 	}
+	m.snapshotTree()
 	return m
+}
+
+// snapshotReq copies a request's display text: View must be pure, and
+// re-slicing the arena per frame would make render cost a function of
+// document size rather than viewport size.
+func (m *Model) snapshotReq(r *ast.Request) {
+	m.method = r.Method.String()
+	m.url = m.doc.Str(r.URLStart, r.URLEnd)
+	m.name = m.doc.Str(r.NameStart, r.NameEnd)
+}
+
+// snapshotTree rebuilds the browse rows from the current document: one row
+// per request, grouped by file, in document order.
+func (m *Model) snapshotTree() {
+	if m.doc == nil {
+		m.tree.SetItems(nil)
+		return
+	}
+	group := m.doc.Path
+	if group == "" {
+		group = "requests"
+	}
+	var items []TreeItem
+	idx := 0
+	for r := range m.doc.Requests() {
+		label := r.Method.String() + " " + m.doc.Str(r.URLStart, r.URLEnd)
+		if name := m.doc.Str(r.NameStart, r.NameEnd); name != "" {
+			label += " @" + name
+		}
+		items = append(items, TreeItem{Group: group, Label: label, Index: idx})
+		idx++
+	}
+	m.tree.SetItems(items)
+}
+
+// selectRequest makes the idx-th document request the run target.
+func (m *Model) selectRequest(idx int) bool {
+	if m.doc == nil {
+		return false
+	}
+	i := 0
+	for r := range m.doc.Requests() {
+		if i == idx {
+			m.req = r
+			m.snapshotReq(r)
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+// SetRunnerFactory installs the editor's dispatch rebuild (see the field
+// doc). Production passes App.RouterFor; a nil factory is a fixed runner.
+func (m *Model) SetRunnerFactory(f func(*ast.Document) Runner) { m.runnerFactory = f }
+
+// SetASCII switches glyph degradation (Unicode default, ASCII on demand),
+// propagated to every owned viewport so no sub-model renders a stray glyph.
+func (m *Model) SetASCII(ascii bool) {
+	m.ascii = ascii
+	m.stream.SetASCII(ascii)
+	m.fuzz.SetASCII(ascii)
+}
+
+// SetProbePoll chains bridge polls after every probe event.
+func (m *Model) SetProbePoll(poll func() tea.Cmd) { m.probePoll = poll }
+
+// BindProgress installs a ProgressBridge: the model polls it, converts each
+// verdict into a probeMsg, and routes it to the fuzz dashboard. This is the
+// whole FuzzOptions.Progress → UI path, and it stays non-blocking and
+// stdout-free by construction (M90 disconnects the bridge itself).
+func (m *Model) BindProgress(b *ProgressBridge) {
+	m.SetProbePoll(b.PollCmd)
+}
+
+// submitEditor parses the editor source, swaps the document, rebuilds the
+// runner, and dispatches. Any step failing fails the whole submit closed:
+// a half-swapped document (new text, old runner) would slice the wrong
+// arena, so the model keeps the old request rather than a broken one.
+func (m *Model) submitEditor() tea.Cmd {
+	src := m.editor.Source()
+	arena := ast.AcquireArena()
+	arena.Reset([]byte(src))
+	newDoc, err := ast.Parse(arena)
+	if err != nil {
+		arena.Release()
+		m.editor.Close()
+		m.toast = "edit rejected: " + firstLine(err.Error())
+		return nil
+	}
+	if m.runnerFactory == nil {
+		newDoc.Release()
+		m.editor.Close()
+		m.toast = "edit held: runner is fixed (no factory)"
+		return nil
+	}
+	if m.ownedDoc != nil {
+		m.ownedDoc.Release()
+	}
+	m.ownedDoc = newDoc
+	m.doc = newDoc
+	m.runner = m.runnerFactory(newDoc)
+	m.snapshotTree()
+	if !m.selectRequest(0) {
+		m.editor.Close()
+		m.toast = "edit parsed nothing to run"
+		return nil
+	}
+	m.editor.Close()
+	return m.startRunCmd()
 }
 
 // Bind connects the model to a running program. It must precede Run: the
@@ -222,17 +354,10 @@ func (m *Model) Bind(send func(tea.Msg)) { m.send = send }
 // the program ends. The model Ends it on terminal; the owner Releases it.
 func (m *Model) Report() *engine.TelemetryReport { return m.report }
 
-// RetainedBytes is the UI-side memory accounting the G-frame gate asserts:
-// tail buffer + undecided line carry + uncoalesced backlog. It never exceeds
-// 2 MiB by construction (1 MiB tail + 1 MiB transient), and this method is
-// how the test proves it rather than trusting the construction.
-func (m *Model) RetainedBytes() int {
-	n := m.bodyBytes + len(m.partial)
-	for _, p := range m.pending {
-		n += len(p.data)
-	}
-	return n
-}
+// RetainedBytes is the UI-side memory accounting the G-frame gate asserts.
+// It delegates to the StreamView that owns the bytes, so the assertion and
+// the invariant cannot drift apart.
+func (m *Model) RetainedBytes() int { return m.stream.Stats().RetainedBytes }
 
 // Init schedules the frame governor and, in autoStart mode, the run. Both
 // are tea.Cmd values — background goroutines owned by the runtime — so Init
@@ -301,36 +426,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sizeViewport()
 		return m, nil
 	case chunkMsg:
-		// Arrival accounting happens HERE, not in coalesce: a byte the sink
-		// handed over has arrived even if the backlog later drops it, and
-		// accounting it at render time undercounts exactly when the bound
-		// binds — the one moment the numbers matter.
-		m.totalBytes += int64(len(msg.data))
-		if len(m.pending) < maxPending {
-			m.pending = append(m.pending, msg)
+		// Arrival becomes Append; accounting lives inside the StreamView
+		// (at arrival, not at render — see StreamView.Append). A final
+		// marker arrives as a nil append: end-of-stream, not bytes.
+		if msg.final {
+			m.stream.Append(nil)
 		} else {
-			// Backlog overflow drops WITH a count: the status bar shows it,
-			// and the G-frame gate asserts the bound rather than the absence.
-			// The dropped newlines count as carried lines (totalLines) AND
-			// as invisible ones (droppedLines): a newline in the byte stream
-			// delimits a line whether or not it was rendered, so the stream
-			// total stays exact. Edge: a chunk ending mid-line leaves a
-			// trailing fragment uncounted here — at most one line per
-			// overflow event, and zero for line-aligned floods.
-			m.droppedBytes += int64(len(msg.data))
-			n := bytes.Count(msg.data, []byte{'\n'})
-			m.totalLines += n
-			m.droppedLines += n
+			m.stream.Append(msg.data)
+		}
+		return m, nil
+	case probeMsg:
+		// One bridged fuzz verdict per message, chained back onto the
+		// bridge poll while one is installed: non-blocking both ways,
+		// stdout never in the call graph.
+		m.fuzz.UpdateProbe(msg.ev)
+		if m.probePoll != nil {
+			return m, m.probePoll()
 		}
 		return m, nil
 	case tickMsg:
-		m.coalesce()
+		m.stream.Flush()
 		m.framesRendered++
 		return m, tickCmd()
 	case runStartedMsg:
 		return m, nil
 	case runDoneMsg:
-		m.coalesce()
+		m.stream.Flush()
+		m.stream.Finish()
 		m.res = msg.res
 		m.phase = phaseDone
 		if m.report != nil {
@@ -341,7 +463,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case runFailedMsg:
-		m.coalesce()
+		m.stream.Flush()
+		m.stream.Finish()
 		m.err = msg.err
 		m.phase = phaseFailed
 		if m.report != nil {
@@ -356,84 +479,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// coalesce drains the backlog into the bounded tail. It runs at most once
-// per frame tick (plus once on terminal), so its cost is amortized across
-// the arrival rate: thousands of chunks per second become one bounded pass
-// per 16 ms.
-func (m *Model) coalesce() {
-	if len(m.pending) == 0 {
-		return
-	}
-	for _, p := range m.pending {
-		if p.final {
-			m.flushPartial()
-			continue
-		}
-		m.appendBytes(p.data)
-	}
-	m.pending = m.pending[:0]
-	m.refreshViewport()
-}
-
-// appendBytes splits a chunk on newlines, carrying a split line across
-// chunks in partial. Every retained byte is counted; every dropped byte is
-// counted louder.
-func (m *Model) appendBytes(data []byte) {
-	if len(m.partial)+len(data) > maxPartialLine+chunkSlack() {
-		// A line that never ends is not a line: flush what we hold and
-		// count the rest as dropped rather than growing without bound.
-		m.flushPartial()
-		m.droppedBytes += int64(len(data))
-		m.droppedLines += bytes.Count(data, []byte{'\n'}) + 1
-		return
-	}
-	buf := append(m.partial[:len(m.partial):len(m.partial)], data...)
-	for {
-		i := bytes.IndexByte(buf, '\n')
-		if i < 0 {
-			m.partial = append(m.partial[:0], buf...)
-			return
-		}
-		m.appendLine(string(buf[:i]))
-		buf = buf[i+1:]
-	}
-}
-
-// chunkSlack keeps one chunk of headroom above the partial cap so a line
-// that ends exactly at the boundary is kept, not dropped.
-func chunkSlack() int { return 32 << 10 }
-
-// appendLine retains one decoded line inside the tail budget, trimming the
-// oldest lines first. The viewport shows the tail; the counters remember
-// everything.
-func (m *Model) appendLine(line string) {
-	m.totalLines++
-	for (len(m.body) >= maxBodyLines || m.bodyBytes+len(line) > maxBodyBytes) && len(m.body) > 0 {
-		m.bodyBytes -= len(m.body[0])
-		m.body[0] = ""
-		m.body = m.body[1:]
-		m.droppedLines++
-	}
-	m.body = append(m.body, line)
-	m.bodyBytes += len(line)
-}
-
-// flushPartial retains the undecided carry at end-of-stream.
-func (m *Model) flushPartial() {
-	if len(m.partial) == 0 {
-		return
-	}
-	m.appendLine(string(m.partial))
-	m.partial = m.partial[:0]
-}
-
-// refreshViewport rebuilds the visible content from the bounded tail. It runs
-// only when coalesce had work, never per chunk and never per View.
-func (m *Model) refreshViewport() {
-	m.vp.SetContent(strings.Join(m.body, "\n"))
-	m.vp.GotoBottom()
-}
-
 // sizeViewport fits the response pane to the window. Narrow terminals collapse
 // the request pane (DESIGN_SYSTEM.md §3.2); a terminal under 80 columns is
 // refused by the CLI before the program starts, and renders a refusal here
@@ -446,14 +491,154 @@ func (m *Model) sizeViewport() {
 	if h < 5 {
 		h = 5
 	}
-	m.vp.Width = w
-	m.vp.Height = h
+	m.stream.Resize(w, h)
+	m.fuzz.Resize(w, h)
 }
 
-// updateKey dispatches the central keymap. Uniformity law: focus selects the
-// scroll target, never the binding.
+// paletteItems builds the palette rows: every document request plus the
+// command verbs. Rebuilt on every open so edits are visible immediately.
+func (m *Model) paletteItems() []PaletteItem {
+	var out []PaletteItem
+	if m.doc != nil {
+		idx := 0
+		for r := range m.doc.Requests() {
+			label := r.Method.String() + " " + m.doc.Str(r.URLStart, r.URLEnd)
+			if name := m.doc.Str(r.NameStart, r.NameEnd); name != "" {
+				label += " @" + name
+			}
+			out = append(out, PaletteItem{Label: label, RequestIndex: idx})
+			idx++
+		}
+	}
+	for _, c := range []string{"send", "cancel", "pause", "fuzz", "help"} {
+		out = append(out, PaletteItem{Label: ":" + c, RequestIndex: -1, Command: c})
+	}
+	return out
+}
+
+// runPaletteCommand executes a :command row.
+func (m *Model) runPaletteCommand(cmd string) tea.Cmd {
+	m.palette.Deactivate()
+	switch cmd {
+	case "send":
+		return m.startRunCmd()
+	case "cancel":
+		m.cancelRun()
+	case "pause":
+		m.togglePause()
+	case "fuzz":
+		m.showFuzz = !m.showFuzz
+	case "help":
+		m.showHelp = !m.showHelp
+	}
+	return nil
+}
+
+// togglePause flips the stream viewport hold (Stream tab pause/resume).
+func (m *Model) togglePause() {
+	paused := !m.stream.Stats().Paused
+	m.stream.SetPaused(paused)
+	if paused {
+		m.toast = "stream paused"
+	} else {
+		m.toast = ""
+	}
+}
+
+// jumpToCurrent scrolls the stream to the selected search hit.
+func (m *Model) jumpToCurrent() {
+	if hit, ok := m.search.Current(); ok {
+		m.stream.JumpTo(hit.Line)
+	}
+}
+
+// updateKey dispatches the central keymap. Modal panes take precedence in
+// opacity order — editor, palette, search — then the global bindings.
+// Uniformity law: focus selects the scroll target, never the binding.
 func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := m.keys
+
+	if m.editor.Active() {
+		switch msg.String() {
+		case "esc":
+			m.editor.Close()
+			return m, nil
+		case "enter":
+			return m, m.submitEditor()
+		case "tab":
+			m.editor.Cycle()
+			return m, nil
+		}
+		m.editor.Update(msg)
+		return m, nil
+	}
+
+	if m.palette.Active() {
+		switch msg.String() {
+		case "esc":
+			m.palette.Deactivate()
+			return m, nil
+		case "enter":
+			item, ok := m.palette.Chosen()
+			if !ok {
+				m.palette.Deactivate()
+				return m, nil
+			}
+			if item.RequestIndex >= 0 {
+				m.palette.Deactivate()
+				if m.selectRequest(item.RequestIndex) {
+					m.toast = "selected " + item.Label
+				}
+				return m, nil
+			}
+			return m, m.runPaletteCommand(item.Command)
+		case "up", "ctrl+p":
+			m.palette.Move(-1)
+			return m, nil
+		case "down", "ctrl+n":
+			m.palette.Move(1)
+			return m, nil
+		case "backspace":
+			m.palette.Backspace()
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			for _, r := range msg.Runes {
+				m.palette.Type(r)
+			}
+		}
+		return m, nil
+	}
+
+	if m.search.Active() {
+		switch msg.String() {
+		case "esc":
+			m.search.Deactivate()
+			return m, nil
+		case "enter":
+			m.search.Run(m.stream)
+			m.search.Deactivate()
+			m.jumpToCurrent()
+			return m, nil
+		case "backspace":
+			m.search.Backspace()
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			for _, r := range msg.Runes {
+				m.search.Type(r)
+			}
+		}
+		return m, nil
+	}
+
+	// Shift+N is matched by the folded "n" binding below, so the exact
+	// previous-hit key is checked first, on the canonical form.
+	if tea.Key(msg).String() == "N" {
+		m.search.Prev()
+		m.jumpToCurrent()
+		return m, nil
+	}
 	switch {
 	case k.Match(k.Quit, msg):
 		if m.cancel != nil {
@@ -471,23 +656,68 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case k.Match(k.Help, msg):
 		m.showHelp = !m.showHelp
 		return m, nil
+	case k.Match(k.Pause, msg):
+		m.togglePause()
+		return m, nil
+	case k.Match(k.FuzzTab, msg):
+		m.showFuzz = !m.showFuzz
+		return m, nil
+	case k.Match(k.Search, msg):
+		m.search.Activate()
+		return m, nil
+	case k.Match(k.SearchNext, msg):
+		m.search.Next()
+		m.jumpToCurrent()
+		return m, nil
+	case k.Match(k.Palette, msg):
+		m.palette.Activate(m.paletteItems())
+		return m, nil
+	case k.Match(k.Editor, msg):
+		m.editor.Open(m.method, m.url, 1)
+		return m, nil
+	case k.Match(k.EditorAlt, msg):
+		m.editor.Open(m.method, m.url, 2)
+		return m, nil
+	case k.Match(k.Select, msg):
+		if m.focus == 0 {
+			if item, ok := m.tree.Selected(); ok {
+				if m.selectRequest(item.Index) {
+					m.toast = "selected " + item.Label
+				}
+			}
+		}
+		return m, nil
 	case k.Match(k.Down, msg):
-		m.vp.LineDown(1)
+		if m.focus == 0 {
+			m.tree.Move(1)
+		} else {
+			m.stream.LineDown(1)
+		}
 		return m, nil
 	case k.Match(k.Up, msg):
-		m.vp.LineUp(1)
+		if m.focus == 0 {
+			m.tree.Move(-1)
+		} else {
+			m.stream.LineUp(1)
+		}
 		return m, nil
 	case k.Match(k.Top, msg):
-		m.vp.GotoTop()
+		m.stream.GotoTop()
 		return m, nil
 	case k.Match(k.Bottom, msg):
-		m.vp.GotoBottom()
+		m.stream.GotoBottom()
 		return m, nil
 	case k.Match(k.HalfDown, msg):
-		m.vp.HalfViewDown()
+		m.stream.HalfViewDown()
 		return m, nil
 	case k.Match(k.HalfUp, msg):
-		m.vp.HalfViewUp()
+		m.stream.HalfViewUp()
+		return m, nil
+	case k.Match(k.FullDown, msg):
+		m.stream.PageDown()
+		return m, nil
+	case k.Match(k.FullUp, msg):
+		m.stream.PageUp()
 		return m, nil
 	default:
 		return m, nil
@@ -497,10 +727,16 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Outcome summarises a finished run for owners that need an exit code.
 func (m *Model) Outcome() (phase RunPhase, err error) { return m.phase, m.err }
 
+// Toast exposes the status toast for gates.
+func (m *Model) Toast() string { return m.toast }
+
 // LineCount and ByteCount expose the stream accounting for gates.
-func (m *Model) LineCount() int        { return m.totalLines }
-func (m *Model) ByteCount() int64      { return m.totalBytes }
-func (m *Model) Dropped() (int, int64) { return m.droppedLines, m.droppedBytes }
+func (m *Model) LineCount() int   { return m.stream.Stats().TotalLines }
+func (m *Model) ByteCount() int64 { return m.stream.Stats().TotalBytes }
+func (m *Model) Dropped() (int, int64) {
+	st := m.stream.Stats()
+	return st.DroppedLines, st.DroppedBytes
+}
 
 // Frames counts coalesced frames, for the G-frame gate: frames rendered is
 // proof the governor ticked under load, not merely that bytes arrived.

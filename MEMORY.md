@@ -2104,6 +2104,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0040 — StreamView submodule, fuzz dashboard bridge, TUI surface, ladder-fixed palette (#8)
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Wayfinder map duckiec/pulse#1; prototype ticket #8 (Candidate C3 StreamView + fuzz dashboard + TUI surface, P3.1.2–P3.1.4/P3.2.1–P3.2.2/P3.2.4/P3.3.5). Self-resolved against DESIGN_SYSTEM/ARCHITECTURE: ui never imports fuzz/mcp/store (layering), so probe events cross as primitives; editor needs a runner factory because an engine reads through its own doc reference.
+- **Decision:** (1) `internal/ui/stream_view.go`: tail (10k lines/1MiB, oldest-first eviction), backlog (32), partial carry, arrival-side accounting, owned viewport; surface Append/Flush/Finish/Visible/Stats/SetPaused + justified Resize/Search/Lines/scroll-forwards (+JumpTo/PageDown/PageUp for search/nav). Model holds no stream bytes; all counters delegate. (2) `internal/ui/fuzz_view.go`: `ProbeEvent` primitives (no fuzz/mcp import), `ProgressBridge` (bounded 256 ring, non-blocking Send/PollCmd, drop-counted, stdout-free), `FuzzModel` (second StreamView + counters/RPS/badges); `Model.BindProgress` + probeMsg chaining. (3) `panels.go` (tree/search/palette; subsequence fuzzy filter), `editor.go` on `bubbles/textinput` — huh declined (new framework + fetch for three fields; `atotto/clipboard` admitted as textinput's transitive dep). (4) Editor submit: re-parse → swap (owned-doc release) → factory rebuild → dispatch; nil factory fails closed (half-swap would slice the wrong arena). (5) Breakpoints pinned by byte-identical goldens (79/80/100/120 × Unicode/ASCII, `-update`); ASCII degrades every chrome glyph incl. a custom border preset. (6) Terminal logic: dual = tree+right pane; `j/k` target tree when left-focused; `N` exact-matched before folded `n`.
+- **Consequences:** Gates: fast 50MiB StreamView unit gate (flush-per-chunk so the TAIL binds — first shape hid M89 behind backlog drops, GREEN, reshaped), pause/search unit gates, headless bridge gate, tree/search/palette/editor gates (edited target hit exactly once; fixed-runner held), 8 goldens + layout-drift + color-token gates. M89 red (nothing dropped + retained 51.6MiB; mutant run took 232s — the defect is expensive, itself the finding); M90 red (bridge empty at poll 0). Palette: first-draft `#D29922`/`#8B949E` aliased err/accent at 16 colors (caught by the new gate) → `#E3B341`/`#6E7681`. TASKS P3.1.2–P3.1.4/P3.2.1–P3.2.2/P3.2.4/P3.3.5 DONE; DESIGN_SYSTEM §4 + §11 updated. Known remainders: telemetry `µs` in ASCII mode; palette has no environment rows; lipgloss NormalBorder is box-drawing (custom ASCII preset instead).
+- **Refs:** `internal/ui/stream_view.go`, `fuzz_view.go`, `panels.go`, `editor.go`, `app.go`, `views.go`, `keys.go`, goldens in `testdata/golden/`, `cmd/pulse/main.go` (factory), `config/allowed-modules.txt` (clipboard), duckiec/pulse#8.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

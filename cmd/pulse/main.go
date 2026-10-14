@@ -174,6 +174,10 @@ func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file str
 	}()
 
 	model := ui.New(ctx, application.RouterFor(doc), doc, true)
+	// The editor rebuilds the document on submit; the runner must be
+	// rebuilt with it, because an engine reads through its own doc
+	// reference. RouterFor is the factory (same router every mode uses).
+	model.SetRunnerFactory(func(d *ast.Document) ui.Runner { return application.RouterFor(d) })
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 	model.Bind(prog.Send)
 	if _, err := prog.Run(); err != nil {

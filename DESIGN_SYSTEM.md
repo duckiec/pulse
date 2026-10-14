@@ -96,16 +96,16 @@ Height: minimum 24 rows. The response pane is a virtualized viewport (bubbles
 | `bg.surface` | `#161B22` | Panes, cards |
 | `border.default` | `#30363D` | Pane borders |
 | `text.primary` | `#C9D1D9` | Body text |
-| `text.muted` | `#8B949E` | Hints, metadata |
+| `text.muted` | `#6E7681` | Hints, metadata (ladder-fixed: `#8B949E` aliased accent at 16 colors; §4.2) |
 | `accent.primary` | `#58A6FF` | Selection, focus, links |
 | `method.get` | `#3FB950` | GET |
-| `method.post` | `#D29922` | POST |
+| `method.post` | `#E3B341` | POST (ladder-fixed: `#D29922` aliased error-red at 16 colors; §4.2) |
 | `method.put` | `#58A6FF` | PUT |
 | `method.patch` | `#BC8CFF` | PATCH |
 | `method.delete` | `#F85149` | DELETE, errors |
 | `status.2xx` | `#3FB950` | Success |
 | `status.3xx` | `#39C5CF` | Redirects |
-| `status.4xx` | `#D29922` | Client errors |
+| `status.4xx` | `#E3B341` | Client errors (ladder-fixed with `method.post`) |
 | `status.5xx` | `#F85149` | Server errors |
 | `diff.add` | `#238636` | NDJSON/JSON row highlight (arrived) |
 | `diff.del` | `#DA3633` | Removed/failed rows |
@@ -122,8 +122,17 @@ deterministically. No hex color may be used unconditionally.
 | ANSI 16 | Standard `TERM` | Named-color equivalents (semantic contrast preserved: methods stay distinguishable, 2xx/4xx/5xx stay distinguishable) |
 | Monochrome | `TERM=dumb` / no profile | Distinguish by attribute only: bold/underline/reverse; all semantic meaning must survive without hue |
 
-The 256-color and 16-color lookup tables live in `internal/ui/theme/palette.go` and
-are snapshot-tested: rendering a fixture screen at each profile is a golden test.
+The 16-color mapping is pinned mechanically, not by a shipped lookup table:
+`TestColorTokensAreDistinct` forces the ANSI profile and asserts the six text
+tokens render pairwise-distinct codes (header 37, muted 36, accent 94, ok 32,
+err 91, warn 33) with pane/focused borders distinct — the ladder is decided at
+16 colors, where the first-draft `#D29922`/`#8B949E` aliased err/accent and
+were replaced in-family (ADL-0040). ASCII-glyph goldens at 79/80/100/120
+assert zero non-ASCII bytes per frame; `Model.SetASCII` degrades every chrome
+glyph including a custom ASCII pane border (lipgloss's NormalBorder is still
+box-drawing). No `internal/ui/theme/palette.go` exists: a static table would
+restate what the gate proves, and prose tables do not fail when the palette
+drifts.
 
 ## 5. Keybinding Philosophy (Vim Motions)
 
@@ -220,11 +229,23 @@ from `TelemetrySnapshot`), status bar with byte/line/drop counters, help
 overlay, and the wired subset of §5 (`q`/`ctrl+c` quit, `ctrl+s` send,
 `ctrl+x` cancel, `tab` focus, `j/k/g/G/ctrl+d/u` scroll, `?` help).
 
-Deliberately not built (TASKS.md P3.1.2–P3.1.4, P3.2.1–P3.2.2, P3.2.4
-remainders): tree pane, theme-token degradation ladder + per-profile
-goldens, glyph-mode goldens, `/` search, `Ctrl+P` finder, huh forms, request
-editor/insert mode, spinner/progress/toasts, Stream tab with pause/resume.
-No breakpoint or color-profile golden snapshots exist yet — §9's golden rows
-are open, not silently passed.
+## 11. Implementation Status (Issue #8, ADL-0040)
+
+Built on top of §10: `StreamView` submodule (`internal/ui/stream_view.go` —
+the whole streaming memory contract behind
+Append/Flush/Finish/Visible/Stats/SetPaused, owned by both the response pane
+and the fuzz dashboard), live fuzz dashboard (`internal/ui/fuzz_view.go` —
+second StreamView plus Pass/Fail/Skip, RPS, finding badges, probe tail fed by
+the non-blocking `ProgressBridge` over `tea.Cmd`), tree pane (browse +
+`enter` select), Stream tab (`p` pause/resume with paused/backlog status,
+`f` fuzz toggle), `/` search with `n`/`N` jump, `Ctrl+P` palette (requests +
+`:commands`), request editor (`i`/`e`, `bubbles/textinput`, enter
+apply+send), `Ctrl+f`/`Ctrl+b` full-page, breakpoint goldens (79/80/100/120
+× Unicode/ASCII), 16-color token-distinctness gate, ladder-fixed palette
+(`#E3B341`, `#6E7681`). The §9 golden rows are now green, not open.
+
+Remaining: spinner/progress/toasts, `huh` (declined for the editor —
+`textinput` covers three fields with zero new framework), telemetry `µs` in
+ASCII mode, environment rows in the palette (requests + commands only).
 
 *UI pattern changes require updating this document in the same commit (AGENTS.md §4.6).*

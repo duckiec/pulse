@@ -132,7 +132,7 @@ func TestGFrameStreamIsExactUnderFlood(t *testing.T) {
 	if got := fin.ByteCount(); got != wantBytes {
 		t.Errorf("bytes = %d, want %d", got, wantBytes)
 	}
-	joined := strings.Join(fin.body, "\n")
+	joined := strings.Join(fin.stream.Lines(), "\n")
 	if !strings.Contains(joined, "evt-000000") || !strings.Contains(joined, fmt.Sprintf("evt-%06d", n-1)) {
 		t.Errorf("body holds neither the first nor the last event (flood mis-ordered)")
 	}
