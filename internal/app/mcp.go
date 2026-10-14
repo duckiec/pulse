@@ -115,6 +115,34 @@ func (a *App) IndexCorpus(ctx context.Context, root string) (rag.IndexResult, er
 	return res, nil
 }
 
+// StartWatcherIfConfigured boots the production RAG lifecycle (Audit 1C,
+// P4.1b.11): index the configured corpus, then start the recursive fsnotify
+// watcher bound to the App lifecycle context. With no CorpusRoot it does
+// nothing. The watcher is stopped deterministically by Close before the store
+// closes.
+func (a *App) StartWatcherIfConfigured(ctx context.Context) error {
+	if a.cfg.CorpusRoot == "" {
+		return nil
+	}
+	if _, err := a.IndexCorpusIfConfigured(ctx); err != nil {
+		return err
+	}
+	if a.Redactor == nil {
+		return fmt.Errorf("app: refusing to watch without a redactor")
+	}
+	w, err := rag.NewWatcher(a.cfg.CorpusRoot, a.Store, a.Embedder, a.Redactor.String)
+	if err != nil {
+		a.degrade(fmt.Sprintf("local RAG watcher could not start for %s: %v", a.cfg.CorpusRoot, err))
+		return nil
+	}
+	if err := w.Start(a.ctx); err != nil {
+		a.degrade(fmt.Sprintf("local RAG watcher could not start for %s: %v", a.cfg.CorpusRoot, err))
+		return nil
+	}
+	a.Watcher = w
+	return nil
+}
+
 // IndexCorpusIfConfigured indexes Config.CorpusRoot when one is set, and does
 // nothing otherwise.
 //
@@ -156,10 +184,11 @@ func (a *App) MCPServer() (*mcp.Server, error) {
 		return nil, fmt.Errorf("app: refusing to serve MCP without a redactor")
 	}
 	return mcp.NewServerWithConfig(mcp.Config{
-		Exec:       a.Executor,
-		FuzzRunner: a.FuzzRunner,
-		Redactor:   a.Redactor,
-		Options:    []mcp.Option{mcp.WithFailureBinder(a.Binder)},
+		Exec:         a.Executor,
+		FuzzRunner:   a.FuzzRunner,
+		Redactor:     a.Redactor,
+		FuzzFindings: a.Store,
+		Options:      []mcp.Option{mcp.WithFailureBinder(a.Binder)},
 	})
 }
 

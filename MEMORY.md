@@ -2071,6 +2071,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0037 — C2 unification, watcher lifecycle, and fuzz persistence wiring (#3, #4)
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Wayfinder map duckiec/pulse#1; grilling tickets #3 (C2 chunk-finalization seam) and #4 (production seams Audit 1B/1C, P4.1b.11). Self-resolved against ROADMAP/ARCHITECTURE: walker-vs-watcher scheduling differs (bulk pool vs incremental events) and stays; only finalization unifies. Composition-root rule (app owns concrete deps; mcp never imports store) constrains the wiring shape.
+- **Decision:** (1) C2: new `internal/rag/finalize.go` with `finalizeOne` (MakeID → redact → embed with input `Symbol+" "+Path+"\n"+Text`; ID position-derived; redact-before-embed) and `prepareChunks(ctx, path, lang, src, embedder, redact) ([]store.RagChunk, error)` (chunk + finalize + map). `walkCtx.finalize` is a thin adapter adding only the Redacted stat; `Watcher.HandleEvent` and the test helper call `prepareChunks`. ctx added as first param beyond the ticket's sketch because `Embed` needs cancellation; otherwise the seam is as specified. (2) Watcher lifecycle: `Watcher.Wait()` drains the loop; `App.Watcher` field; `App.StartWatcherIfConfigured` (index → NewWatcher with `a.Redactor.String` → `Start(a.ctx)`); `App.Close` stops + waits before `Store.Close`. (3) Fuzz persistence: `FuzzOptions.PersistTo`, `ExecuteFuzz` calls `fuzz.PersistFindings` fail-closed; `mcp.Config.FuzzFindings` + `WithFuzzFindings` option; `App.MCPServer` passes `a.Store` (*store.Store satisfies `fuzz.FindingStore`; mcp never imports store). (4) Schema repair found by wiring: `fuzz_findings` lacked the `payload` column `PersistFuzzFinding` inserted (proven live: `table fuzz_findings has no column named payload`); added `payload TEXT NOT NULL DEFAULT ''` + `ALTER TABLE` migration for pre-existing DBs; scoped `TestSchemaHasNoBodyColumns` to non-`fuzz_findings` tables (payload is the redacted triggering boundary value, redacted in ExecuteFuzz before persist — not a response body).
+- **Consequences:** Parity gates `TestPrepareChunksParity` + `TestPrepareChunksRedactsBeforeEmbed` (C2 mutant embed-before-redact fails the latter: identical vectors); seam gates `TestAppFuzzPersistsFindingsToStore` (M83: `if false` on the persist call → 0 rows FAIL, restored 8 rows PASS) and `TestAppWatcherReindexesOnEdit` (M84: watcher never built → `no watcher started` FAIL, restored PASS). TASKS P3.2.5/P3.3a.10 marked PHYSICALLY WIRED.
+- **Refs:** `internal/rag/finalize.go`, `internal/rag/indexer.go`, `internal/rag/watcher.go`, `internal/mcp/fuzz_tool.go`, `internal/mcp/tools.go`, `internal/mcp/server.go`, `internal/app/app.go`, `internal/app/mcp.go`, `internal/store/sqlite.go`, duckiec/pulse#3, duckiec/pulse#4.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

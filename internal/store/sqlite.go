@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS fuzz_findings (
     signature   TEXT NOT NULL UNIQUE,
     op_id       TEXT NOT NULL DEFAULT '',
     status_code INTEGER NOT NULL DEFAULT 0,
+    payload     TEXT NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL
 );
 
@@ -135,6 +136,15 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) applySchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("store: apply schema: %w", err)
+	}
+	// Migration for databases created before the fuzz payload column existed:
+	// CREATE TABLE IF NOT EXISTS never widens an existing table, so add it.
+	// A duplicate-column error means the column is already there (fresh DB).
+	if _, err := s.db.ExecContext(ctx,
+		`ALTER TABLE fuzz_findings ADD COLUMN payload TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("store: migrate fuzz_findings payload column: %w", err)
+		}
 	}
 	return nil
 }

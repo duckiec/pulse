@@ -179,30 +179,14 @@ func IndexContext(ctx context.Context, root string, opts Options, yield func(Chu
 //     in a form nothing downstream can redact — it is already hashed into
 //     numbers. Redacting after embedding would leave the secret in the vector.
 func (w *walkCtx) finalize(ctx context.Context, c *Chunk, o Options) bool {
-	c.MakeID()
-	if o.Redact != nil {
-		before := len(c.Text)
-		c.Text = o.Redact(c.Text)
-		if len(c.Text) != before {
-			w.bump(func(s *WalkStats) { s.Redacted++ })
-		}
+	// Thin adapter around finalizeOne (finalize.go): the ID, redaction, and
+	// embedding rules live there alone, shared with the watcher path. This
+	// wrapper only adds the walker's Redacted stat on top.
+	hasVec, redacted := finalizeOne(ctx, c, o.Embedder, o.Redact)
+	if redacted {
+		w.bump(func(s *WalkStats) { s.Redacted++ })
 	}
-	if o.Embedder == nil || !o.Embedder.Available() {
-		return false
-	}
-	if err := ctx.Err(); err != nil {
-		return false
-	}
-	vec, scale, err := o.Embedder.Embed(ctx, c.Symbol+" "+c.Path+"\n"+c.Text)
-	if err != nil || len(vec) == 0 {
-		// Degrade THIS chunk to lexical-only. A corpus that is 99% vectorized
-		// is far more useful than no index, and the shortfall is counted so it
-		// can be reported honestly.
-		c.Vec, c.Scale = nil, 0
-		return false
-	}
-	c.Vec, c.Scale = vec, scale
-	return true
+	return hasVec
 }
 
 // ErrFileTooLarge reports a file over the per-file cap.

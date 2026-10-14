@@ -95,6 +95,12 @@ type FuzzOptions struct {
 	// Progress receives one notification per payload as it completes. Optional,
 	// and always non-blocking: a nil callback disables streaming.
 	Progress func(fuzz.Progress)
+	// PersistTo receives every failing payload (5xx or transport failure)
+	// via fuzz.PersistFindings. Nil disables persistence: unit gates that
+	// assert verdicts without booting SQLite set nothing. Production sets
+	// the store through WithFuzzFindings so every finding is idempotently
+	// persisted to fuzz_findings (Audit 1B).
+	PersistTo fuzz.FindingStore
 }
 
 // ValidateFuzzOptions checks and defaults the options.
@@ -148,10 +154,13 @@ func ValidateFuzzOptions(in FuzzOptions) (FuzzOptions, error) {
 		conc = MaxFuzzConcurrency
 	}
 	out.Concurrency = conc
-	// The progress callback is caller-owned infrastructure, not a value to
-	// validate: dropping it here would silently disable live streaming for
-	// every validated run (caught by TestFuzzProgressStreamsEveryPayload).
+	// The progress callback and the persistence sink are caller-owned
+	// infrastructure, not values to validate: dropping them here would
+	// silently disable live streaming (caught by
+	// TestFuzzProgressStreamsEveryPayload) or finding persistence for every
+	// validated run.
 	out.Progress = in.Progress
+	out.PersistTo = in.PersistTo
 	return out, nil
 }
 
@@ -444,6 +453,14 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			"%d of %d boundary payloads produced an unexpected response", out.Failed, out.Total))
 	}
 	out.TAP = fuzz.Render(results)
+	// Production seam (Audit 1B): every failing payload is idempotently
+	// persisted. A persistence failure fails the run closed: silently
+	// dropping a 5xx would report a broken server as merely "warned".
+	if opts.PersistTo != nil && len(out.Findings) > 0 {
+		if err := fuzz.PersistFindings(ctx, opts.PersistTo, out.OpID, out.Findings); err != nil {
+			return nil, WrapProtocolError(CodeInternalError, "the fuzz findings could not be persisted", err)
+		}
+	}
 	return out, nil
 }
 
@@ -577,6 +594,7 @@ func RegisterFuzzTool(srv *mcpserver.MCPServer, runner FuzzRunner, red Redactor,
 		if err != nil {
 			return errorResult(err), nil
 		}
+		in.PersistTo = ro.findings
 		out, err := ExecuteFuzz(ctx, in, runner, red)
 		if err != nil {
 			return errorResult(err), nil

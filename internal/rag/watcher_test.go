@@ -28,22 +28,11 @@ func openRAGStore(t *testing.T) *store.Store {
 func indexOneFile(t *testing.T, s *store.Store, rel, content string) {
 	t.Helper()
 	ctx := context.Background()
-	emb := NewHashingEmbedder()
-	src := []byte(content)
-	chunks, err := ChunkFileForTest(rel, LangOf(rel), src)
+	// Thin adapter around the single seam: the helper must not reimplement
+	// ID/redaction/embedding, or the parity gate proves nothing.
+	stored, err := prepareChunks(ctx, rel, LangOf(rel), []byte(content), NewHashingEmbedder(), nil)
 	if err != nil {
 		t.Fatalf("chunk: %v", err)
-	}
-	stored := make([]store.RagChunk, 0, len(chunks))
-	for i := range chunks {
-		c := &chunks[i]
-		c.MakeID()
-		v, sc, _ := emb.Embed(ctx, c.Symbol+" "+c.Path+"\n"+c.Text)
-		c.Vec, c.Scale = v, sc
-		stored = append(stored, store.RagChunk{
-			ID: c.ID, Path: c.Path, Lang: c.Lang, StartLn: c.StartLn, EndLn: c.EndLn,
-			Symbol: c.Symbol, Text: c.Text, Vec: c.Vec, Scale: c.Scale,
-		})
 	}
 	if _, err := s.UpsertRAGChunks(ctx, stored); err != nil {
 		t.Fatalf("upsert: %v", err)

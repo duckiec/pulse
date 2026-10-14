@@ -176,6 +176,10 @@ type App struct {
 	Executor mcp.Executor
 	// FuzzRunner backs `execute_fuzz_run`.
 	FuzzRunner mcp.FuzzRunner
+	// Watcher is the incremental RAG reindexer (Audit 1C, P4.1b.11). Nil when
+	// no corpus is configured. Started by StartWatcherIfConfigured, stopped
+	// deterministically by Close before the store closes.
+	Watcher *rag.Watcher
 
 	// Degradations are conditions the app booted with and could not resolve.
 	// They are REPORTED, never hidden: an agent that is told the index is empty
@@ -534,7 +538,10 @@ func (a *App) Config() Config { return a.cfg }
 //  1. cancel the context, so work in flight observes the shutdown and unwinds
 //     through its OWN teardown path (Goal 1 §1.2.6) rather than having its
 //     resources pulled out from under it;
-//  2. close the store, which is the only resource with an OS handle that
+//  2. stop the RAG watcher and WAIT for its goroutine to exit before the
+//     store closes, so a final upsert cannot race the SQLite close (Audit
+//     1C, P4.1b.11);
+//  3. close the store, which is the only resource with an OS handle that
 //     survives the process if it leaks.
 //
 // It is idempotent. A deferred Close and an explicit one from a signal handler
@@ -549,6 +556,13 @@ func (a *App) Close() error {
 		a.closeMu.Lock()
 		defer a.closeMu.Unlock()
 		a.closed = true
+		// Watcher first: stop the fsnotify handle, then drain the loop so
+		// no HandleEvent upsert is in flight when the store closes.
+		if a.Watcher != nil {
+			_ = a.Watcher.Stop()
+			a.Watcher.Wait()
+			a.Watcher = nil
+		}
 		// Scrub the ephemeral secret tiers (explicit .env AND the decrypted
 		// vault payload) before releasing anything else: in-flight work was
 		// already cancelled above, so no new resolution can observe the

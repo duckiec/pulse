@@ -18,6 +18,7 @@ import (
 
 	"pulse/internal/ast"
 	"pulse/internal/engine"
+	"pulse/internal/fuzz"
 )
 
 // ToolExecuteRequest is the single tool this bridge exposes.
@@ -348,8 +349,18 @@ func WithFailureBinder(b *FailureBinder) Option {
 	return func(o *registerOptions) { o.binder = b }
 }
 
+// WithFuzzFindings installs the fuzz finding sink (Audit 1B). Nil disables
+// persistence; production passes the store so every 5xx/assertion failure is
+// idempotently persisted to fuzz_findings.
+func WithFuzzFindings(st fuzz.FindingStore) Option {
+	return func(o *registerOptions) { o.findings = st }
+}
+
 type registerOptions struct {
 	binder *FailureBinder
+	// findings is the fuzz finding sink (Audit 1B). Nil disables
+	// persistence; production sets the store via WithFuzzFindings.
+	findings fuzz.FindingStore
 }
 
 // handleExecuteRequest validates, dispatches, and formats.

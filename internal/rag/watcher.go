@@ -60,6 +60,15 @@ func (w *Watcher) Stop() error {
 	return nil
 }
 
+// Wait blocks until the background event loop has exited. It must be called
+// after Stop (or context cancellation) for a deterministic shutdown: Close
+// without Wait races the loop's final upsert against the store close.
+func (w *Watcher) Wait() {
+	if w.done != nil {
+		<-w.done
+	}
+}
+
 func (w *Watcher) addRecursive(root string) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -149,37 +158,11 @@ func (w *Watcher) HandleEvent(ctx context.Context, ev fsnotify.Event) error {
 	if err != nil {
 		return fmt.Errorf("rag: read %s: %w", rel, err)
 	}
-	chunks, err := chunkFile(rel, lang, src)
+	// Single seam (finalize.go): ID, redaction, and embedding live in
+	// prepareChunks/finalizeOne alone, shared with the bulk walker path.
+	stored, err := prepareChunks(ctx, rel, lang, src, w.Embedder, w.Redact)
 	if err != nil {
 		return fmt.Errorf("rag: chunk %s: %w", rel, err)
-	}
-
-	// Finalize each chunk: id, redaction, embedding. Mirrors finalize() in the
-	// walker so watcher-written chunks agree byte-for-byte with index-written
-	// ones.
-	stored := make([]store.RagChunk, 0, len(chunks))
-	for i := range chunks {
-		c := &chunks[i]
-		c.MakeID()
-		if w.Redact != nil {
-			c.Text = w.Redact(c.Text)
-		}
-		if w.Embedder != nil && w.Embedder.Available() {
-			if vec, scale, err := w.Embedder.Embed(ctx, c.Symbol+" "+c.Path+"\n"+c.Text); err == nil && len(vec) > 0 {
-				c.Vec, c.Scale = vec, scale
-			}
-		}
-		stored = append(stored, store.RagChunk{
-			ID:      c.ID,
-			Path:    c.Path,
-			Lang:    c.Lang,
-			StartLn: c.StartLn,
-			EndLn:   c.EndLn,
-			Symbol:  c.Symbol,
-			Text:    c.Text,
-			Vec:     c.Vec,
-			Scale:   c.Scale,
-		})
 	}
 	if len(stored) == 0 {
 		return nil

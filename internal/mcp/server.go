@@ -13,6 +13,7 @@ import (
 	"pulse/internal/ast"
 
 	"pulse/internal/engine"
+	"pulse/internal/fuzz"
 )
 
 // ServerName and ServerVersion identify Pulse to the MCP client. They appear in
@@ -45,6 +46,9 @@ type Config struct {
 	Exec Executor
 	// FuzzRunner executes `execute_fuzz_run`. nil omits the tool.
 	FuzzRunner FuzzRunner
+	// FuzzFindings receives every failing fuzz payload (Audit 1B). Nil
+	// disables persistence; production passes the store.
+	FuzzFindings fuzz.FindingStore
 	// Redactor scrubs agent-visible text. Optional; see the type's contract.
 	Redactor Redactor
 	// Options are shared register options, e.g. WithFailureBinder.
@@ -80,7 +84,8 @@ func NewServerWithConfig(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	if cfg.FuzzRunner != nil {
-		if err := RegisterFuzzTool(srv, cfg.FuzzRunner, cfg.Redactor, cfg.Options...); err != nil {
+		opts := append(append([]Option{}, cfg.Options...), WithFuzzFindings(cfg.FuzzFindings))
+		if err := RegisterFuzzTool(srv, cfg.FuzzRunner, cfg.Redactor, opts...); err != nil {
 			return nil, err
 		}
 	}
