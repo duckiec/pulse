@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS fuzz_findings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fuzz_findings_sig ON fuzz_findings(signature);
+
+-- sync_state holds the P2P CRDT snapshot: one row (id = 1), the canonical
+-- JSON document from Store.ExportSnapshot, and the write time. It persists
+-- items AND tombstones, so a restart resumes gossip instead of refetching
+-- the world — and never resurrects a deleted item. Column names obey the
+-- secret-free audit below: the snapshot holds only secret-filtered items
+-- (dirty items never merge, so there is nothing dirty to persist).
+CREATE TABLE IF NOT EXISTS sync_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    snapshot   BLOB NOT NULL DEFAULT x'',
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // forbiddenColumnSubstrings are the fragments that must never appear in any

@@ -480,10 +480,44 @@ func (e *VaultError) ExitCode() int {
 
 // VaultEncrypt reads a plaintext .env and writes its container, then removes the
 // plaintext.
-func (a *App) VaultEncrypt(envPath string, key []byte) error {
+// VaultEncrypt seals a plaintext .env into its PVLT2 container, then removes
+// the plaintext (a vault next to its plaintext protects nothing).
+//
+// PVLT2, not PVLT1: the runtime chain opens PVLT2 containers with the device
+// identity, so a symmetric-sealed container would be write-only — `encrypt`
+// must produce what the chain reads, or the command is a trap. The device
+// signs (authenticity) and every listed recipient can open (rotation and
+// multi-device); an empty recipient list fails closed rather than sealing
+// for nobody.
+func (a *App) VaultEncrypt(envPath, keyID, recipientsFile string, r secrets.SecretResolver) error {
 	plain, vault := VaultPaths(envPath)
-	if err := secrets.EncryptEnvFile(plain, vault, key); err != nil {
+	recipients, err := secrets.ParseRecipients(recipientsFile)
+	if err != nil {
+		return err
+	}
+	id, err := secrets.LoadIdentity(keyID, r)
+	if err != nil {
+		return &VaultError{Kind: VaultErrResolve, msg: err.Error(), err: err}
+	}
+	defer clear(id.X25519Priv)
+	defer clear(id.Ed25519Seed)
+	signer := ed25519.NewKeyFromSeed(id.Ed25519Seed)
+	payload, err := os.ReadFile(plain)
+	if err != nil {
 		return fmt.Errorf("vault: encrypt %s: %w", envPath, err)
+	}
+	defer clear(payload)
+	res, err := secrets.Seal2(payload, recipients, signer)
+	clear(signer)
+	if err != nil {
+		return err
+	}
+	defer clear(res)
+	if err := os.WriteFile(vault, res, 0o600); err != nil {
+		return fmt.Errorf("vault: write %s: %w", vault, err)
+	}
+	if err := secrets.RemovePlaintextFile(plain); err != nil {
+		return err
 	}
 	return nil
 }
@@ -558,13 +592,31 @@ func (a *App) VaultRotate(envPath, keyID, recipientsFile string, r secrets.Secre
 //
 // `out` may be empty, in which case it defaults to the plaintext path alongside
 // the container.
-func (a *App) VaultDecryptTo(vaultPath, out string, key []byte) (string, error) {
+// VaultDecryptTo opens a PVLT2 container with the device identity and
+// writes the plaintext .env at out (default: alongside the container).
+func (a *App) VaultDecryptTo(vaultPath, out, keyID string, r secrets.SecretResolver) (string, error) {
 	plain, vault := VaultPaths(vaultPath)
 	if out != "" {
 		plain = out
 	}
-	if err := secrets.DecryptVaultFile(vault, plain, key); err != nil {
+	id, err := secrets.LoadIdentity(keyID, r)
+	if err != nil {
+		return "", &VaultError{Kind: VaultErrResolve, msg: err.Error(), err: err}
+	}
+	defer clear(id.X25519Priv)
+	defer clear(id.Ed25519Seed)
+	container, err := os.ReadFile(vault)
+	if err != nil {
+		return "", fmt.Errorf("vault: decrypt %s: %w", vaultPath, err)
+	}
+	defer clear(container)
+	payload, err := secrets.Open2(container, id.X25519Priv)
+	if err != nil {
 		return "", &VaultError{Kind: kindForDecrypt(err), msg: err.Error(), err: err}
+	}
+	defer clear(payload)
+	if err := os.WriteFile(plain, payload, 0o600); err != nil {
+		return "", fmt.Errorf("vault: write %s: %w", plain, err)
 	}
 	return plain, nil
 }

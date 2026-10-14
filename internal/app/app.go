@@ -131,6 +131,18 @@ type Config struct {
 	// boots sync and degrades loudly when the network, the ledger, or
 	// the identity is unavailable.
 	SkipSync bool
+	// SyncStaticPeers dials pinned peers at fixed addresses without waiting
+	// for mDNS discovery (node id -> host:port). Discovery without a pin is
+	// display-only; a static address without a pin is never dialed — the
+	// ledger gates every connection, however the address was learned.
+	// This is the manual backend (ROADMAP §4.2.3): tailnet IPs and sandboxes
+	// whose multicast is blocked.
+	SyncStaticPeers map[string]string
+	// SyncPublishDir converges a directory of .http files into the CRDT:
+	// `pulse sync serve` sets it to the served collection. Empty disables
+	// the intake; the serve loop re-publishes only when the directory's
+	// fingerprint moves, so steady state costs a stat walk, never a parse.
+	SyncPublishDir string
 }
 
 // Defaults chosen so that an agent can launch `pulse mcp` and get a working
@@ -476,6 +488,7 @@ func (a *App) buildTools() error {
 		Redactor:  a.Redactor,
 		Resolver:  a.resolver(),
 		NewEngine: a.newRouter,
+		Recorder:  &execRecorder{db: a.Store, red: a.Redactor},
 	}
 
 	a.FuzzRunner = &mcp.EngineFuzzRunner{

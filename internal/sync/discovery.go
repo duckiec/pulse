@@ -137,17 +137,36 @@ func (a *ZeroconfAnnouncer) Announce(ctx context.Context, self PeerInfo) (func()
 }
 
 // ZeroconfBrowser is the production Browser: mDNS browsing.
+//
+// Self names this peer so its own advertisement is filtered at the
+// seam, not by every caller. It is set at construction — the Browser
+// interface takes only ctx, so self-filtering must live inside the
+// module to keep the adapter satisfying the interface.
 type ZeroconfBrowser struct {
 	Ifaces []net.Interface
+	// Self filters this peer's own advertisement. Empty disables
+	// self-filtering (tests that observe loopback).
+	Self string
 	// Timeout bounds one browse sweep for tests; zero selects no timeout
 	// (browse until ctx ends, the production shape).
 	Timeout time.Duration
 }
 
+var _ Browser = (*ZeroconfBrowser)(nil)
+
 // Browse resolves service entries into PeerInfos. Entries that do not
 // parse, speak another proto version, or name this peer are skipped —
 // discovery is untrusted input, and a hostile LAN advertises garbage.
-func (b *ZeroconfBrowser) Browse(ctx context.Context, selfNode string) (<-chan PeerInfo, error) {
+//
+// Channel ownership: the pump goroutine is the SOLE producer on out and
+// the sole closer of out. The resolver goroutine owns entries and closes
+// entries when resolver.Browse returns (error, timeout, or cancel). The
+// pump ranges until entries closes or ctx ends, then closes out — so
+// close(out) happens strictly after all sends ceased, even on fast
+// cancel or multicast failure. Closing out from the resolver side while
+// the pump still sends is the send-on-closed-channel panic this owns
+// against; it must never return.
+func (b *ZeroconfBrowser) Browse(ctx context.Context) (<-chan PeerInfo, error) {
 	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
 		warnOffline(err.Error())
@@ -160,19 +179,47 @@ func (b *ZeroconfBrowser) Browse(ctx context.Context, selfNode string) (<-chan P
 	if b.Timeout > 0 {
 		bctx, cancel = context.WithTimeout(ctx, b.Timeout)
 	}
+	selfNode := b.Self
+	// Resolver side: starts the library browse and never touches out or
+	// entries again. entries is owned AND closed by the zeroconf client
+	// (mainloop calls params.done() on ctx expiry); closing it here would
+	// double-close against the library and panic inside mainloop on fast
+	// cancel. resolver.Browse is non-blocking: it spawns the mainloop and
+	// returns, so this goroutine's only work is the error warn path.
 	go func() {
-		defer close(out)
-		defer cancel()
 		if err := resolver.Browse(bctx, ServiceName, ServiceDomain, entries); err != nil {
 			warnOffline(err.Error())
 			return
 		}
 	}()
+	// Pump side: sole producer and sole closer of out.
 	go func() {
+		defer close(out)
+		defer cancel()
+		_ = resolver // keep the client alive until the pump exits
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-bctx.Done():
+				// Timeout/cancel of the browse sweep ends the pump
+				// even if the resolver lingers; draining entries is
+				// best-effort here because resolver owns its close.
+				select {
+				case e, ok := <-entries:
+					if !ok {
+						return
+					}
+					if peer, err := entryToPeer(e); err == nil && peer.NodeID != selfNode && peer.Port > 0 {
+						select {
+						case out <- peer:
+						default:
+						}
+					}
+					return
+				default:
+					return
+				}
 			case e, ok := <-entries:
 				if !ok {
 					return
@@ -187,6 +234,8 @@ func (b *ZeroconfBrowser) Browse(ctx context.Context, selfNode string) (<-chan P
 				select {
 				case out <- peer:
 				case <-ctx.Done():
+					return
+				case <-bctx.Done():
 					return
 				}
 			}

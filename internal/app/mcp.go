@@ -115,6 +115,17 @@ func (a *App) IndexCorpus(ctx context.Context, root string) (rag.IndexResult, er
 	return res, nil
 }
 
+// Boot runs the half of construction New deliberately skips: the configured
+// corpus is indexed and the fsnotify watcher started, both bound to the App
+// lifecycle. New cannot do this because a test builds an App without touching
+// the filesystem outside its temporary directory; every production mode calls
+// Boot after New and treats an error as fatal (the only error path is a
+// missing redactor, which violates New's own postcondition). With no
+// CorpusRoot it is a no-op that costs nothing.
+func (a *App) Boot(ctx context.Context) error {
+	return a.StartWatcherIfConfigured(ctx)
+}
+
 // StartWatcherIfConfigured boots the production RAG lifecycle (Audit 1C,
 // P4.1b.11): index the configured corpus, then start the recursive fsnotify
 // watcher bound to the App lifecycle context. With no CorpusRoot it does

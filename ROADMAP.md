@@ -1985,10 +1985,14 @@ are corrected in place; nothing under 4.1 remains open.
 - **Challenge:** Discovery on hostile LANs must not become an attack surface: the
   mTLS + TOFU pinning means a discovered-but-unpinned peer is *discovered only for
   display*, never synced with until the user pins it explicitly.
-- **Status (Wave 8, ADL-0044): WIRED.** `internal/app/sync.go` binds the domain
+- **Status (v1.0.0, ADL-0045): COMPLETE.** `internal/app/sync.go` binds the domain
   into Boot/Close: device identity → node id, App redactor → CRDT scanner via
   `Redactor.Contains`, ledger → dial policy, announcer/browser/engine →
   lifecycle. Every failure degrades into `Degradations`, never fails Boot.
+  Proven over the wire by the `e2e/` Stage-4 three-node proof (A/B converge +
+  tombstone converge + unpinned C refused at the handshake holding nothing):
+  rejection is effective (no frames flow) AND observable (first-frame-death
+  `sync: dial` log); duplicate-race conns keep-first so Close never hangs.
 - **Verify:** Two-process sync test on loopback (zeroconf on localhost); unpinned-
   peer refusal test; pinning flow test (pin → sync → unpin → refuse again).
 
@@ -2135,6 +2139,13 @@ are corrected in place; nothing under 4.1 remains open.
   never-on-disk assertions.
 - G-hyg: no TAP/JSON output on stdout in MCP-serving contexts.
 - ADLs appended; `ARCHITECTURE.md` sync/vault sections updated same-commit.
+
+> **Goal 4 STATUS: COMPLETE (v1.0.0, ADL-0045).** Every gate above is green:
+> TAP/exit-matrix/SIGINT via `pulse test` (Issue 5); CRDT convergence +
+> canonical wire + TOFU pinning via unit gates, M91–M94 machine-checked, and
+> the `e2e/` Stage-4 live three-node proof; vault round-trip/tamper/rotation
+> via Move 12 gates + `e2e/` Stage 1; G-hyg via the stdout tripwire inside
+> `all-gates.sh` → ALL GATES: PASS; ADLs appended with this entry.
 
 ---
 

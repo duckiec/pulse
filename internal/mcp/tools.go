@@ -117,6 +117,37 @@ type EngineExecutor struct {
 	// NewEngine builds the executor for one parsed document. Injected so tests
 	// can substitute a local server; production uses the real engine.
 	NewEngine func(doc *ast.Document) engine.ProtocolEngine
+	// ExecutionRecorder receives one record per executed request. Nil disables
+	// recording: history and collection tools then serve nothing, which
+	// is honest but useless — production always binds the store-backed
+	// recorder through the composition root.
+	Recorder ExecutionRecorder
+}
+
+// ExecutionRecord is one executed request's metadata for the history.
+//
+// Secrets never belong here: the URL template is recorded RAW (anchors
+// unresolved), and the error text is scrubbed by the recorder before it
+// touches the store — the store itself refuses interpolation anchors.
+type ExecutionRecord struct {
+	Origin        string // file path, or "<inline payload>"
+	Index         int    // request ordinal in the document
+	Name          string
+	Method        string
+	URLTemplate   string // raw, anchors intact
+	Status        int
+	RequestBytes  int64
+	ResponseBytes int64
+	Digest        string
+	ElapsedMS     int64
+	Err           string // engine error text, possibly empty
+}
+
+// ExecutionRecorder persists execution records. Implementations must never fail
+// the run: a recording error is logged and dropped, because losing one
+// history row is recoverable and failing the request is not.
+type ExecutionRecorder interface {
+	RecordExecution(ctx context.Context, r ExecutionRecord)
 }
 
 // Execute implements Executor.
@@ -169,7 +200,24 @@ func (e *EngineExecutor) Execute(ctx context.Context, src, origin string, index 
 	// the timeout already gave the run a reason to stop.
 	_ = handle.WaitTimeout(engineTeardownBudget)
 	collector.Wait()
-	return collector.outcome(origin, index, e.Redactor), collector.Err()
+	out, execErr := collector.outcome(origin, index, e.Redactor), collector.Err()
+	if out != nil && e.Recorder != nil {
+		rec := ExecutionRecord{
+			Origin: origin, Index: index,
+			Method: out.Method, URLTemplate: out.URL,
+			Status: out.Status, RequestBytes: int64(len(src)),
+			ResponseBytes: out.BodyBytes, Digest: out.Digest,
+			ElapsedMS: out.ElapsedMS,
+		}
+		if execErr != nil {
+			rec.Err = execErr.Error()
+		}
+		if rq := requests[index]; rq != nil {
+			rec.Name = doc.Str(rq.NameStart, rq.NameEnd)
+		}
+		e.Recorder.RecordExecution(ctx, rec)
+	}
+	return out, execErr
 }
 
 // collect gathers the document's requests into a slice so a tool argument can

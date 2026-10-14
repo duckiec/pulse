@@ -157,6 +157,21 @@ dependency allowlist), `scripts/` (`bootstrap-toolchain.sh`, `ci/*` gate scripts
 `all-gates.sh`), `testdata/http/` (lexer/parser corpus + golden files),
 `.github/workflows/ci.yml` (GitHub Actions).
 
+Bare-metal proving ground (test-only, `//go:build e2e`, never linked into the
+shipped binary): `e2e/` drives the compiled binary as a real OS process in six
+stages — live-keyring vault seal, TAP/HMAC/stream over loopback, MCP+RAG+fuzz,
+live three-node mTLS/CRDT sync (converge + tombstone + unpinned-handshake-
+refusal), pty TUI smoke at two sizes with paint-gated quit, and a post-mortem
+canary scan over every db/wal/log/transcript that fails the suite on one leaked
+byte. Sync-loop ownership invariants the crucible proved load-bearing: the
+mDNS pump is the sole producer/closer of its peer channel (the resolver owns
+its entries channel only — the zeroconf client closes it); duplicate-race
+conns keep-first on both the dial and accept paths so every readLoop stays
+reachable by `closeSync`; a dialed conn dying pre-first-frame logs
+`sync: dial <node>: connection failed before first frame` (the TLS 1.3 alert
+arrives post-Dial-success, so this Read error is the only observable half of
+a TOFU rejection — later deaths stay silent, gossip is loss-tolerant).
+
 Dependency flow is one-directional; cycles are a build-time error and a review-time
 rejection.
 

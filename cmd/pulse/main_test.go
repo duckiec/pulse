@@ -44,6 +44,77 @@ func TestRunModeMatrix(t *testing.T) {
 	}
 }
 
+// TestShiftFlagsHonorFlagsAfterPositionals pins the advertised CLI form:
+// `pulse test <dir> [--parallel N]` and `pulse vault keygen [--key-id ID]`
+// put flags AFTER a positional, which Go's flag package silently ignores.
+// shiftFlags moves known flags forward so the tuning is honored; unknown
+// flags stay put and fail closed in Parse.
+func TestShiftFlagsHonorFlagsAfterPositionals(t *testing.T) {
+	testVals := map[string]bool{"parallel": true, "format": true, "silent": false}
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"flags after dir move forward",
+			[]string{"mydir", "--parallel", "8"},
+			[]string{"--parallel", "8", "mydir"}},
+		{"equals form moves as one",
+			[]string{"mydir", "--format=json"},
+			[]string{"--format=json", "mydir"}},
+		{"bool flag moves bare",
+			[]string{"mydir", "--silent"},
+			[]string{"--silent", "mydir"}},
+		{"flags before stay first",
+			[]string{"--parallel", "8", "mydir"},
+			[]string{"--parallel", "8", "mydir"}},
+		{"unknown flags stay for Parse to reject",
+			[]string{"mydir", "--bogus", "8"},
+			[]string{"mydir", "--bogus", "8"}},
+		{"a value starting with dash is the next flag, not a value",
+			[]string{"--out", "--key-id", "x"},
+			[]string{"--out", "--key-id", "x"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := shiftFlags(c.in, testVals)
+			if strings.Join(got, "\x00") != strings.Join(c.want, "\x00") {
+				t.Fatalf("shiftFlags(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestVaultKeyIDFallsBackToTheEnvironment pins the agreement: an explicit
+// flag wins, the environment covers every invocation without repeating it,
+// and neither may silently select the default while the other names an id.
+func TestVaultKeyIDFallsBackToTheEnvironment(t *testing.T) {
+	t.Setenv("PULSE_VAULT_KEY_ID", "from-env")
+	if got := vaultKeyID(""); got != "from-env" {
+		t.Fatalf("vaultKeyID(%q) = %q, want the environment", "", got)
+	}
+	if got := vaultKeyID("from-flag"); got != "from-flag" {
+		t.Fatalf("vaultKeyID(%q) = %q, want the flag", "from-flag", got)
+	}
+}
+
+// TestTestFlagsAfterDirAreHonored proves the wiring, not just the helper:
+// a bogus --format after the directory must fail closed on the FORMAT,
+// before any test executes. Without the shift it would be ignored and the
+// run would proceed as TAP, reporting green on a typo.
+func TestTestFlagsAfterDirAreHonored(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := run(context.Background(),
+		[]string{"test", t.TempDir(), "--format", "bogus"},
+		strings.NewReader(""), &stdout, &stderr, false)
+	if code != exitUsage {
+		t.Fatalf("exit = %d, want %d (stderr: %s)", code, exitUsage, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "format") {
+		t.Fatalf("stderr does not name the format: %s", stderr.String())
+	}
+}
+
 // TestVersionToStdout pins the version contract.
 func TestVersionToStdout(t *testing.T) {
 	var stdout, stderr strings.Builder

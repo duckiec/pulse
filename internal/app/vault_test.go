@@ -49,6 +49,56 @@ func vaultFixture(t *testing.T, payload string, ids ...*secrets.Identity) (vault
 	return vaultPath, store
 }
 
+// TestVaultEncryptProducesWhatTheChainReads pins the PVLT1/PVLT2 version
+// skew that the bare-metal crucible caught red: `vault encrypt` sealed
+// PVLT1 while the runtime chain opens PVLT2, so every encrypted vault was
+// write-only. Encrypt here is through the App method (identity + recipient
+// list, no keychain), decrypt through the matching method, and the payload
+// must round-trip — plus the container must open with Open2 directly, which
+// is what the chain calls.
+func TestVaultEncryptProducesWhatTheChainReads(t *testing.T) {
+	dir := t.TempDir()
+	id := mkIdentity(t)
+	mem := secrets.NewMemoryStore()
+	if err := secrets.StoreIdentity("", id, mem); err != nil {
+		t.Fatalf("StoreIdentity: %v", err)
+	}
+	xpub, err := id.X25519Pub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipients := filepath.Join(dir, "pulse.recipients")
+	if err := os.WriteFile(recipients, []byte(secrets.EncodePub(secrets.IdentityPubPrefix, xpub)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "s.env")
+	if err := os.WriteFile(envPath, []byte("K=v\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t)
+	if err := a.VaultEncrypt(envPath, "", recipients, mem); err != nil {
+		t.Fatalf("VaultEncrypt: %v", err)
+	}
+	raw, err := os.ReadFile(envPath + ".vault")
+	if err != nil {
+		t.Fatalf("no container written: %v", err)
+	}
+	if string(raw[:5]) != secrets.VaultMagic2 {
+		t.Fatalf("container magic = %q, want PVLT2 %q: encrypt must produce what the chain reads", raw[:5], secrets.VaultMagic2)
+	}
+	out, err := a.VaultDecryptTo(envPath+".vault", filepath.Join(dir, "out.env"), "", mem)
+	if err != nil {
+		t.Fatalf("VaultDecryptTo: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "K=v\n" {
+		t.Fatalf("round trip = %q, want the payload", got)
+	}
+}
+
 func mkIdentity(t *testing.T) *secrets.Identity {
 	t.Helper()
 	id, err := secrets.GenerateIdentity()

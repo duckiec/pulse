@@ -162,16 +162,14 @@ func ServeLocked(ctx context.Context, stdout io.Writer, stdin io.Reader) (int, e
 	}
 }
 
-// DefaultExecutor builds the production executor: the real AST parser and the
-// real engine, dispatched by target scheme.
+// DefaultExecutor builds a bare executor: the real AST parser and the real
+// engine, dispatched by target scheme, with NO redactor.
 //
-// Redactor is nil here and that is an OPEN GAP, not a settled decision: the
-// interface exists (Goal 1, ADL-0017) and the chokepoint IS applied in
-// collectingSink.outcome, but the concrete secrets.Redactor has no composition
-// root supplying it yet because internal/app has no caller. Until it does, MCP
-// mode redacts by HEADER NAME only — a resolved secret in a response body would
-// reach the model unredacted. Tracked as an open TASKS.md item rather than left
-// to be discovered by an agent that already has the value.
+// This is the degraded/test path, not production: the composition root
+// (App.MCPServer) supplies the concrete secrets.Redactor, and serving
+// through this default redacts by HEADER NAME only — a resolved secret in
+// a response body would reach the model unredacted. The gap is kept
+// visible here so no caller mistakes the convenience for the wired path.
 func DefaultExecutor() Executor {
 	return &EngineExecutor{
 		NewEngine: func(doc *ast.Document) engine.ProtocolEngine {

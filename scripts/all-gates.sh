@@ -8,7 +8,9 @@ bash "$s/build-matrix.sh"
 bash "$s/tidy-check.sh"
 bash "$s/banned-import-audit.sh"
 bash "$s/doc-sync-gate.sh"
+bash "$(git rev-parse --show-toplevel)/scripts/check-secrets.sh"
 bash "$s/test-gates.sh"
+bash "$s/run-e2e.sh"
 # Wave 6.5: optional live-keyring gate. When the isolated Secret Service
 # session can be constructed (dbus-run-session + gnome-keyring-daemon in
 # PATH), the bare-metal boundary runs too — so the OS security boundary

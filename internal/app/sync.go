@@ -74,6 +74,22 @@ type SyncSubsystem struct {
 	mu    stdsync.Mutex
 	conns map[string]net.Conn // node id -> live connection
 
+	// persist durably records the store after every round; nil when the
+	// App has no store handle (tests that skip persistence).
+	persist func()
+	// publishDir, when set, is the .http collection converged into the
+	// store whenever its fingerprint moves. lastPrint tracks the last
+	// converged state so steady state costs no parse. resync runs the
+	// check; both are set by bootSync, and resync is nil when no dir
+	// is configured.
+	publishDir string
+	lastPrint  string
+	resync     func()
+	// static maps pinned node ids to fixed addresses for the manual
+	// backend. Dialed through the same pin-gated maybeDial as
+	// discovered peers, re-attempted every round until connected.
+	static map[string]string
+
 	inbox   chan sync.Inbound
 	dropped atomic.Int64
 }
@@ -195,6 +211,14 @@ func (a *App) bootSync() {
 	}
 	sort.Strings(peers)
 	sub.Engine = &sync.Engine{Self: nodeID, Store: sub.Store, Link: sub, Peers: peers}
+	sub.publishDir = a.cfg.SyncPublishDir
+	sub.persist = func() { a.persistSyncSnapshot(sub) }
+	sub.resync = func() { a.resyncPublishDir(sub) }
+	sub.static = a.cfg.SyncStaticPeers
+	a.loadSyncSnapshot(sub)
+	if sub.publishDir != "" {
+		a.resyncPublishDir(sub)
+	}
 	a.setSyncSub(sub)
 
 	sub.wg.Add(3)
@@ -320,8 +344,8 @@ func (s *SyncSubsystem) acceptLoop(ctx context.Context) {
 // connection this peer initiates.
 func (s *SyncSubsystem) browseLoop(ctx context.Context) {
 	defer s.wg.Done()
-	b := &sync.ZeroconfBrowser{}
-	ch, err := b.Browse(ctx, s.NodeID)
+	b := &sync.ZeroconfBrowser{Self: s.NodeID}
+	ch, err := b.Browse(ctx)
 	if err != nil {
 		mcp.Logf("sync browse unavailable (%v); pinned direct dials still work", err)
 		return
@@ -359,16 +383,65 @@ func (s *SyncSubsystem) maybeDial(peer sync.PeerInfo) {
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	c, err := tls.DialWithDialer(d, "tcp", addr, sync.ClientConfig(s.cert, s.pins))
 	if err != nil {
-		return // peer down or refusing: next browse will retry
+		// Logged, not silent: a peer that refuses every handshake is the
+		// observable half of a TOFU rejection (the other half is the
+		// server's failed VerifyPeerCertificate). Next browse retries.
+		mcp.Logf("sync: dial %s (%s): %v", peer.NodeID, addr, err)
+		return
 	}
+	// Keep-first on the post-dial recheck: the pre-dial check above runs
+	// without the lock held (the dial itself takes seconds), so a round
+	// tick and an mDNS hit for the same peer race every 5s. The loser must
+	// close its conn, never overwrite the map: an overwritten conn leaves
+	// a readLoop parked on a socket closeSync no longer knows, and Close
+	// hangs in wg.Wait forever. The first conn is stable by construction.
 	s.mu.Lock()
+	if old, ok := s.conns[peer.NodeID]; ok && old != c {
+		s.mu.Unlock()
+		_ = c.Close()
+		return
+	}
 	s.conns[peer.NodeID] = c
 	s.mu.Unlock()
 	s.wg.Add(1)
 	go s.readLoop(s.ctx, c, peer.NodeID)
 }
 
-// roundLoop paces anti-entropy.
+// dialStatic dials pinned static peers this subsystem is not yet
+// connected to. The pin gate inside maybeDial still applies: a static
+// address for an unpinned node is never dialed.
+func (s *SyncSubsystem) dialStatic() {
+	for node, addr := range s.static {
+		if node == s.NodeID {
+			continue
+		}
+		host, port, ok := splitHostPort(addr)
+		if !ok {
+			continue // misconfigured once, skipped every round, never fatal
+		}
+		s.maybeDial(sync.PeerInfo{NodeID: node, Host: host, Port: port})
+	}
+}
+
+// splitHostPort parses a "host:port" static peer address. A misconfigured
+// entry parses to not-ok and is skipped every round, never fatal: one bad
+// line must not wedge the peers that parsed.
+func splitHostPort(addr string) (host string, port int, ok bool) {
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil || h == "" {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n <= 0 || n > 65535 {
+		return "", 0, false
+	}
+	return h, n, true
+}
+
+// roundLoop paces anti-entropy, then makes it durable: the collection
+// dir is re-converged when it moved, and the snapshot persisted, every
+// round. Both are synchronous in this goroutine — the only writer — so
+// no lock guards the store.
 func (s *SyncSubsystem) roundLoop(ctx context.Context) {
 	defer s.wg.Done()
 	t := time.NewTicker(syncRoundInterval)
@@ -379,6 +452,13 @@ func (s *SyncSubsystem) roundLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			s.Engine.Round()
+			s.dialStatic()
+			if s.resync != nil {
+				s.resync()
+			}
+			if s.persist != nil {
+				s.persist()
+			}
 		}
 	}
 }
@@ -390,14 +470,33 @@ func (s *SyncSubsystem) roundLoop(ctx context.Context) {
 func (s *SyncSubsystem) readLoop(ctx context.Context, c net.Conn, owner string) {
 	defer s.wg.Done()
 	defer c.Close()
+	frames := 0
 	for {
 		raw, err := sync.ReadFrame(c)
 		if err != nil {
 			if owner != "" {
+				if frames == 0 {
+					// Dialed peer, zero frames delivered: the TCP+TLS
+					// dial completed but the peer refused us before any
+					// gossip flowed — the TOFU handshake rejection
+					// (TLS 1.3 delivers the server's alert to our first
+					// Read, after our Dial already succeeded: there is
+					// no dial error to log, so this Read error IS the
+					// observable half of the rejection). Without it an
+					// unpinned peer's exclusion is silent and no
+					// operator can tell refusal from misconfiguration.
+					// Later deaths (frames > 0) stay silent: gossip
+					// is loss-tolerant and the count, not the log, is
+					// the signal there. The error carries alert text
+					// and node ids only — never key material — so it
+					// is safe for stderr under the redaction rules.
+					mcp.Logf("sync: dial %s: connection failed before first frame: %v", owner, err)
+				}
 				s.dropConn(owner)
 			}
 			return
 		}
+		frames++ // a frame arrived: the peer is alive and talking
 		msg, err := sync.UnmarshalFrame(raw)
 		if err != nil {
 			continue // hostile garbage: drop the frame, keep the peer
@@ -405,6 +504,17 @@ func (s *SyncSubsystem) readLoop(ctx context.Context, c net.Conn, owner string) 
 		if owner == "" {
 			owner = msg.From
 			s.mu.Lock()
+			// Keep-first, mirroring maybeDial's post-dial recheck: a
+			// dialed conn and an accepted conn for the same peer
+			// race routinely (static redial vs inbound accept), and
+			// overwriting the map leaks the loser out of closeSync's
+			// reach — a readLoop parked forever, a Close hung forever.
+			// The deferred Close below releases the loser; the first
+			// conn stays the stable one.
+			if old, ok := s.conns[owner]; ok && old != c {
+				s.mu.Unlock()
+				return
+			}
 			s.conns[owner] = c
 			s.mu.Unlock()
 		} else if msg.From != owner {
@@ -473,4 +583,9 @@ func (a *App) closeSync() {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+	// Final persist after the loops drain: the last round's merges must
+	// survive the restart, or the next boot refetches them.
+	if s.persist != nil {
+		s.persist()
+	}
 }

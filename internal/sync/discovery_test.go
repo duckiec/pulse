@@ -172,8 +172,8 @@ func TestLoopbackDiscovery(t *testing.T) {
 		t.Skipf("SKIP (reason: mDNS announce unavailable: %v)", err)
 	}
 	defer unannounce()
-	b := &ZeroconfBrowser{Timeout: 6 * time.Second}
-	ch, err := b.Browse(ctx, self.NodeID)
+	b := &ZeroconfBrowser{Self: "other-node", Timeout: 6 * time.Second}
+	ch, err := b.Browse(ctx)
 	if err != nil {
 		t.Skipf("SKIP (reason: mDNS browse unavailable: %v)", err)
 	}
@@ -192,5 +192,59 @@ func TestLoopbackDiscovery(t *testing.T) {
 		case <-ctx.Done():
 			t.Skip("SKIP (reason: context ended before mDNS observation)")
 		}
+	}
+}
+
+// TestBrowseFastCancelNeverPanics is the regression gate for the Stage-4
+// send-on-closed-channel panic: close(out) lived in the resolver goroutine
+// while the pump goroutine still sent to out, so a fast cancel or a
+// multicast failure closed the channel under a live sender.
+//
+// The fix binds out's lifetime strictly to its sole producer (the pump):
+// the resolver owns entries only, the pump owns out only, and close(out)
+// runs only after the pump's sends deterministically ceased. This gate
+// forces fast cancellation (and a 1ms sweep timeout, the multicast-failure
+// shape) across 50 iterations under -race: any send-on-close is a fatal
+// panic, and a leaked non-closed channel is a failure. It needs no UDP
+// 5353 — NewResolver succeeds without multicast; Browse blocks, cancel
+// fires, and the lifetime invariant is what is asserted.
+func TestBrowseFastCancelNeverPanics(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		b := &ZeroconfBrowser{Self: "self", Timeout: time.Millisecond}
+		ch, err := b.Browse(ctx)
+		if err != nil {
+			cancel()
+			// Offline (no resolver) is honest degradation, not a panic:
+			// the gate is that Browse never panics, never leaks a send.
+			continue
+		}
+		// Cancel fast — before, during, and after the 1ms sweep — then
+		// drain until close. A send-on-closed-channel panics here under
+		// -race; a non-closing channel fails the gate below.
+		cancel()
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			for range ch {
+			}
+		}()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iter %d: browse channel never closed after fast cancel", i)
+		}
+	}
+}
+
+// TestBrowserInterfaceSatisfied pins Q4: the production adapter satisfies
+// the Browser seam with ctx only. Self lives at construction; callers
+// never pass it per-call. If the signature drifts again this fails at
+// build time, not at Stage-4 runtime.
+func TestBrowserInterfaceSatisfied(t *testing.T) {
+	var _ Browser = (*ZeroconfBrowser)(nil)
+	b := &ZeroconfBrowser{Self: "abc"}
+	if b.Self != "abc" {
+		t.Fatal("Self not retained at construction")
 	}
 }

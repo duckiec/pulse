@@ -147,6 +147,11 @@ const (
 	FieldName   = "name"
 	FieldMethod = "method"
 	FieldURL    = "url"
+	// FieldSource marks which node published the item from which file:
+	// "<nodehex>:<relpath>". The publish intake tombstones only ids
+	// carrying its OWN node's marker whose file vanished — remote items
+	// (other markers, or none) are never killed by a local delete.
+	FieldSource = "sync.source"
 	// HeaderPrefix namespaces header fields: "header:Authorization".
 	HeaderPrefix = "header:"
 )

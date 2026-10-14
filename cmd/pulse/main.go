@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -65,9 +66,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		case "mcp":
 			return runMCP(ctx, args[1:], stderr)
 		case "test":
-			return runTest(ctx, args[1:], stderr)
+			return runTest(ctx, args[1:], stdout, stderr)
 		case "vault":
-			return runVault(ctx, args[1:], stderr)
+			return runVault(ctx, args[1:], stdout, stderr)
+		case "sync":
+			return runSync(ctx, args[1:], stdin, stdout, stderr)
 		}
 	}
 
@@ -83,6 +86,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stderr, "       pulse mcp")
 		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent]")
 		fmt.Fprintln(stderr, "       pulse vault init|encrypt|decrypt <file> [--key-id ID]")
+		fmt.Fprintln(stderr, "       pulse sync serve <dir>")
+		fmt.Fprintln(stderr, "       pulse sync status")
 		fmt.Fprintln(stderr, "mcp mode exposes: "+describeTools())
 		fs.PrintDefaults()
 	}
@@ -173,6 +178,10 @@ func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file str
 		}
 	}()
 
+	if err := application.Boot(ctx); err != nil {
+		fmt.Fprintf(stderr, "pulse: boot: %v\n", err)
+		return exitFail
+	}
 	model := ui.New(ctx, application.RouterFor(doc), doc, true)
 	// The editor rebuilds the document on submit; the runner must be
 	// rebuilt with it, because an engine reads through its own doc
@@ -190,9 +199,69 @@ func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file str
 
 // describeTools is used only by `--help`, and exists so the CLI and the MCP
 // registry cannot disagree about what Pulse offers: both read the same
-// constants.
+// constants. Every tool the server can register is listed — a help text
+// that names two of ten is how an operator concludes the other eight do
+// not exist.
 func describeTools() string {
-	return strings.Join([]string{mcp.ToolExecuteRequest, mcp.ToolExecuteFuzz}, ", ")
+	return strings.Join([]string{
+		mcp.ToolExecuteRequest,
+		mcp.ToolExecuteFuzz,
+		mcp.ToolListCollections,
+		mcp.ToolListRequests,
+		mcp.ToolGetRequest,
+		mcp.ToolGetRun,
+		mcp.ToolGetHistory,
+		mcp.ToolFuzzStart,
+		mcp.ToolFuzzNext,
+		mcp.ToolFuzzReport,
+	}, ", ")
+}
+
+// shiftFlags moves known --flags before the first positional argument.
+//
+// Go's flag package stops parsing at the first non-flag, so a command
+// advertised as `pulse test <dir> [--parallel N]` would silently IGNORE
+// every flag after the directory — the operator's tuning vanishing
+// without an error. Shifting only KNOWN names keeps the failure mode
+// for typos: an unknown --flag stays put and fails closed in Parse.
+// takesValue names which flags consume the following argument; a value
+// starting with '-' is never consumed (it is the next flag, not a path).
+func shiftFlags(args []string, takesValue map[string]bool) []string {
+	var pos, moved []string
+	wantValue := false
+	for _, a := range args {
+		if wantValue && !strings.HasPrefix(a, "-") {
+			moved = append(moved, a)
+			wantValue = false
+			continue
+		}
+		wantValue = false
+		if !strings.HasPrefix(a, "--") {
+			pos = append(pos, a)
+			continue
+		}
+		name, _, hasVal := strings.Cut(strings.TrimPrefix(a, "--"), "=")
+		takes, ok := takesValue[name]
+		if !ok {
+			pos = append(pos, a) // unknown: leave for Parse to reject
+			continue
+		}
+		moved = append(moved, a)
+		wantValue = takes && !hasVal
+	}
+	return append(moved, pos...)
+}
+
+// vaultKeyID resolves the keychain suffix: the explicit flag wins, the
+// PULSE_VAULT_KEY_ID environment covers every vault invocation without
+// repeating it, and empty selects the default. A flag that silently
+// ignored the environment would keygen under one id and decrypt under
+// another — the exact split this resolves.
+func vaultKeyID(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv("PULSE_VAULT_KEY_ID")
 }
 
 // ---- pulse test ------------------------------------------------------------
@@ -201,7 +270,11 @@ func describeTools() string {
 //
 // The exit code is a pure function of the run, mirrored from the engine's own
 // mapping so the CLI and the runner cannot disagree (ROADMAP.md §4.1.4).
-func runTest(ctx context.Context, args []string, stderr io.Writer) int {
+func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	args = shiftFlags(args, map[string]bool{
+		"parallel": true, "timeout": true, "strict-blocked": false,
+		"format": true, "silent": false,
+	})
 	fs := flag.NewFlagSet("pulse test", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
@@ -259,7 +332,11 @@ func runTest(ctx context.Context, args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
 	}
 
-	code, err := application.TestDirEx(ctx, root, os.Stdout, *parallel, *timeout, *strictBlocked, format, *silent)
+	if err := application.Boot(ctx); err != nil {
+		fmt.Fprintf(stderr, "pulse test: boot: %v\n", err)
+		return exitFail
+	}
+	code, err := application.TestDirEx(ctx, root, stdout, *parallel, *timeout, *strictBlocked, format, *silent)
 	if err != nil {
 		fmt.Fprintf(stderr, "pulse test: %v\n", err)
 		// A parse failure is exit 2, a secret failure exit 3, and anything
@@ -286,7 +363,10 @@ func runTest(ctx context.Context, args []string, stderr io.Writer) int {
 // The key never reaches the repository, a config file or a temp dir at any
 // point: it is generated, written to the keychain, read back, and zeroised
 // (AGENTS.md §3.4).
-func runVault(ctx context.Context, args []string, stderr io.Writer) int {
+func runVault(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	args = shiftFlags(args, map[string]bool{
+		"key-id": true, "out": true, "recipients": true,
+	})
 	fs := flag.NewFlagSet("pulse vault", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
@@ -297,7 +377,7 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse vault init [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse vault keygen [--key-id ID]")
-		fmt.Fprintln(stderr, "       pulse vault encrypt <path.env> [--key-id ID]")
+		fmt.Fprintln(stderr, "       pulse vault encrypt <path.env> [--key-id ID] [--recipients FILE]")
 		fmt.Fprintln(stderr, "       pulse vault decrypt <path.env.vault> [--key-id ID] [--out PATH]")
 		fmt.Fprintln(stderr, "       pulse vault add-recipient <pulse-pub-...> [--recipients FILE]")
 		fmt.Fprintln(stderr, "       pulse vault rotate <path.env> [--key-id ID] [--recipients FILE]")
@@ -306,6 +386,9 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	// The flag and the environment agree on the key id (neither may
+	// silently win): an explicit --key-id overrides PULSE_VAULT_KEY_ID.
+	kid := vaultKeyID(*keyID)
 	cmd := fs.Arg(0)
 	if cmd == "" {
 		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt, decrypt, add-recipient or rotate is required")
@@ -328,16 +411,16 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 
 	switch cmd {
 	case "init":
-		account, err := application.VaultInit(*keyID, store)
+		account, err := application.VaultInit(kid, store)
 		if err != nil {
 			fmt.Fprintf(stderr, "pulse vault init: %v\n", err)
 			return vaultExit(err)
 		}
-		fmt.Fprintf(os.Stderr, "pulse: vault key stored in the keychain as %q\n", account)
+		fmt.Fprintf(stderr, "pulse: vault key stored in the keychain as %q\n", account)
 		return exitOK
 
 	case "keygen":
-		decryptPub, signPub, err := application.VaultKeygen(*keyID, store)
+		decryptPub, signPub, err := application.VaultKeygen(kid, store)
 		if err != nil {
 			fmt.Fprintf(stderr, "pulse vault keygen: %v\n", err)
 			return vaultExit(err)
@@ -346,8 +429,8 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 		// command like `vault init`, never an MCP-serving path, so there is
 		// no JSON-RPC stream to corrupt — and the public halves are designed
 		// to be copied, which stderr would discourage.
-		fmt.Fprintln(os.Stdout, decryptPub)
-		fmt.Fprintln(os.Stdout, signPub)
+		fmt.Fprintln(stdout, decryptPub)
+		fmt.Fprintln(stdout, signPub)
 		return exitOK
 
 	case "add-recipient":
@@ -360,7 +443,7 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "pulse vault add-recipient: %v\n", err)
 			return vaultExit(err)
 		}
-		fmt.Fprintf(os.Stderr, "pulse: recipient listed in %s\n", *recipients)
+		fmt.Fprintf(stderr, "pulse: recipient listed in %s\n", *recipients)
 		return exitOK
 
 	case "rotate":
@@ -369,12 +452,12 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "pulse vault rotate: a .env path is required")
 			return exitUsage
 		}
-		if err := application.VaultRotate(path, *keyID, *recipients, resolver); err != nil {
+		if err := application.VaultRotate(path, kid, *recipients, resolver); err != nil {
 			fmt.Fprintf(stderr, "pulse vault rotate: %v\n", err)
 			return vaultExit(err)
 		}
 		_, vault := app.VaultPaths(path)
-		fmt.Fprintf(os.Stderr, "pulse: re-sealed %s for the current recipient list\n", vault)
+		fmt.Fprintf(stderr, "pulse: re-sealed %s for the current recipient list\n", vault)
 		return exitOK
 
 	case "encrypt", "decrypt":
@@ -383,20 +466,14 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "pulse vault %s: a .env path is required\n", cmd)
 			return exitUsage
 		}
-		key, err := application.VaultKey(*keyID, resolver)
-		if err != nil {
-			fmt.Fprintf(stderr, "pulse vault %s: %v\n", cmd, err)
-			return vaultExit(err)
-		}
-		defer clear(key)
 
 		if cmd == "encrypt" {
-			if err := application.VaultEncrypt(path, key); err != nil {
+			if err := application.VaultEncrypt(path, kid, *recipients, resolver); err != nil {
 				fmt.Fprintf(stderr, "pulse vault encrypt: %v\n", err)
 				return vaultExit(err)
 			}
 			_, vault := app.VaultPaths(path)
-			fmt.Fprintf(os.Stderr, "pulse: wrote %s and removed the plaintext\n", vault)
+			fmt.Fprintf(stderr, "pulse: wrote %s and removed the plaintext\n", vault)
 			return exitOK
 		}
 
@@ -404,12 +481,12 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 		if out == "" {
 			out = path
 		}
-		plain, err := application.VaultDecryptTo(path, out, key)
+		plain, err := application.VaultDecryptTo(path, out, kid, resolver)
 		if err != nil {
 			fmt.Fprintf(stderr, "pulse vault decrypt: %v\n", err)
 			return vaultExit(err)
 		}
-		fmt.Fprintf(os.Stderr, "pulse: wrote %s\n", plain)
+		fmt.Fprintf(stderr, "pulse: wrote %s\n", plain)
 		return exitOK
 
 	default:
@@ -428,6 +505,111 @@ func vaultExit(err error) int {
 		return exitSec
 	}
 	return exitFail
+}
+
+// ---- pulse sync ------------------------------------------------------------
+
+// runSync serves or inspects the P2P layer.
+//
+// `serve <dir>` boots the App with dir as the publish source and blocks
+// until SIGINT or stdin EOF: gossip rounds, dir re-convergence, and
+// snapshot persistence all run in the background while it waits. `status`
+// never joins the network — it reads the last persisted snapshot and
+// reports the digest, so convergence is proven by equal digests, not by
+// a connection count that flaps with the LAN.
+func runSync(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "pulse sync: serve <dir> or status is required")
+		return exitUsage
+	}
+	switch args[0] {
+	case "serve":
+		if len(args) < 2 || args[1] == "" {
+			fmt.Fprintln(stderr, "pulse sync serve: a collection directory is required")
+			return exitUsage
+		}
+		return runSyncServe(ctx, args[1], stdin, stderr)
+	case "status":
+		if len(args) > 1 {
+			fmt.Fprintf(stderr, "pulse: unexpected argument %q after `pulse sync status`\n", args[1])
+			return exitUsage
+		}
+		return runSyncStatus(ctx, stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "pulse sync: unknown subcommand %q\n", args[0])
+		return exitUsage
+	}
+}
+
+func runSyncServe(ctx context.Context, dir string, stdin io.Reader, stderr io.Writer) int {
+	cfg := appConfig()
+	cfg.SyncPublishDir = dir
+	application, err := app.New(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		return app.SecretExitCode(err)
+	}
+	if err := application.Boot(ctx); err != nil {
+		fmt.Fprintf(stderr, "pulse sync serve: boot: %v\n", err)
+		_ = application.Close()
+		return exitFail
+	}
+	sub := application.Sync()
+	if sub == nil {
+		// Serving without sync is a refusal, not a mode: every failure
+		// already degraded loudly into Degradations, and echoing them
+		// here tells the operator exactly what to fix.
+		for _, d := range application.Degradations {
+			fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
+		}
+		fmt.Fprintln(stderr, "pulse sync serve: sync did not boot; refusing to serve")
+		_ = application.Close()
+		return exitFail
+	}
+	fmt.Fprintf(stderr, "pulse: sync serving %s as %s\n", dir, sub.LiveSyncStatus().NodeID)
+
+	// Block until the operator stops us or stdin ends (piped stdin EOF is
+	// how a supervisor says goodbye). Either way the deferred Close
+	// persists the final snapshot and withdraws the advertisement.
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	go func() {
+		_, _ = io.Copy(io.Discard, stdin)
+		stop()
+	}()
+	<-sigCtx.Done()
+	if err := application.Close(); err != nil {
+		fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		return exitFail
+	}
+	return exitOK
+}
+
+func runSyncStatus(ctx context.Context, stdout, stderr io.Writer) int {
+	cfg := appConfig()
+	cfg.SkipSync = true // observe, never join: no ports, no announce
+	application, err := app.New(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		return app.SecretExitCode(err)
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		}
+	}()
+	st, err := application.SyncStatus(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse sync status: %v\n", err)
+		return exitFail
+	}
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse sync status: %v\n", err)
+		return exitFail
+	}
+	fmt.Fprintln(stdout, string(raw))
+	return exitOK
 }
 
 // ---- pulse mcp -------------------------------------------------------------
@@ -467,6 +649,10 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 	}()
 
+	if err := application.Boot(ctx); err != nil {
+		fmt.Fprintf(stderr, "pulse: boot: %v\n", err)
+		return exitFail
+	}
 	// Boot diagnostics go to stderr, and are summarised rather than dumped.
 	for _, d := range application.Degradations {
 		fmt.Fprintf(stderr, "pulse: degraded: %s\n", d)
@@ -503,6 +689,35 @@ func appConfig() app.Config {
 	}
 	if v := os.Getenv("PULSE_RAG_ROOT"); v != "" {
 		cfg.CorpusRoot = v
+	}
+	if v := os.Getenv("PULSE_SYNC_PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			mcp.Logf("PULSE_SYNC_PORT=%q is not an integer; the default port is used", v)
+		} else {
+			cfg.SyncPort = n
+		}
+	}
+	if v := os.Getenv("PULSE_SYNC_PEERS_FILE"); v != "" {
+		cfg.SyncPeersFile = v
+	}
+	// Manual backend (ROADMAP §4.2.3): "node=host:port,node=host:port".
+	// Malformed entries are reported and skipped, never fatal — and an
+	// address without a ledger pin is never dialed (the pin gate holds).
+	if v := os.Getenv("PULSE_SYNC_STATIC_PEERS"); v != "" {
+		peers := map[string]string{}
+		for _, e := range strings.Split(v, ",") {
+			node, addr, ok := strings.Cut(strings.TrimSpace(e), "=")
+			if !ok || node == "" || addr == "" {
+				mcp.Logf("PULSE_SYNC_STATIC_PEERS entry %q is not node=host:port; skipped", e)
+				continue
+			}
+			peers[node] = addr
+		}
+		cfg.SyncStaticPeers = peers
+	}
+	if v := os.Getenv("PULSE_SKIP_SYNC"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.SkipSync = true
 	}
 	if v := os.Getenv("PULSE_RAG_CONCURRENCY"); v != "" {
 		n, err := strconv.Atoi(v)

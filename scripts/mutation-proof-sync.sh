@@ -11,6 +11,17 @@
 #     adversarial unpinned peer connect, so the refusal gate must fail
 #     (red) — the connection succeeding IS the failure.
 #
+# Wave 8 adds two wiring mutants beside the domain pair:
+#
+#   * M93: the discovery channel-ownership fix is load-bearing. Closing
+#     out from the resolver goroutine while the pump still sends is the
+#     Stage-4 send-on-closed-channel panic; the fast-cancel gate must die
+#     on it (red). A panic counts as red here, not just --- FAIL.
+#   * M94: the readLoop TOFU-observability branch is load-bearing. A
+#     dialed peer dying pre-first-frame must be LOUD (the TLS 1.3 alert
+#     lands post-Dial-success); silencing it blinds the e2e C leg, and the
+#     white-box gate must fail (red).
+#
 # Unlike earlier census scripts this one MACHINE-CHECKS the red: a mutant
 # the gate does not catch exits nonzero ("survived") instead of printing
 # past it. Restore is from a cmp-verified backup — never `git checkout`,
@@ -25,7 +36,7 @@ BACKUP="${TMPDIR:-/tmp}/pulse-mut-sync"
 rm -rf "${BACKUP}"
 mkdir -p "${BACKUP}"
 
-FILES="internal/sync/crdt.go internal/sync/tls.go"
+FILES="internal/sync/crdt.go internal/sync/tls.go internal/sync/discovery.go internal/app/sync.go"
 for f in ${FILES}; do
     cp "${f}" "${BACKUP}/$(echo "${f}" | tr / _)"
 done
@@ -51,7 +62,7 @@ expect_red() {
     if CGO_ENABLED=0 go test -count=1 -timeout 120s "$@" 2>&1 | tee "${BACKUP}/out.txt" | grep -E -- '--- FAIL|^ok |^FAIL' | head -6; then
         true
     fi
-    if grep -q -- '--- FAIL' "${BACKUP}/out.txt"; then
+    if grep -q -- '--- FAIL' "${BACKUP}/out.txt" || grep -q -- '^panic: ' "${BACKUP}/out.txt"; then
         echo "MUTANT CAUGHT: ${label} went red as required"
     else
         echo "MUTANT SURVIVED: ${label} stayed green — the gate proves nothing"
@@ -61,9 +72,9 @@ expect_red() {
 }
 
 echo "############################################################"
-echo "# BASELINE (unmutated): the full sync suite is green"
+echo "# BASELINE (unmutated): the sync + app suites are green"
 echo "############################################################"
-CGO_ENABLED=0 go test -count=1 -timeout 120s ./internal/sync/ 2>&1 | tail -2
+CGO_ENABLED=0 go test -count=1 -timeout 120s ./internal/sync/ ./internal/app/ 2>&1 | tail -3
 echo
 
 echo "############################################################"
@@ -122,6 +133,50 @@ restore
 echo
 
 echo "############################################################"
+echo "# MUTATION 93: resolver goroutine closes out under a live pump"
+echo "############################################################"
+echo "# close(out) belongs strictly to the pump (sole producer). Closing it"
+echo "# from the resolver side reintroduces the Stage-4 race: under fast"
+echo "# cancel the pump sends on a closed channel and the runtime panics."
+python3 - <<'PY'
+p = 'internal/sync/discovery.go'
+s = open(p).read()
+before = s
+s = s.replace('''	go func() {
+		if err := resolver.Browse(bctx, ServiceName, ServiceDomain, entries); err != nil {''', '''	go func() {
+		// MUTANT-93: close from the wrong side. The pump still owns its
+		// sends, so fast cancel turns this into send-on-closed-channel.
+		defer close(out)
+		if err := resolver.Browse(bctx, ServiceName, ServiceDomain, entries); err != nil {''', 1)
+if s == before:
+    raise SystemExit('M93 PATTERN DID NOT MATCH')
+open(p, 'w').write(s)
+PY
+grep -q 'MUTANT-93' internal/sync/discovery.go || { echo "MUTATION NOT APPLIED"; restore; exit 1; }
+expect_red "M93 close(out) on resolver side" -run 'TestBrowseFastCancelNeverPanics' ./internal/sync/
+restore
+echo
+
+echo "############################################################"
+echo "# MUTATION 94: pre-first-frame death goes silent"
+echo "############################################################"
+echo "# Dropping the readLoop observability Logf blinds TOFU rejection: the"
+echo "# dial succeeded, the alert arrived on first Read, and nobody says so."
+python3 - <<'PY'
+p = 'internal/app/sync.go'
+s = open(p).read()
+before = s
+s = s.replace('''mcp.Logf("sync: dial %s: connection failed before first frame: %v", owner, err)''', '''/* MUTANT-94: silent rejection */ _ = err''', 1)
+if s == before:
+    raise SystemExit('M94 PATTERN DID NOT MATCH')
+open(p, 'w').write(s)
+PY
+grep -q 'MUTANT-94' internal/app/sync.go || { echo "MUTATION NOT APPLIED"; restore; exit 1; }
+expect_red "M94 silent pre-first-frame death" -run 'TestReadLoop' ./internal/app/
+restore
+echo
+
+echo "############################################################"
 echo "# RESTORED (cmp-verified) + GREEN re-run"
 echo "############################################################"
 for f in ${FILES}; do
@@ -132,4 +187,4 @@ for f in ${FILES}; do
         exit 1
     fi
 done
-CGO_ENABLED=0 go test -count=1 -timeout 120s ./internal/sync/ 2>&1 | tail -2
+CGO_ENABLED=0 go test -count=1 -timeout 120s ./internal/sync/ ./internal/app/ 2>&1 | tail -3

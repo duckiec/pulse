@@ -86,3 +86,16 @@ opencode.json
 # HANDOFF.md and anything like it: working notes for one session, never state.
 # A handoff should POINT at TASKS.md or MEMORY.md, both of which are tracked.
 /HANDOFF.md
+
+# --- runtime + E2E artifacts (never committed) ---
+# The bare-metal crucible (e2e/) compiles the binary and runs real workspaces
+# under t.TempDir(), so these should never appear — the rules below are the
+# backstop so a stray artifact can never pollute git status. No tracked file
+# matches any of them (verified with git ls-files); SQLite and vault
+# containers are runtime state, and the store must stay secret-free (§3.4).
+.e2e-tmp/
+e2e/bin/
+*.db
+*.db-wal
+*.db-shm
+*.vault
