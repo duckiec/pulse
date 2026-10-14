@@ -1094,11 +1094,28 @@ gate caught it: a function that wipes what it was handed cannot be composed.
 Zeroisation belongs to the caller, and the file path applies it to the buffer it
 allocated itself — which is also why `vault encrypt` REMOVES the plaintext file.
 
+### 16.3b The PVLT2 recipient model (ADL-0031)
+
+```
+"PVLT2" | flags u8 | count u16 | per slot: ephPub[32] | wrappedDEK[48] |
+signerPub[32] | pNonce[12] | gcm.Seal(DEK, ...) = ciphertext || tag[16] | sig[64]
+```
+
+Hybrid: a fresh 32B DEK per seal encrypts the payload; each slot wraps it
+under HKDF-SHA256(ECDH(eph, recipient), salt=ephPub, info=`pulse-vault-v1`)
+with a zero wrap nonce (single-use key — the age rule). Ed25519 signs every
+prior byte and is verified BEFORE any slot is attempted. Slot matching is
+authentication-based (trial-unwrap; first slot that verifies wins) with one
+identical `ErrNoRecipient` for all membership failures — no oracle. Device
+identity is X25519 (decrypt) + Ed25519 (sign) halves in namespaced keychain
+accounts; `pulse vault keygen` prints `pulse-pub-…` / `pulse-sig-…`.
+Rotation/revocation is re-sealing over a new list (no separate path to
+drift); PVLT1 still opens (magic mismatch keeps the versions apart).
+
 ### 16.4 Not built
 
-The recipient model (X25519 + HKDF + Ed25519, §4.3.1) is not built: one key, one
-container, no recipient list, so rotation means "change the key" rather than
-"re-wrap for a new recipient set". No `*.vault` resolution at request time.
+`vault rotate` CLI + `pulse.recipients` file flow, and `*.vault` resolution
+at request time (P4.1c.9 — now unblocked, builds against PVLT2).
 `pulse test --format json` / `--silent` (ADL-0027) and the SIGINT plan tail
 with exit 130 (ADL-0028) are built. The three real keychain
 write backends (darwin `security`, windows `CredWriteW`, linux Secret Service)

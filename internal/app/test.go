@@ -377,6 +377,41 @@ func (a *App) VaultInit(keyID string, store secrets.SecretStore) (string, error)
 	return account, nil
 }
 
+// VaultKeygen generates a device identity (X25519 decryption + Ed25519
+// signing halves), stores both private halves in the OS keychain, and
+// returns the shareable public encodings (`pulse-pub-...`, `pulse-sig-...`).
+//
+// The public halves are returned, never stored: they are designed to be
+// pasted into a recipient list, and storing them would confuse "who can
+// decrypt" (the list) with "who am I" (the keychain). Like VaultInit, the
+// private material is zeroised locally the moment the keychain holds it.
+func (a *App) VaultKeygen(keyID string, store secrets.SecretStore) (decryptPub, signPub string, err error) {
+	if store == nil {
+		return "", "", &VaultError{Kind: VaultErrNoStore, msg: "no keychain write path"}
+	}
+	if err := store.Available(); err != nil {
+		return "", "", &VaultError{Kind: VaultErrNoStore, msg: err.Error(), err: err}
+	}
+	id, err := secrets.GenerateIdentity()
+	if err != nil {
+		return "", "", err
+	}
+	defer clear(id.X25519Priv)
+	defer clear(id.Ed25519Seed)
+	if err := secrets.StoreIdentity(keyID, id, store); err != nil {
+		return "", "", &VaultError{Kind: VaultErrStore, msg: err.Error(), err: err}
+	}
+	xpub, err := id.X25519Pub()
+	if err != nil {
+		return "", "", err
+	}
+	spub, err := id.Ed25519Pub()
+	if err != nil {
+		return "", "", err
+	}
+	return secrets.EncodePub(secrets.IdentityPubPrefix, xpub), secrets.EncodePub(secrets.IdentitySigPrefix, spub), nil
+}
+
 // VaultKey reads the vault key back out of the keychain.
 //
 // It takes a secrets.SecretResolver rather than a SecretStore, because the two

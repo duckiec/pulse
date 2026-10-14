@@ -1841,6 +1841,60 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0031 — PVLT2 hybrid recipient model: X25519 ECDH + HKDF wrap + Ed25519 sign-then-verify
+
+- **Date:** 2026-10-13
+- **Status:** ACCEPTED
+- **Context:** PVLT1 is one key, one container (ADL-0025/0029): rotation means
+  "change the key", which does not help a revoked holder of the old one.
+  ROADMAP §4.3.1 contracts the recipient model (X25519, HKDF, Ed25519), and
+  HANDOFF §4 sequences it BEFORE vault resolution (P4.1c.9) so resolution is
+  built against the multi-recipient shape, not reworked after it.
+- **Decision:**
+  - Device identity is TWO keypairs with separated roles: X25519
+    (`crypto/ecdh`) decrypts slots, Ed25519 signs containers; neither does
+    the other's job. `pulse vault keygen` generates both from `crypto/rand`,
+    stores privs under `vault:x25519:<id>` / `vault:ed25519:<id>` (never
+    colliding with PVLT1's `vault:<id>`), and prints `pulse-pub-…` /
+    `pulse-sig-…` (base64, prefix = role check at parse time).
+  - Container `PVLT2` (magic differs from PVLT1 on purpose: versions never
+    parse each other): flags, u16 count (1..64), per slot `ephPub[32] |
+    wrappedDEK[48]`, signerPub, fresh payload nonce, GCM ciphertext+tag,
+    64B Ed25519 signature over all prior bytes. Wrap = HKDF-SHA256(share,
+    salt=ephPub, info=`pulse-vault-v1`) per §4.3.2, zero wrap nonce (key is
+    single-use per fresh ephemeral — the age rule). No KDF on anything else;
+    no third-party crypto (stdlib has no `crypto/hkdf`; the 30-line RFC 5869
+    construction from `crypto/hmac`+`crypto/sha256` is hand-built and named).
+  - Slot matching is AUTHENTICATION-based (trial-unwrap; first slot that
+    verifies is the match), not a stored-identity column — §4.3.3's "slot
+    matching the local key" read honestly. A stored identity would refuse
+    Eve pre-crypto and make M75 go GREEN; trial-unwrap keeps the mutation
+    load-bearing while leaking nothing (identical `ErrNoRecipient` for every
+    failure shape). Recorded here so it is not "simplified" later.
+  - Verify-before-decrypt is unconditional: forged containers are refused at
+    `ErrBadSignature` with valid slots and valid recipient keys (gated).
+    Rotation/revocation need no separate path: re-`Seal2` over a new list
+    with a fresh DEK IS both (old containers stay readable — the documented
+    threat model); `vault rotate` CLI remains a remainder.
+  - Mutation pool: M75 (static wrap secret — Eve reads the team payload,
+    gate prints the leaked bytes), M76 (unwrap-failure returns slot bytes —
+    Bob gets garbage, Eve gets bytes with nil error, tamper matrix's
+    unknown-device case fires independently). Proven in
+    `scripts/mutation-proof-pvlt2.sh`, cmp-verified restores.
+  - `ARCHITECTURE.md` §16.3/§16.4 and `ROADMAP.md` §4.3.1/§4.3.4 statuses
+    updated same-commit; no topology moved (new files inside existing
+    packages; no new dependencies — `go mod tidy` no-op).
+- **Consequences:** PVLT1 keeps working (v1 opener refuses v2 by magic).
+  Still open, in order: `vault rotate` CLI + `pulse.recipients` file flow
+  (§4.3.2/§4.3.4), P4.1c.9 vault resolution against PVLT2 (now unblocked),
+  G-secret repo scan gate. Keychain write backends still BLOCKED here.
+- **Refs:** internal/secrets/identity.go, pvlt2.go, pvlt2_test.go (swarm,
+  tamper, ordering, rotation, keygen gates); internal/app/test.go
+  (`VaultKeygen`); cmd/pulse/main.go (`vault keygen`);
+  scripts/mutation-proof-pvlt2.sh (M75–M76); TASKS.md P4.1c.12.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown

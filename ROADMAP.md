@@ -1992,6 +1992,17 @@ never leave their OS keychains.
   `TestOpenRefusesTamperedContainers` (7 cases: every field flipped, truncated,
   wrong key).
   Mutations M61 (a hardcoded nonce) and M62 (the authentication tag dropped) red.
+- **CRYPTO CORE SHIPPED (ADL-0031).** `internal/secrets/pvlt2.go` implements
+  the hybrid recipient model: fresh DEK + payload nonce + per-slot ephemeral
+  per seal; ECDH → HKDF-SHA256(salt=ephPub, info=`pulse-vault-v1`) wrap with
+  zero nonce; `PVLT2` layout with per-slot `ephPub | wrappedDEK`, signer key,
+  nonce, ciphertext+tag, and a 64B Ed25519 signature verified BEFORE any
+  unwrap. Slot matching is authentication-based (trial-unwrap). Device
+  identity (`identity.go`: X25519 + Ed25519 halves, namespaced keychain
+  accounts, `pulse-pub-…`/`pulse-sig-…`) and `pulse vault keygen` are wired.
+  Gates: 3-key swarm, 12-region tamper matrix, verify-before-decrypt
+  ordering, rotation/revocation via re-seal. Mutations M75/M76 red. REMAINS:
+  `vault rotate` CLI + `pulse.recipients` flow, and resolution (§4.3.3).
   NOT met: multi-recipient round-trip, the per-field tamper MATRIX as specified
   (each region and each byte class), and a golden-bytes test for the container
   format.
@@ -2053,6 +2064,10 @@ never leave their OS keychains.
 - **Verify:** Rotation fixture: post-rotation, revoked recipient fails
   (`ErrNoRecipient`), authorized recipients succeed; rotation is idempotent on
   byte-identical inputs except nonce/signature fields.
+- **PRIMITIVE SHIPPED (ADL-0031).** Re-`Seal2` over a new recipient list with
+  a fresh DEK is rotation and revocation; `TestRotationAndRevocation` proves
+  it (revoked key absent from the new container, old containers still open).
+  REMAINS: the `vault rotate` CLI command and the `pulse.recipients` file.
 
 ## 4.4 Goal 4 Exit Gates
 

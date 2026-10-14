@@ -214,6 +214,7 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: pulse vault init [--key-id ID]")
+		fmt.Fprintln(stderr, "       pulse vault keygen [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse vault encrypt <path.env> [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse vault decrypt <path.env.vault> [--key-id ID] [--out PATH]")
 		fs.PrintDefaults()
@@ -223,7 +224,7 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	cmd := fs.Arg(0)
 	if cmd == "" {
-		fmt.Fprintln(stderr, "pulse vault: init, encrypt or decrypt is required")
+		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt or decrypt is required")
 		return exitUsage
 	}
 
@@ -249,6 +250,20 @@ func runVault(ctx context.Context, args []string, stderr io.Writer) int {
 			return vaultExit(err)
 		}
 		fmt.Fprintf(os.Stderr, "pulse: vault key stored in the keychain as %q\n", account)
+		return exitOK
+
+	case "keygen":
+		decryptPub, signPub, err := application.VaultKeygen(*keyID, store)
+		if err != nil {
+			fmt.Fprintf(stderr, "pulse vault keygen: %v\n", err)
+			return vaultExit(err)
+		}
+		// Shareable output goes to stdout: `vault keygen` is a single-shot
+		// command like `vault init`, never an MCP-serving path, so there is
+		// no JSON-RPC stream to corrupt — and the public halves are designed
+		// to be copied, which stderr would discourage.
+		fmt.Fprintln(os.Stdout, decryptPub)
+		fmt.Fprintln(os.Stdout, signPub)
 		return exitOK
 
 	case "encrypt", "decrypt":

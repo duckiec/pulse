@@ -17,6 +17,7 @@ import (
 
 	"pulse/internal/app"
 	"pulse/internal/engine"
+	"pulse/internal/secrets"
 )
 
 func statusServer(status int) (*httptest.Server, func()) {
@@ -576,6 +577,49 @@ func TestInterruptedRunExitsOneThirtyAndRendersPartialDocuments(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("silent interrupted run wrote %d bytes, want zero", out.Len())
+	}
+}
+
+// TestVaultKeygenReturnsShareablePubs drives keygen through the App against
+// an in-memory keychain: both private halves land under their namespaced
+// accounts, the returned pubs parse back to 32-byte keys with roles enforced,
+// and a failing store fails closed without pubs.
+func TestVaultKeygenReturnsShareablePubs(t *testing.T) {
+	store := secrets.NewMemoryStore()
+	decryptPub, signPub, err := newTestApp(t).VaultKeygen("test", store)
+	if err != nil {
+		t.Fatalf("VaultKeygen: %v", err)
+	}
+	if !strings.HasPrefix(decryptPub, "pulse-pub-") || !strings.HasPrefix(signPub, "pulse-sig-") {
+		t.Fatalf("pubs = %q, %q; want pulse-pub-... / pulse-sig-...", decryptPub, signPub)
+	}
+	if _, err := secrets.DecodePub(secrets.IdentityPubPrefix, decryptPub); err != nil {
+		t.Errorf("decrypt pub does not parse: %v", err)
+	}
+	if _, err := secrets.DecodePub(secrets.IdentitySigPrefix, signPub); err != nil {
+		t.Errorf("sign pub does not parse: %v", err)
+	}
+	// Both private halves are in the keychain under colliding-free accounts.
+	for _, acct := range []string{secrets.IdentityAccount("x25519", "test"), secrets.IdentityAccount("ed25519", "test")} {
+		if _, err := store.Resolve(acct); err != nil {
+			t.Errorf("keychain holds no %q: %v", acct, err)
+		}
+	}
+	if _, err := store.Resolve(secrets.VaultAccount("test")); err == nil {
+		t.Error("keygen wrote the PVLT1 symmetric account; the namespaces must not collide")
+	}
+	// Round trip: what the keychain holds reconstructs the advertised pubs.
+	back, err := secrets.LoadIdentity("test", store)
+	if err != nil {
+		t.Fatalf("LoadIdentity: %v", err)
+	}
+	xpub, _ := back.X25519Pub()
+	if got := secrets.EncodePub(secrets.IdentityPubPrefix, xpub); got != decryptPub {
+		t.Errorf("reconstructed decrypt pub = %q, want %q", got, decryptPub)
+	}
+
+	if _, _, err := newTestApp(t).VaultKeygen("x", nil); err == nil {
+		t.Error("VaultKeygen with a nil store succeeded")
 	}
 }
 
