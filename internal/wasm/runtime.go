@@ -167,11 +167,11 @@ type Config struct {
 	// MemoryPages caps linear memory. Zero selects DefaultMemoryPages.
 	MemoryPages uint32
 
-	// Resolver (or SecretResolver) optionally enables the zero-trust host
-	// functions in internal/wasm/host.go. Nil leaves the sandbox with no host
-	// imports at all.
-	Resolver        SecretResolver
-	SecretResolver  SecretResolver
+	// Resolver optionally enables the zero-trust host functions in
+	// internal/wasm/host.go. Nil leaves the sandbox with no host imports at
+	// all (the Move 11 default-deny posture, gated by
+	// TestHostFunctionIsRegistered).
+	Resolver SecretResolver
 }
 
 // Module is an instantiated guest.
@@ -272,11 +272,7 @@ func New(ctx context.Context, cfg Config) (*Module, error) {
 	spent := &atomic.Uint64{}
 	base = experimental.WithFunctionListenerFactory(base, newFuelListener(spent, fuel, cancelBase))
 
-	resolver := cfg.Resolver
-	if resolver == nil {
-		resolver = cfg.SecretResolver
-	}
-	if resolver != nil {
+	if resolver := cfg.Resolver; resolver != nil {
 		hostFn := newHMACHostFunc(resolver)
 		if _, err := rt.NewHostModuleBuilder(HostModuleName).
 			NewFunctionBuilder().
@@ -291,10 +287,13 @@ func New(ctx context.Context, cfg Config) (*Module, error) {
 			return nil, fmt.Errorf("wasm: instantiate host module: %w", err)
 		}
 	}
-	// No host modules are instantiated, so ANY import the guest declares fails
-	// to resolve and the module refuses to instantiate. This is the structural
-	// denial of the filesystem, the network, the clock, randomness and WASI:
-	// each is reachable only through an import, and there is nothing to import.
+	// No OTHER host modules are instantiated: with a nil Resolver this block
+	// above runs zero times and ANY import the guest declares fails to resolve
+	// (the Move 11 default-deny posture). With a Resolver, exactly one host
+	// module exists — pulse/env with hmac_sha256, which returns a digest, never
+	// key material. The filesystem, network, clock, randomness and WASI stay
+	// structurally denied: each is reachable only through an import, and there
+	// is nothing else to import.
 	//
 	// Deliberately NOT set on the module:
 	//   WithEnv               — no environment variables.

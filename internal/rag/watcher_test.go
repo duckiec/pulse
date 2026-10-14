@@ -2,7 +2,6 @@ package rag
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,7 +88,6 @@ func TestReaperGate(t *testing.T) {
 	if stats.Chunks != 0 {
 		t.Fatalf("reaper failed: %d chunks remain", stats.Chunks)
 	}
-	_ = fmt.Sprintf
 }
 
 func TestIncrementalReindex(t *testing.T) {

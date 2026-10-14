@@ -592,3 +592,63 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// TestFuzzProgressStreamsEveryPayload gates the live-progress seam (Move 15):
+// with a Progress callback installed, every dispatched payload produces
+// exactly one event, indices stay inside the run, and the event verdicts sum
+// to the outcome counts. A hook that drops, duplicates, or mislabels events
+// would drive a live UI to disagree with the final report.
+func TestFuzzProgressStreamsEveryPayload(t *testing.T) {
+	runner := &stubRunner{statusFor: func(string) int { return 200 }}
+	var mu sync.Mutex
+	var events []fuzz.Progress
+	out, err := ExecuteFuzz(context.Background(), FuzzOptions{
+		SchemaPath:  writeFuzzSchema(t),
+		Target:      "http://127.0.0.1:1",
+		Seed:        7,
+		Budget:      25,
+		Rate:        5000,
+		Concurrency: 4,
+		Progress: func(p fuzz.Progress) {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, p)
+		},
+	}, runner, nil)
+	if err != nil {
+		t.Fatalf("ExecuteFuzz: %v", err)
+	}
+	if len(events) != runner.count() {
+		t.Fatalf("progress events = %d, payloads dispatched = %d; the live stream must mirror the run exactly",
+			len(events), runner.count())
+	}
+	var passed, failed, skipped int
+	for _, e := range events {
+		if e.Total != len(events) {
+			t.Fatalf("event Total = %d, want %d (every event describes the same run)", e.Total, len(events))
+		}
+		if e.Index < 0 || e.Index >= len(events) {
+			t.Errorf("event Index = %d out of range", e.Index)
+		}
+		verdicts := 0
+		if e.Passed {
+			verdicts++
+			passed++
+		}
+		if e.Failed {
+			verdicts++
+			failed++
+		}
+		if e.Skipped {
+			verdicts++
+			skipped++
+		}
+		if verdicts != 1 {
+			t.Errorf("event %+v carries %d verdicts, want exactly one", e, verdicts)
+		}
+	}
+	if passed != out.Passed || failed != out.Failed || skipped != out.Skipped {
+		t.Errorf("streamed (passed=%d failed=%d skipped=%d) != outcome (passed=%d failed=%d skipped=%d)",
+			passed, failed, skipped, out.Passed, out.Failed, out.Skipped)
+	}
+}

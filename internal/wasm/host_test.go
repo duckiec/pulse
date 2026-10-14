@@ -24,9 +24,9 @@ func hmacGuest() []byte {
 	w := newWasm()
 	w.types(
 		funcType([]byte{typeI32, typeI32, typeI32, typeI32, typeI32, typeI32}, []byte{typeI32}), // host hmac
-		funcType([]byte{typeI32}, []byte{typeI32}),          // allocate
-		funcType([]byte{typeI32, typeI32}, []byte{typeI32}), // sign_request
-		funcType(nil, []byte{typeI32}),                      // run
+		funcType([]byte{typeI32}, []byte{typeI32}),                                              // allocate
+		funcType([]byte{typeI32, typeI32}, []byte{typeI32}),                                     // sign_request
+		funcType(nil, []byte{typeI32}),                                                          // run
 	)
 	w.importSection(importEntry(HostModuleName, HostFuncHMACSHA256, 0))
 	w.funcs(1, 2, 3)
@@ -44,8 +44,8 @@ func hmacGuest() []byte {
 
 	// run(): push the six i32 arguments, call the import, return its result.
 	body := []byte{
-		opI32Const, 0,   // key_ptr
-		opI32Const, 7,   // key_len (key-id is "key-id\0"? no, "key-id" = 6? adjust below)
+		opI32Const, 0, // key_ptr
+		opI32Const, 7, // key_len (key-id is "key-id\0"? no, "key-id" = 6? adjust below)
 	}
 	// We instead write the key id bytes and pass its true length from Go via
 	// constants fixed here: "key-1" is 5 bytes. Rebuild constants correctly.
@@ -74,9 +74,9 @@ func TestZeroTrustHostGate(t *testing.T) {
 	const keyID = "key-1"
 
 	m := newModule(t, Config{
-		Wasm:            hmacGuest(),
-		Resolver:        stubResolver{secret: secret},
-		Name:            "host-hmac-guest",
+		Wasm:     hmacGuest(),
+		Resolver: stubResolver{secret: secret},
+		Name:     "host-hmac-guest",
 	})
 
 	mem := m.Memory()

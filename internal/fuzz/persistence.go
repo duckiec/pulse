@@ -73,5 +73,3 @@ func PersistFindings(ctx context.Context, st FindingStore, opID string, findings
 	}
 	return nil
 }
-
-var _ = context.Background

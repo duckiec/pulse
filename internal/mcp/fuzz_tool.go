@@ -148,6 +148,10 @@ func ValidateFuzzOptions(in FuzzOptions) (FuzzOptions, error) {
 		conc = MaxFuzzConcurrency
 	}
 	out.Concurrency = conc
+	// The progress callback is caller-owned infrastructure, not a value to
+	// validate: dropping it here would silently disable live streaming for
+	// every validated run (caught by TestFuzzProgressStreamsEveryPayload).
+	out.Progress = in.Progress
 	return out, nil
 }
 
@@ -312,15 +316,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			res.OK = true
 			res.Description += " (not run: " + err.Error() + ")"
 			results[i] = res
-		if opts.Progress != nil {
-			opts.Progress(fuzz.Progress{
-				Index:   p.Index,
-				Total:   len(payloads),
-				Passed:  res.OK && !res.Skip,
-				Failed:  !res.OK && !res.Skip,
-				Skipped: res.Skip,
-			})
-		}
+			if opts.Progress != nil {
+				opts.Progress(fuzz.Progress{
+					Index:   p.Index,
+					Total:   len(payloads),
+					Passed:  res.OK && !res.Skip,
+					Failed:  !res.OK && !res.Skip,
+					Skipped: res.Skip,
+				})
+			}
 			continue
 		}
 
@@ -329,15 +333,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			res.OK = true
 			res.Description += " (not run: " + err.Error() + ")"
 			results[i] = res
-		if opts.Progress != nil {
-			opts.Progress(fuzz.Progress{
-				Index:   p.Index,
-				Total:   len(payloads),
-				Passed:  res.OK && !res.Skip,
-				Failed:  !res.OK && !res.Skip,
-				Skipped: res.Skip,
-			})
-		}
+			if opts.Progress != nil {
+				opts.Progress(fuzz.Progress{
+					Index:   p.Index,
+					Total:   len(payloads),
+					Passed:  res.OK && !res.Skip,
+					Failed:  !res.OK && !res.Skip,
+					Skipped: res.Skip,
+				})
+			}
 			continue
 		}
 
@@ -365,15 +369,15 @@ func ExecuteFuzz(ctx context.Context, opts FuzzOptions, runner FuzzRunner, red R
 			res.OK = true
 			res.Description += " (not run: " + runErr.Error() + ")"
 			results[i] = res
-		if opts.Progress != nil {
-			opts.Progress(fuzz.Progress{
-				Index:   p.Index,
-				Total:   len(payloads),
-				Passed:  res.OK && !res.Skip,
-				Failed:  !res.OK && !res.Skip,
-				Skipped: res.Skip,
-			})
-		}
+			if opts.Progress != nil {
+				opts.Progress(fuzz.Progress{
+					Index:   p.Index,
+					Total:   len(payloads),
+					Passed:  res.OK && !res.Skip,
+					Failed:  !res.OK && !res.Skip,
+					Skipped: res.Skip,
+				})
+			}
 			continue
 		}
 

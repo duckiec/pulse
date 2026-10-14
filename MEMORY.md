@@ -2029,6 +2029,37 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0035 — Move 15 verification repair: Progress validation strip, wasm config merge, independent M81/M82 reproduction
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Move 15 was executed by a delegated agent (OpenCode) and
+  pushed as 555abdd. The final completion check re-verified every claim
+  instead of trusting the transcript, and found four defects: (1) the new
+  `FuzzOptions.Progress` callback never fired — `ValidateFuzzOptions`
+  rebuilds the struct field-by-field and dropped it, so 25 dispatches
+  produced 0 events; (2) `wasm.Config` carried two identical resolver fields
+  (`Resolver` + `SecretResolver`) with fallback logic; (3) four files were
+  unformatted and `fsnotify` sat under `// indirect`; (4) no durable
+  mutation script existed for M81/M82, only prose in a log.
+- **Decision:** carry `out.Progress = in.Progress` (a caller-owned callback
+  is not a value to validate); merge to one `Resolver` field and correct the
+  now-conditional "no host modules" comment; gofmt + `go mod tidy`;
+  `TestFuzzProgressStreamsEveryPayload` (one event per payload, exactly one
+  verdict each, sums equal the outcome); `scripts/mutation-proof-move15.sh`
+  with independent M81 red (`host returned [21], want 32` — the leak even
+  announces its 21-byte size) and M82 red (`after reap: 1 chunks`) before
+  restore-to-green. Full suite 11/11 packages green, all-gates PASS.
+- **Consequences:** The Progress seam is gated against future validators
+  that rebuild the struct; the mutation evidence no longer depends on an
+  agent's log surviving. No product behavior changed beyond the callback
+  actually firing.
+- **Refs:** `internal/mcp/fuzz_tool.go`, `internal/mcp/fuzz_test.go`;
+  `internal/wasm/runtime.go`; `scripts/mutation-proof-move15.sh`; TASKS.md
+  P3.3a.10/P3.4.6.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown
