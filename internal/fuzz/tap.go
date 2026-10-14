@@ -118,8 +118,9 @@ func Render(results []Result) string {
 	var b strings.Builder
 	b.WriteString("TAP version " + strconv.Itoa(TAPVersion) + "\n")
 
-	// The plan is emitted BEFORE the results, as TAP 13 permits and as a
-	// streaming consumer prefers: a reader learns the total immediately.
+	// The plan is emitted AFTER the results, as TAP 13 permits: the total
+	// is not known until every result has rendered, and a plan written
+	// from a different count than the result lines would hang a consumer.
 	if len(ordered) == 0 {
 		// An empty plan is written as `1..0`, the TAP spelling for zero tests.
 		b.WriteString("1..0\n")

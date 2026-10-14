@@ -1985,6 +1985,10 @@ are corrected in place; nothing under 4.1 remains open.
 - **Challenge:** Discovery on hostile LANs must not become an attack surface: the
   mTLS + TOFU pinning means a discovered-but-unpinned peer is *discovered only for
   display*, never synced with until the user pins it explicitly.
+- **Status (Wave 8, ADL-0044): WIRED.** `internal/app/sync.go` binds the domain
+  into Boot/Close: device identity → node id, App redactor → CRDT scanner via
+  `Redactor.Contains`, ledger → dial policy, announcer/browser/engine →
+  lifecycle. Every failure degrades into `Degradations`, never fails Boot.
 - **Verify:** Two-process sync test on loopback (zeroconf on localhost); unpinned-
   peer refusal test; pinning flow test (pin → sync → unpin → refuse again).
 

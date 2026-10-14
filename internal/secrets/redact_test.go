@@ -463,3 +463,27 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// TestRedactorContainsIsASideEffectFreeProbe gates the sync filter's
+// boolean leg: Contains answers without booking a scrub metric, so
+// gossip-time scanning does not drown Scrubbed.
+func TestRedactorContainsIsASideEffectFreeProbe(t *testing.T) {
+	r := secrets.NewRedactor()
+	r.Register("vault-token-abc123")
+	if !r.Contains("prefix vault-token-abc123 suffix") {
+		t.Error("Contains missed a registered secret")
+	}
+	if r.Contains("nothing sensitive here") {
+		t.Error("Contains fired on clean input")
+	}
+	if r.Contains("") {
+		t.Error("Contains fired on empty input")
+	}
+	var nilR *secrets.Redactor
+	if nilR.Contains("vault-token-abc123") {
+		t.Error("nil Contains fired")
+	}
+	if got := r.Scrubbed(); got != 0 {
+		t.Errorf("probing booked %d scrubs, want zero side effects", got)
+	}
+}

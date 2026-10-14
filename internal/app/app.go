@@ -119,6 +119,18 @@ type Config struct {
 	// identity; production never sets this — the platform backend is the
 	// only reader the vault tier may load a device key through.
 	Backend secrets.SecretResolver
+	// SyncPort is the P2P sync listen/advertise port. Zero selects
+	// DefaultSyncPort; a negative value listens on an ephemeral :0
+	// (tests). The bound port is read back onto the subsystem either way.
+	SyncPort int
+	// SyncPeersFile is the TOFU ledger path. Empty selects
+	// DefaultPeersFile ("config/peers.txt"). A missing file degrades
+	// to announce-only; a malformed one degrades to refuse-all.
+	SyncPeersFile string
+	// SkipSync disables P2P sync entirely. Tests set it; production
+	// boots sync and degrades loudly when the network, the ledger, or
+	// the identity is unavailable.
+	SkipSync bool
 }
 
 // Defaults chosen so that an agent can launch `pulse mcp` and get a working
@@ -188,6 +200,15 @@ type App struct {
 	// no corpus is configured. Started by StartWatcherIfConfigured, stopped
 	// deterministically by Close before the store closes.
 	Watcher *rag.Watcher
+	// syncSub is the live P2P subsystem (Wave 8). Nil when SkipSync is
+	// set or boot degraded past usefulness. Read via Sync(); torn down
+	// by Close before secret tiers are scrubbed.
+	syncSub *SyncSubsystem
+	// keyBackend is the shared keychain backend the chain resolves
+	// through. Stored (not rebuilt) so the sync identity load asks the
+	// same backend the same question the chain would — two backends
+	// could disagree about which device this is.
+	keyBackend secrets.SecretResolver
 
 	// Degradations are conditions the app booted with and could not resolve.
 	// They are REPORTED, never hidden: an agent that is told the index is empty
@@ -246,6 +267,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		_ = a.Close()
 		return nil, err
 	}
+	// Sync never fails Boot: bootSync degrades internally (offline, no
+	// ledger, no identity) and records why in Degradations.
+	a.bootSync()
 	return a, nil
 }
 
@@ -327,12 +351,14 @@ func (a *App) openSecrets() error {
 	}
 
 	// The backend is constructed once and shared: the chain resolves through
-	// it and the vault tier loads the device identity through it. Two
-	// backends would probe the keychain twice and could disagree.
+	// it, the vault tier loads the device identity through it, and the sync
+	// subsystem derives its node id through it. Two backends would probe the
+	// keychain twice and could disagree about which device this is.
 	backend := a.cfg.Backend
 	if backend == nil {
 		backend = secrets.NewBackend()
 	}
+	a.keyBackend = backend
 	chainOpts := []secrets.ChainOption{secrets.WithRedactor(red), secrets.WithBackend(backend)}
 	if env != nil {
 		chainOpts = append(chainOpts, secrets.WithEnv(env))
@@ -553,7 +579,10 @@ func (a *App) Config() Config { return a.cfg }
 //  2. stop the RAG watcher and WAIT for its goroutine to exit before the
 //     store closes, so a final upsert cannot race the SQLite close (Audit
 //     1C, P4.1b.11);
-//  3. close the store, which is the only resource with an OS handle that
+//  3. shut sync down (withdraw the advertisement, close the listener and
+//     every peer connection, drain the loops) so no gossip frame is in
+//     flight when secret tiers are scrubbed;
+//  4. close the store, which is the only resource with an OS handle that
 //     survives the process if it leaks.
 //
 // It is idempotent. A deferred Close and an explicit one from a signal handler
@@ -575,6 +604,10 @@ func (a *App) Close() error {
 			a.Watcher.Wait()
 			a.Watcher = nil
 		}
+		// Sync next: withdraw the advertisement, close the listener and
+		// every peer connection, and wait for the loops to exit — so no
+		// gossip frame is in flight when secret tiers are scrubbed below.
+		a.closeSync()
 		// Scrub the ephemeral secret tiers (explicit .env AND the decrypted
 		// vault payload) before releasing anything else: in-flight work was
 		// already cancelled above, so no new resolution can observe the

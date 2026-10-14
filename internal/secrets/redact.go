@@ -106,6 +106,27 @@ func (r *Redactor) Register(secret string) {
 	})
 }
 
+// Contains reports whether s holds any registered secret. It is the boolean
+// probe behind sync's pre-merge/pre-egress filter: String would also answer
+// (a scrubbed output differs from its input), but String books a scrubbed
+// metric per call, and a filter that scans every gossip field would drown
+// the counter that measures real scrubbing. Contains is side-effect free.
+func (r *Redactor) Contains(s string) bool {
+	if r == nil || s == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, secret := range r.values {
+		// Convert the small secret, not the haystack: []byte(s) would
+		// copy every gossip field on every scan, the String() idiom.
+		if strings.Contains(s, string(secret)) {
+			return true
+		}
+	}
+	return false
+}
+
 // Dropped reports how many registrations the memory cap refused.
 func (r *Redactor) Dropped() int {
 	r.mu.RLock()

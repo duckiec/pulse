@@ -2148,6 +2148,17 @@ complete (AGENTS.md §4.7).
 
 ---
 
+### ADL-0044 — Wave 8: sync wired into the composition root; three interrupted-session defects repaired
+
+- **Date:** 2026-10-14
+- **Status:** ACCEPTED
+- **Context:** Wave 7 (ADL-0043) built `internal/sync` deliberately unwired; Issue #11 is the wiring wave. The session was interrupted twice mid-flight, leaving `internal/app/sync.go` + `sync_test.go` half-written (dead code, comments describing nonexistent checks, a dead `:0` path) plus small edits to `app.go`/`redact.go` already in the tree. Prior sessions' todos named the remainder: wire sync into Boot/Close, hermetic ports, doc sync, commit.
+- **Decision:** (1) `internal/app/sync.go`: `bootSync` binds device identity (loaded through the SAME keychain backend the chain resolves through) → node id, App redactor → CRDT scanner, ledger → dial policy, announcer/browser/listener/engine → Boot; `closeSync` withdraws, disconnects, drains before secret tiers are scrubbed. Every failure degrades into `Degradations`, never fails Boot; `SkipSync` is silent intent. `SyncPort < 0` listens on ephemeral `:0` (the old `:0 (tests)` read-back was dead — `port <= 0` mapped to the default before listen). (2) `Redactor.Contains`: side-effect-free boolean probe (a gossip filter through `String` would book a scrub metric per field and drown `Scrubbed`), scanning with the `String()` idiom (`string(secret)`, not `[]byte(s)`). (3) Repairs, all gate-pinned: removed the dead `expected` dial map (written once, never read — the owner-param check in `readLoop` IS the anti-spoof mechanism, comments now say so); `os.IsNotExist` does not unwrap `%w` chains, so every absent ledger was misreported as malformed — now `errors.Is(err, os.ErrNotExist)`; fixed the `fuzz/tap.go` comment claiming the plan precedes results (trailing plan is the implementation, valid TAP 13) and the `Close()` docstring's numbered teardown list (sync step was missing).
+- **Consequences:** Gates `TestSyncSkippedByConfig`, `TestSyncOfflineWithoutIdentity`, `TestSyncBootsDegradedButAlive` (scanner refuses resolved secret, clean edit lands, Close idempotent, absent ledger pinned as absent-not-malformed), `TestSyncPortConflictDegrades`, `TestSyncMalformedLedgerRefusesAll`, `TestRedactorContainsIsASideEffectFreeProbe`. Mutation evidence (§4.2): ephemeral `:0`→`:1` red (`cannot listen on :1`) → restore green; absent-ledger wording assertion red on `os.IsNotExist` → green on `errors.Is`. TASKS P4.5.5 DONE + Progress Log; ROADMAP §4.2.3 WIRED; ARCHITECTURE package-map row gains `sync`.
+- **Refs:** `internal/app/sync.go`, `sync_test.go`, `app.go` (Config, `Close`), `internal/secrets/redact.go`, `internal/fuzz/tap.go`, TASKS P4.5.5, duckiec/pulse#11.
+
+---
+
 ## Entry Template (copy for new decisions)
 
 ```markdown
