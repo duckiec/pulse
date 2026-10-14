@@ -1160,8 +1160,20 @@ an argv element (now stdin via trailing bare `-w`, plus the absolute
 `/usr/bin/security` pin the read path already had), and the linux write
 stored under `{ServiceName: key}` while the read searched
 `{service, account}` (items no read could find — now one shared
-constructor). Live-daemon verification stays BLOCKED per platform, reported
-with reason, never papered over (AGENTS.md §4.5).
+constructor). Wave 6.5 (MEMORY.md ADL-0042) then verified the Linux
+boundary against BARE METAL: `scripts/ci/run-with-keyring.sh` builds an
+isolated session (fresh bus, unlocked login collection, hermetic keyring
+dir) and `internal/secrets/linux_live_test.go` (`integration` tag, zero
+mocks) round-trips a random device identity through the production write
+and read paths, proves daemon commitment via the independent `secret-tool`
+client, deletes, and asserts `ErrNotFound`. Live probing fixed four real
+defects the hermetic pins could not see: no `DefaultCollection` property
+(reads resolve the `default` alias), `OpenSession` outputs belong in
+`Store` (not `Call` args), `CreateItem` lives on the collection with
+`a{sv}` props, and content_type is `s` (`(oayays)`). The Linux Secret
+Service boundary is now mathematically AND empirically verified.
+Darwin/windows last-mile syscalls stay NOT RUN (no hosts; cross-compile
+green), reported with reason, never papered over (AGENTS.md §4.5).
 
 ---
 

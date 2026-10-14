@@ -52,18 +52,53 @@ func (b *dbusBackend) Backend() string { return "secret-service-dbus" }
 // Available probes the Secret Service over the session bus. Every failure mode
 // here is a legitimate BLOCKED condition in a headless environment, and each is
 // reported with the reason rather than swallowed.
+//
+// The probe resolves the default alias: it proves the daemon is on the bus,
+// speaking the expected API, AND holding an unlocked login collection.
+// (The DefaultCollection property is NOT probed: gnome-keyring does not
+// publish it — reading it fails live with "No such property". Wave 6.5.)
 func (b *dbusBackend) Available() error {
-	conn, err := b.connect()
-	if err != nil {
+	if _, err := b.defaultCollection(); err != nil {
 		return err
 	}
-	obj := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
-	// Reading a property the service itself publishes is the cheapest probe
-	// that proves the daemon is on the bus AND speaking the expected API.
-	if _, err := obj.GetProperty(dbusSecretServiceIface + ".DefaultCollection"); err != nil {
-		return fmt.Errorf("secrets: secret service not reachable on the session bus: %w", err)
-	}
 	return nil
+}
+
+// defaultCollection resolves the login collection both paths operate on.
+// A "/" result means "no default alias": nothing to read from and
+// nowhere to store to, reported as unavailable rather than dialled further.
+func (b *dbusBackend) defaultCollection() (dbus.ObjectPath, error) {
+	conn, err := b.connect()
+	if err != nil {
+		return "", err
+	}
+	svc := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
+	var aliasPath dbus.ObjectPath
+	if err := svc.Call(dbusSecretServiceIface+".ReadAlias", 0, DefaultCollection).Store(&aliasPath); err != nil {
+		return "", fmt.Errorf("secrets: read default collection: %w", err)
+	}
+	if aliasPath == "" || aliasPath == "/" {
+		return "", fmt.Errorf("secrets: secret service has no default collection (keyring locked or absent)")
+	}
+	return aliasPath, nil
+}
+
+// openPlainSession negotiates an unencrypted session with the service.
+// godbus splits inputs (Call args) from outputs (Store targets): passing
+// output pointers as Call args encodes them onto the wire and fails client-
+// side — found live in Wave 6.5, where OpenSession never succeeded.
+func (b *dbusBackend) openPlainSession(conn *dbus.Conn) (dbus.ObjectPath, error) {
+	svc := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
+	var output dbus.Variant
+	var sessionPath dbus.ObjectPath
+	if err := svc.Call(dbusSecretServiceIface+".OpenSession",
+		0, "plain", dbus.MakeVariant("")).Store(&output, &sessionPath); err != nil {
+		return "", fmt.Errorf("secrets: open session: %w", err)
+	}
+	if sessionPath == "" || sessionPath == "/" {
+		return "", fmt.Errorf("secrets: open session returned no session path")
+	}
+	return sessionPath, nil
 }
 
 // connect returns the session bus connection, dialing lazily and caching it.
@@ -92,25 +127,15 @@ func (b *dbusBackend) Resolve(key string) (string, error) {
 	svc := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
 
 	// Resolve the collection alias (the login keyring).
-	var aliasPath dbus.ObjectPath
-	if err := svc.Call(dbusPropertiesIface+".Get",
-		0, dbusSecretServiceIface, "DefaultCollection").Store(&aliasPath); err != nil {
-		return "", fmt.Errorf("secrets: read default collection: %w", err)
+	if _, err := b.defaultCollection(); err != nil {
+		return "", err
 	}
 
-	// Open an algorithm-agnostic session.
-	var sessionPath dbus.ObjectPath
-	var result dbus.Variant
-	if err := svc.Call(dbusSecretServiceIface+".OpenSession", 0, "plain", &sessionPath, &result).Store(); err != nil {
-		return "", fmt.Errorf("secrets: open session: %w", err)
-	}
-	defer func() {
-		// Best-effort close; a leaked session is a daemon-side resource, not a
-		// correctness problem for the caller.
-		conn.Object(dbusSecretServiceName, sessionPath).Call(dbusSecretServiceIface+".Close", 0)
-	}()
-	if result.Value() == nil || result.Value() == "" {
-		return "", fmt.Errorf("secrets: open session returned no algorithm result")
+	// Open an algorithm-agnostic session. A plain session's output
+	// variant is legitimately empty — the session PATH is the result.
+	sessionPath, err := b.openPlainSession(conn)
+	if err != nil {
+		return "", err
 	}
 	b.session = sessionPath
 
@@ -119,7 +144,7 @@ func (b *dbusBackend) Resolve(key string) (string, error) {
 	// construction, not by convention (MEMORY.md ADL-0041).
 	attrs := searchAttrs(ServiceName, key)
 	var unlocked, locked []dbus.ObjectPath
-	if err := svc.Call(dbusSecretServiceIface+".SearchItems", 0, attrs, &unlocked, &locked).Store(); err != nil {
+	if err := svc.Call(dbusSecretServiceIface+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil {
 		return "", fmt.Errorf("secrets: search keyring: %w", err)
 	}
 	switch {
@@ -130,20 +155,23 @@ func (b *dbusBackend) Resolve(key string) (string, error) {
 		// one to ask. Report BLOCKED, never return a placeholder.
 		return "", fmt.Errorf("secrets: %q is locked and unlocking requires an interactive prompt", key)
 	default:
-		return "", fmt.Errorf("secrets: %q not found in keyring", key)
+		return "", fmt.Errorf("secrets: %q %w", key, ErrNotFound)
 	}
 }
 
 // readItem pulls the secret bytes out of an item.
+//
+// GetSecret returns ONE struct argument (oayays), not three separate
+// values: storing into three targets fails with a length mismatch.
+// (Wave 6.5, live against gnome-keyring.)
 func (b *dbusBackend) readItem(conn *dbus.Conn, item, session dbus.ObjectPath) (string, error) {
-	var sess dbus.ObjectPath
-	var password, contentType []byte
+	var got dbusSecret
 	call := conn.Object(dbusSecretServiceName, item).Call(dbusSecretItemIface+".GetSecret", 0, session)
-	if err := call.Store(&sess, &password, &contentType); err != nil {
+	if err := call.Store(&got); err != nil {
 		return "", fmt.Errorf("secrets: read secret: %w", err)
 	}
-	if len(password) == 0 {
+	if len(got.Value) == 0 {
 		return "", fmt.Errorf("secrets: keychain returned an empty secret")
 	}
-	return string(password), nil
+	return string(got.Value), nil
 }

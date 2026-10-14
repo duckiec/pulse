@@ -18,17 +18,22 @@ import (
 )
 
 // TestDBusSecretWireSignature pins the Secret struct's D-Bus encoding:
-// (session o, parameters ay, value ay, content_type ay). Any field reorder,
+// (session o, parameters ay, value ay, content_type s). Any field reorder,
 // add, or retype changes the signature — failing here, without a daemon.
+// (content_type was ay until Wave 6.5, when the live daemon rejected it:
+// expected type (a{sv}(oayays)b). The pin now matches the daemon.)
 func TestDBusSecretWireSignature(t *testing.T) {
 	sig := dbus.SignatureOf(dbusSecret{
 		Session:     "/org/freedesktop/secrets/session/s1",
 		Parameters:  []byte{},
 		Value:       []byte("v"),
-		ContentType: []byte("text/plain"),
+		ContentType: "text/plain",
 	}).String()
 	if sig != dbusSecretSignature {
 		t.Errorf("Secret wire signature = %q, want %q", sig, dbusSecretSignature)
+	}
+	if sig != "(oayays)" {
+		t.Errorf("Secret wire signature = %q, want the daemon-proven (oayays)", sig)
 	}
 }
 
@@ -39,8 +44,21 @@ func TestDBusSecretWireSignature(t *testing.T) {
 // no read could ever find. This test is the regression gate for that bug.)
 func TestDBusReadWriteAttributeParity(t *testing.T) {
 	readAttrs := searchAttrs("pulse", "vault:default")
-	storedAttrs, secret, replace := createItemParams(
+	storedProps, secret, replace := createItemParams(
 		"/org/freedesktop/secrets/session/s1", "pulse", "vault:default", "s3cr3t")
+	// CreateItem takes a{sv}: the searchable attributes ride under the
+	// spec's Attributes key. Extract and compare them, not the envelope.
+	attrsVar, ok := storedProps[dbusItemAttrsKey]
+	if !ok {
+		t.Fatalf("CreateItem props lack %q: %v", dbusItemAttrsKey, storedProps)
+	}
+	storedAttrs, ok := attrsVar.Value().(map[string]string)
+	if !ok {
+		t.Fatalf("Attributes variant holds %T, want map[string]string", attrsVar.Value())
+	}
+	if _, ok := storedProps[dbusItemLabelKey]; !ok {
+		t.Errorf("CreateItem props lack a label %q: %v", dbusItemLabelKey, storedProps)
+	}
 	if strings.Join(sortedKeys(readAttrs), ",") != strings.Join(sortedKeys(storedAttrs), ",") {
 		t.Errorf("read attrs %v vs stored attrs %v: the round trip is broken", readAttrs, storedAttrs)
 	}
@@ -52,7 +70,7 @@ func TestDBusReadWriteAttributeParity(t *testing.T) {
 	if string(secret.Value) != "s3cr3t" {
 		t.Errorf("secret value = %q, want the stored value verbatim", secret.Value)
 	}
-	if string(secret.ContentType) != "text/plain" {
+	if secret.ContentType != "text/plain" {
 		t.Errorf("content type = %q, want text/plain", secret.ContentType)
 	}
 	if len(secret.Parameters) != 0 {
@@ -80,6 +98,12 @@ func TestDBusMethodNames(t *testing.T) {
 	}
 	if dbusSecretItemIface != "org.freedesktop.Secret.Item" {
 		t.Errorf("item iface = %q", dbusSecretItemIface)
+	}
+	if dbusCollectionIface != "org.freedesktop.Secret.Collection" {
+		t.Errorf("collection iface = %q", dbusCollectionIface)
+	}
+	if DefaultCollection != "default" {
+		t.Errorf("default alias = %q, want default", DefaultCollection)
 	}
 	if dbusPropertiesIface != "org.freedesktop.DBus.Properties" {
 		t.Errorf("properties iface = %q", dbusPropertiesIface)

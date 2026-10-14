@@ -35,6 +35,13 @@ const ServiceName = "pulse"
 // it exits with code 3 (AGENTS.md §4.4 exit codes).
 var ErrUnresolved = errors.New("secrets: variable unresolved")
 
+// ErrNotFound reports that the keychain answered but holds no item under the
+// requested account. It is distinct from "the keychain is unreachable"
+// (a BLOCKED condition): callers use errors.Is to tell "absent" from
+// "unavailable" without parsing a message. Proven live against the Secret
+// Service in Wave 6.5.
+var ErrNotFound = errors.New("not found in keychain")
+
 // ExitCodeSecret is the process exit code for a secret-resolution failure.
 const ExitCodeSecret = 3
 

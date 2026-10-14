@@ -24,9 +24,10 @@ import (
 // It is encoded here as a Go struct with the same field order, which is the form
 // github.com/godbus/dbus/v5 expects for a struct-typed argument.
 //
-// This path is implemented but NOT TESTED in this repository's CI: the Linux
-// environment it runs in has no Secret Service daemon. That is recorded as a
-// BLOCKED gate rather than papered over (AGENTS.md §4.5).
+// This path is proven live against gnome-keyring under
+// scripts/ci/run-with-keyring.sh (Wave 6.5, internal/secrets/linux_live_test.go
+// with the integration tag); the hermetic constructor tests pin the framing
+// headless.
 
 // dbusSecret lives in dbusframe.go, shared with the hermetic tests that pin
 // its wire signature.
@@ -43,6 +44,11 @@ func (s *linuxStore) Available() error {
 }
 
 // Store implements SecretStore.
+//
+// CreateItem lives on the COLLECTION object, not the service: calling it on
+// /org/freedesktop/secrets fails live with "no such method". The
+// collection is the same default alias the read path resolves, so the two
+// cannot drift apart (Wave 6.5).
 func (s *linuxStore) Store(key, value string) error {
 	if err := s.Available(); err != nil {
 		return err
@@ -51,26 +57,25 @@ func (s *linuxStore) Store(key, value string) error {
 	if err != nil {
 		return err
 	}
-	svc := conn.Object(dbusSecretServiceName, dbus.ObjectPath(dbusSecretServicePath))
-
-	// The plain (unencrypted) session is the service's own path, which is what
-	// SearchItems uses for a read; CreateItem takes the same.
-	var session dbus.ObjectPath
-	if err := svc.Call(dbusPropertiesIface+".Get", 0,
-		dbusSecretServiceIface, "DefaultCollection").Store(&session); err != nil {
-		return fmt.Errorf("secrets: read default collection: %w", err)
+	collection, err := s.backend.defaultCollection()
+	if err != nil {
+		return err
+	}
+	session, err := s.backend.openPlainSession(conn)
+	if err != nil {
+		return err
 	}
 
-	// Attributes, secret struct, and the replace flag come from the shared
+	// Properties, secret struct, and the replace flag come from the shared
 	// constructor: the write stores under exactly the attributes the read
 	// searches for. (Previously this map was {ServiceName: key} while the
 	// read searched {service, account} — items were written that no read
 	// could ever find. MEMORY.md ADL-0041.)
-	attributes, secret, replace := createItemParams(session, ServiceName, key, value)
+	props, secret, replace := createItemParams(session, ServiceName, key, value)
 
-	var prompt string
-	if err := svc.Call(dbusSecretServiceIface+".CreateItem", 0,
-		attributes, secret, replace).Store(&prompt); err != nil {
+	var item, prompt dbus.ObjectPath
+	if err := conn.Object(dbusSecretServiceName, collection).Call(
+		dbusCollectionIface+".CreateItem", 0, props, secret, replace).Store(&item, &prompt); err != nil {
 		return fmt.Errorf("secrets: CreateItem failed: %w", err)
 	}
 	if prompt != "" && prompt != "/" {
