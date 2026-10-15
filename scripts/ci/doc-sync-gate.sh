@@ -8,6 +8,9 @@
 #
 # Internal governance surface (AGENTS.md, PRD.md, ROADMAP.md, ARCHITECTURE.md,
 # DESIGN_SYSTEM.md, TASKS.md, MEMORY.md) is local-only.
+# ADL-0050: docs/*.md is sanctioned public documentation — a docs/ update counts
+# as the documentation state update itself, so code+docs ships without a README
+# touch and docs-only commits pass.
 #
 # Scope selection:
 #   GITHUB_BASE_REF set (CI pull_request): origin/$GITHUB_BASE_REF...HEAD
@@ -24,6 +27,7 @@ fi
 code_dirs="$(printf '%s\n' "${changed}" | grep -E '^(cmd|internal)/' || true)"
 public_dirs="$(printf '%s\n' "${changed}" | grep -E '^(docs|assets)/' || true)"
 readme_changed="$(printf '%s\n' "${changed}" | grep -E '^README\.md$' || true)"
+docs_changed="$(printf '%s\n' "${changed}" | grep -E '^docs/' || true)"
 
 has_public_touch=false
 if [ -n "${code_dirs}" ] || [ -n "${public_dirs}" ]; then
@@ -40,7 +44,7 @@ else
     internal_gov=""
 fi
 
-if [ "${has_public_touch}" = true ] && [ -z "${internal_gov}" ] && [ -z "${readme_changed}" ]; then
+if [ "${has_public_touch}" = true ] && [ -z "${internal_gov}" ] && [ -z "${readme_changed}" ] && [ -z "${docs_changed}" ]; then
     offending="${code_dirs}"
     if [ -n "${public_dirs}" ]; then
         offending="${offending}
