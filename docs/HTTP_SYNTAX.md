@@ -52,6 +52,40 @@ comment and is ignored by the parser. Comments, disabled headers, and
 variable definitions are preserved round-trip by the Phase 2 serializer
 (see ROADMAP Phase 2.1 in the local governance docs).
 
+## Canonical form
+
+The serializer emits every request in a fixed order: in-block `@var`
+definitions, `# @name`, `# @assert` lines, `@wasm-sign`, the `METHOD URL`
+line, headers, one blank line, then the body. Collections join requests
+with `###` separators. A full-document format keeps file-scoped `@var`
+definitions but drops free comments and `#`-disabled headers (they have no
+AST representation); surgical single-request edits via create/upsert/delete
+splice source spans instead, so neighbors, comments, and disabled headers
+survive byte-identical.
+
+## Workspace edits
+
+Collection files are created, updated, and deleted inside the workspace
+root: `..` traversal, absolute paths outside the root, and symlink escapes
+are rejected; creation never truncates an existing file; an upsert block
+must hold exactly one request (a replacement swaps the named request's
+span, an unknown name appends a new trailing `###` section); deleting a
+request that owns its section alone removes the separator with it. Every
+result is re-parsed before it reaches disk, and writes land via temp-file
+plus atomic rename, so a crash never leaves a truncated collection.
+
+## cURL import
+
+A copied `curl` command imports to one request: method, URL, headers, and
+body map across; credentials never land in the file — `Authorization` and
+cookie values, `--user` passwords, and secret query keys become
+`{{PLACEHOLDER}}` references, with the raw values returned separately for
+the vault-seal flow. Unknown flags, multiple URLs, and `@file` bodies fail
+closed with the offending input named. URLs without a scheme default to
+`http://` for loopback targets (`localhost`, `127.0.0.1`, `[::1]`) and
+`https://` elsewhere; `{{templates}}` and path-only references pass
+through untouched.
+
 ## Secrets discipline
 
 `.http` files are committed to Git. Secrets are never committed: reference
