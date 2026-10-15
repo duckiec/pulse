@@ -63,7 +63,7 @@ Live keyring tests need a session bus:
 bash scripts/ci/run-with-keyring.sh bash scripts/all-gates.sh
 ```
 
-CI adds a race-detector pass (`CGO_ENABLED=1 go test -race ./...`). The detector slows the clock, so the 50k retrieval-latency gate reports its p99 there instead of enforcing the 50 ms budget. You still get the budget enforced in the native suite.
+CI adds a race-detector pass (`CGO_ENABLED=1 go test -race ./...`). The detector slows the clock, so the 50k retrieval-latency gate reports its p99 there instead of enforcing the 50 ms budget. You still get the budget enforced in the native suite. Stream `Close` joins the run goroutine, so per-attempt telemetry writes settle before you release the report.
 
 ## Layout
 

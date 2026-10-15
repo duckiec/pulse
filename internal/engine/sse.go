@@ -148,6 +148,14 @@ type sseManager struct {
 	stop     chan struct{}
 	closeOne sync.Once
 
+	// runMu guards runCancel/runStarted. Close cancels the Run context so
+	// an in-flight dial, pump, or backoff sleep unblocks promptly, then
+	// joins the Run goroutine: without the join, per-attempt telemetry
+	// writes race the owner's release of the report (and its pool reuse).
+	runMu      sync.Mutex
+	runCancel  context.CancelFunc
+	runStarted bool
+
 	// lastEventID is owned by the MANAGER, not the parser, so it survives a
 	// parser rebuild across reconnects. Clearing it on disconnect is exactly
 	// the defect the reconnect gate exists to catch.
@@ -227,12 +235,29 @@ func (m *sseManager) LastEventID() string {
 // Done implements StreamManager.
 func (m *sseManager) Done() <-chan struct{} { return m.done }
 
-// Close implements StreamManager: idempotent, stops reconnection.
+// Close implements StreamManager: idempotent, stops reconnection, and joins
+// the Run goroutine when one started, so per-attempt telemetry writes settle
+// before the owner releases the report. Do not call Close from Sink
+// callbacks: the callbacks run on the goroutine Close joins.
 func (m *sseManager) Close() error {
+	var cancel context.CancelFunc
+	var started bool
 	m.closeOne.Do(func() {
 		close(m.stop)
 		m.setState(StateClosed)
+		m.runMu.Lock()
+		cancel, started = m.runCancel, m.runStarted
+		m.runMu.Unlock()
+		// Unblock an in-flight dial, pump, or backoff sleep. A Run that
+		// starts after this point sees the closed stop channel and exits
+		// before touching telemetry.
+		if cancel != nil {
+			cancel()
+		}
 	})
+	if started {
+		<-m.done
+	}
 	return nil
 }
 
@@ -252,6 +277,13 @@ func (m *sseManager) stopped() bool {
 // Run drives the whole lifecycle on the calling goroutine and delivers the
 // terminal Sink callback. It blocks until the stream ends.
 func (m *sseManager) Run(ctx context.Context, target string, sink Sink) error {
+	// The derived context lets Close unblock dials, pumps, and backoff
+	// sleeps: every blocking wait below observes this context or stop.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	m.runMu.Lock()
+	m.runCancel, m.runStarted = cancel, true
+	m.runMu.Unlock()
 	m.sink = sink
 	started := time.Now()
 	dispatchDone := make(chan struct{})
