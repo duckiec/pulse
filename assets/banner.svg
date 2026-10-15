@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-label="Pulse — offline, Git-native API workbench">
+  <rect width="1200" height="320" rx="24" fill="#0d1117"/>
+  <rect x="1" y="1" width="1198" height="318" rx="23" fill="none" stroke="#30363d" stroke-width="2"/>
+  <polyline points="80,200 160,200 190,120 230,260 270,160 300,200 360,200" fill="none" stroke="#58a6ff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="80" cy="200" r="10" fill="#58a6ff"/>
+  <circle cx="360" cy="200" r="10" fill="#58a6ff"/>
+  <text x="410" y="170" font-family="monospace" font-size="96" font-weight="bold" fill="#f0f6fc">pulse</text>
+  <text x="412" y="225" font-family="monospace" font-size="30" fill="#8b949e">offline &#183; git-native &#183; dual-mode</text>
+  <text x="412" y="265" font-family="monospace" font-size="22" fill="#6e7681">one engine &#183; TUI + MCP &#183; single binary</text>
+</svg>

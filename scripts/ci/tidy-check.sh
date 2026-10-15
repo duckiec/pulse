@@ -12,6 +12,11 @@ trap 'rm -rf "${backup}"' EXIT
 cp go.mod "${backup}/go.mod"
 [ -f go.sum ] && cp go.sum "${backup}/go.sum"
 
+# Cold-cache fix: a fresh CI runner holds an empty module cache, so an
+# offline tidy fails on fetch errors instead of drift. Warm the cache first
+# (fills $GOMODCACHE, touches no tracked files), then run the offline gate
+# that proves reproducibility without network access (invariant I-3).
+GOFLAGS=-mod=mod go mod download
 GOPROXY=off GOFLAGS=-mod=mod go mod tidy
 
 fail=0

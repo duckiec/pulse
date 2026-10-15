@@ -2,6 +2,8 @@
 # Run every enforcement gate. Local pre-push equivalent of CI.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# shellcheck source=ci/env.sh
+source "$(dirname "$0")/ci/env.sh"
 s="$(dirname "$0")/ci"
 
 bash "$s/build-matrix.sh"

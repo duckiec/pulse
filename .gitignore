@@ -23,8 +23,7 @@ engine.test
 opencode.json
 pulse
 
-# Public front door (Phase 4)
-/assets/banner.svg
+# Public front door (Phase 4) — tracked
 
 # Agent-environment vendoring (ponytail plugin + third-party skills).
 .opencode/
