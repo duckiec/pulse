@@ -22,21 +22,28 @@ func TestRunModeMatrix(t *testing.T) {
 		args []string
 		tty  bool
 		want int
+		// in is the TUI's stdin: the program quits on "q", so a boot
+		// that panics or wedges fails here instead of passing silently.
+		in string
 	}{
-		{"mcp subcommand on tty", []string{"mcp"}, true, exitOK},
-		{"mcp subcommand on pipe", []string{"mcp"}, false, exitOK},
-		{"mcp flag on pipe", []string{"--mcp"}, false, exitOK},
-		{"tui on tty", nil, true, exitFail},
-		{"tui on pipe fails closed", nil, false, exitUsage},
-		{"version", []string{"--version"}, false, exitOK},
-		{"unknown flag", []string{"--bogus"}, true, exitUsage},
-		{"mcp with stray arg", []string{"mcp", "extra"}, true, exitUsage},
-		{"tui flag with extra args ignored", []string{"somefile.http"}, true, exitFail},
+		{"mcp subcommand on tty", []string{"mcp"}, true, exitOK, ""},
+		{"mcp subcommand on pipe", []string{"mcp"}, false, exitOK, ""},
+		{"mcp flag on pipe", []string{"--mcp"}, false, exitOK, ""},
+		// Bare pulse boots the scratchpad (Phase 2.2): the program
+		// starts over the in-memory Untitled Request and quits cleanly
+		// on q — exit 0, no panic. EOF alone does not quit a Bubble
+		// Tea program, so the quit key is the assertion.
+		{"tui on tty", nil, true, exitOK, "q"},
+		{"tui on pipe fails closed", nil, false, exitUsage, ""},
+		{"version", []string{"--version"}, false, exitOK, ""},
+		{"unknown flag", []string{"--bogus"}, true, exitUsage, ""},
+		{"mcp with stray arg", []string{"mcp", "extra"}, true, exitUsage, ""},
+		{"tui flag with extra args ignored", []string{"somefile.http"}, true, exitFail, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr strings.Builder
-			got := run(context.Background(), tc.args, strings.NewReader(""), &stdout, &stderr, tc.tty)
+			got := run(context.Background(), tc.args, strings.NewReader(tc.in), &stdout, &stderr, tc.tty)
 			if got != tc.want {
 				t.Fatalf("run(%q, tty=%v) = %d, want %d\nstderr: %s", tc.args, tc.tty, got, tc.want, stderr.String())
 			}

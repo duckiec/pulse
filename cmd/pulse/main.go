@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -116,7 +117,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 }
 
-// runTUI starts the fullscreen Bubble Tea program over one .http file.
+// runTUI starts the fullscreen Bubble Tea program over one .http file —
+// or, with no file, over the in-memory scratchpad (Phase 2.2: an empty
+// workspace boots the welcome state, never an error).
 //
 // The TUI shares the composition root with every other mode: the same App
 // builds the store, chain and redactor, and App.RouterFor hands the UI the
@@ -128,10 +131,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 // AGENTS.md §4.4), and a too-small terminal is exit 2 (DESIGN_SYSTEM.md
 // §3.2 refuses to render half-broken UI). A clean interactive session exits
 // 0; the TUI reports verdicts on screen, not in its exit code.
-func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file string) int {
+func runTUI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, file string) int {
 	if file == "" {
-		fmt.Fprintln(stderr, "pulse: a .http file is required (usage: pulse <file.http>)")
-		return exitFail
+		return runTUIScratch(ctx, stdin, stdout, stderr)
 	}
 	doc, err := ast.ParseFile(file)
 	if err != nil {
@@ -157,11 +159,8 @@ func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file str
 	// renders a refusal line, but entering fullscreen to show it would
 	// flicker the terminal for no reason. Untestable outputs (anything that
 	// is not an *os.File) skip the probe; production stdout is always one.
-	if f, ok := stdout.(*os.File); ok {
-		if w, h, serr := term.GetSize(int(f.Fd())); serr == nil && (w < 80 || h < 24) {
-			fmt.Fprintf(stderr, "pulse: terminal is %dx%d; the TUI needs 80x24\n", w, h)
-			return exitUsage
-		}
+	if code := checkTUITermSize(stdout, stderr); code >= 0 {
+		return code
 	}
 
 	application, err := app.New(ctx, appConfig())
@@ -183,11 +182,119 @@ func runTUI(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, file str
 		return exitFail
 	}
 	model := ui.New(ctx, application.RouterFor(doc), doc, true)
-	// The editor rebuilds the document on submit; the runner must be
-	// rebuilt with it, because an engine reads through its own doc
-	// reference. RouterFor is the factory (same router every mode uses).
+	wireTUIModel(ctx, application, model, workspaceOf(file), saveRelOf(file))
+	return startTeaProgram(stdin, stdout, stderr, model)
+}
+
+// runTUIScratch boots the TUI with no file: an in-memory Untitled Request
+// over the current workspace, saving to requests.http beside it. An empty
+// directory is the blank-state welcome, never a usage error — pinned by
+// TestRunModeMatrix (bare pulse quits cleanly) and the PTY empty-dir
+// proof (a real terminal paints the welcome and quits on q).
+func runTUIScratch(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: workspace: %v\n", err)
+		return exitFail
+	}
+	doc, err := ui.ParseScratch()
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		return exitFail
+	}
+	// No Release: ownership passes to the model, which tracks the scratch
+	// document as owned and recycles it on the first document swap.
+	if code := checkTUITermSize(stdout, stderr); code >= 0 {
+		return code
+	}
+	application, err := app.New(ctx, appConfig())
+	if err != nil {
+		fmt.Fprintf(stderr, "pulse: %v\n", err)
+		if code := app.SecretExitCode(err); code != 0 {
+			return code
+		}
+		return exitFail
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(stderr, "pulse: shutdown: %v\n", err)
+		}
+	}()
+	if err := application.Boot(ctx); err != nil {
+		fmt.Fprintf(stderr, "pulse: boot: %v\n", err)
+		return exitFail
+	}
+	model := ui.NewScratchpad(ctx, application.RouterFor(doc), doc, cwd)
+	wireTUIModel(ctx, application, model, cwd, "requests.http")
+	return startTeaProgram(stdin, stdout, stderr, model)
+}
+
+// checkTUITermSize refuses a half-broken frame before fullscreen starts.
+// It returns -1 when the program may start, otherwise the exit code the
+// caller returns directly. Non-file outputs skip the probe (production
+// stdout is always an *os.File).
+func checkTUITermSize(stdout, stderr io.Writer) int {
+	if f, ok := stdout.(*os.File); ok {
+		if w, h, serr := term.GetSize(int(f.Fd())); serr == nil && (w < 80 || h < 24) {
+			fmt.Fprintf(stderr, "pulse: terminal is %dx%d; the TUI needs 80x24\n", w, h)
+			return exitUsage
+		}
+	}
+	return -1
+}
+
+// wireTUIModel binds the runner factory, the workspace address, and the
+// persistence/sealing seams: the editor rebuilds the document on submit,
+// the composer saves through ast's jailed atomic path, and the vault
+// seals through the keychain-or-memory chain — all provided by the App,
+// none constructed by the UI (AGENTS.md §3.1).
+func wireTUIModel(_ context.Context, application *app.App, model *ui.Model, wsRoot, saveRel string) {
 	model.SetRunnerFactory(func(d *ast.Document) ui.Runner { return application.RouterFor(d) })
-	prog := tea.NewProgram(model, tea.WithAltScreen())
+	model.SetWorkspace(wsRoot, saveRel)
+	model.SetSavers(
+		ui.RequestSaver(application.UpsertUIRequest),
+		ui.FileSaver(func(root, rel string, content []byte) ([]byte, error) {
+			if err := application.CreateUIFile(root, rel, content); err != nil {
+				return nil, err
+			}
+			return application.ReadUIFile(root, rel)
+		}),
+		ui.FileLoader(application.ReadUIFile),
+		ui.SecretSealer(application.SealUISecret),
+	)
+}
+
+// workspaceOf roots file-backed saves at the invocation directory: the
+// jail confines rel paths beneath it, and absolute invocations fail
+// closed with a toast rather than a write elsewhere.
+func workspaceOf(file string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
+// saveRelOf names the save target for a file-backed boot: the invocation
+// path made workspace-relative when it sits inside the workspace. An
+// outside absolute path stays absolute and the saver jail refuses it —
+// loudly, at save time, not silently elsewhere.
+func saveRelOf(file string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return file
+	}
+	if rel, err := filepath.Rel(cwd, file); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return rel
+	}
+	return file
+}
+
+// startTeaProgram runs the model fullscreen until quit. Input is explicit
+// (never an ambient os.Stdin): headless gates drive EOF through it and
+// the program quits cleanly, while a real terminal drives keys.
+func startTeaProgram(stdin io.Reader, stdout, stderr io.Writer, model *ui.Model) int {
+	prog := tea.NewProgram(model, tea.WithAltScreen(), tea.WithInput(stdin), tea.WithOutput(stdout))
 	model.Bind(prog.Send)
 	if _, err := prog.Run(); err != nil {
 		fmt.Fprintf(stderr, "pulse: tui: %v\n", err)

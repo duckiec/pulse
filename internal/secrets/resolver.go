@@ -224,6 +224,32 @@ func (c *Chain) ResolveAll(keys []string) (map[string]string, error) {
 // hook without an adapter. It is Resolve under a second name and nothing more.
 func (c *Chain) Lookup(name string) (string, error) { return c.Resolve(name) }
 
+// Seal installs one ephemeral variable at runtime: the in-TUI vault helper's
+// memory-only tier. It ranks exactly where the loaded .env ranks (below the
+// keychain, above the vault payload and the terminal error), and the value is
+// registered with the redactor before Seal returns, so no sealed value exists
+// un-scrubbed. It never touches disk: the composition root tries the OS
+// keychain write side first and calls Seal only when no write path exists.
+func (c *Chain) Seal(name, value string) error {
+	if !validKey(name) {
+		return fmt.Errorf("secrets: seal: invalid key %q", name)
+	}
+	if value == "" {
+		return fmt.Errorf("secrets: seal: refusing an empty value for %q (fail closed, never a dummy)", name)
+	}
+	c.mu.Lock()
+	if c.env == nil {
+		c.env = map[string]string{}
+	}
+	c.env[name] = value
+	redactor := c.redactor
+	c.mu.Unlock()
+	if redactor != nil {
+		redactor.Register(value)
+	}
+	return nil
+}
+
 // ExitCode maps an error to a process exit code. A secret failure is 3; every
 // other failure is 1 (AGENTS.md §4.4).
 func ExitCode(err error) int {

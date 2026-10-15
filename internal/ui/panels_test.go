@@ -69,7 +69,7 @@ func TestTreeBrowsesAndSelects(t *testing.T) {
 }
 
 // TestSearchFindsAndJumps proves / search: type a query, enter runs it
-// against the stream tail, n cycles hits and scrolls to them.
+// against the stream tail, ctrl+n cycles hits and scrolls to them.
 func TestSearchFindsAndJumps(t *testing.T) {
 	doc := parseDoc(t, "GET http://127.0.0.1:9/none HTTP/1.1\n\n###\n")
 	m := New(context.Background(), nil, doc, false)
@@ -85,7 +85,7 @@ func TestSearchFindsAndJumps(t *testing.T) {
 	if m.search.Active() {
 		t.Error("enter must close search input")
 	}
-	m = updateKeys(t, m, "n")
+	m = updateKeys(t, m, "ctrl+n")
 	hit, ok := m.search.Current()
 	if !ok || hit.Line != 2 {
 		t.Errorf("n moved to %+v, want line 2", hit)
@@ -147,9 +147,9 @@ func TestEditorSubmitsAndDispatches(t *testing.T) {
 	sent := make(chan tea.Msg, 64)
 	m.Bind(func(msg tea.Msg) { sent <- msg })
 
-	m = updateKeys(t, m, "i")
+	m = updateKeys(t, m, "e")
 	if !m.editor.Active() {
-		t.Fatal("i did not open the editor")
+		t.Fatal("e did not open the editor")
 	}
 	// The URL field arrives seeded; clear it, then type the new target.
 	for i := 0; i < 40; i++ {
@@ -199,7 +199,7 @@ func TestEditorWithoutFactoryFailsClosed(t *testing.T) {
 	doc := parseDoc(t, "GET http://127.0.0.1:9/old HTTP/1.1\n\n###\n")
 	m := New(context.Background(), nil, doc, false)
 	m.Bind(func(tea.Msg) {})
-	m = updateKeys(t, m, "i", "enter")
+	m = updateKeys(t, m, "e", "enter")
 	if m.editor.Active() {
 		t.Error("submit must close the editor even when held")
 	}

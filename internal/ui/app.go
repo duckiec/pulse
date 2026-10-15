@@ -164,12 +164,16 @@ type Model struct {
 
 	// Sub-models. Each owns one surface and none owns transport: the tree
 	// browses injected rows, search scans the owned StreamView, the
-	// palette filters injected labels, the editor rebuilds .http source,
-	// and the fuzz dashboard consumes bridged probe events.
+	// palette filters injected labels, the editor composes .http source,
+	// the import/vault/new-file modals feed it, and the fuzz dashboard
+	// consumes bridged probe events.
 	tree    TreeModel
 	search  SearchModel
 	palette PaletteModel
 	editor  EditorModel
+	imprt   ImportModel
+	vault   VaultModel
+	newfile NewFileModel
 	fuzz    *FuzzModel
 
 	// showFuzz swaps the right pane to the fuzz dashboard. probePoll
@@ -194,6 +198,23 @@ type Model struct {
 	width  int
 	height int
 	focus  int // 0 tree, 1 response
+
+	// Phase 2.2 blank-state and authoring state. scratch marks the
+	// in-memory Untitled boot; touched retires the welcome pane on first
+	// interaction; wsRoot/saveTarget address workspace writes; doctor
+	// holds the missing-secret remediation while it applies.
+	scratch    bool
+	touched    bool
+	wsRoot     string
+	saveTarget string
+	doctor     string
+
+	// Persistence and sealing seams (authoring.go): background functions
+	// the composition root injects; nil fails each action closed.
+	saveReqFn  func(root, rel, name string, block []byte) tea.Msg
+	saveFileFn func(root, rel string, content []byte) tea.Msg
+	loadFileFn func(root, rel string) tea.Msg
+	sealFn     func(name, value string) tea.Msg
 
 	toast          string
 	framesRendered int64
@@ -223,6 +244,9 @@ func New(baseCtx context.Context, runner Runner, doc *ast.Document, autoStart bo
 		stream:    NewStreamView(80, 24),
 		fuzz:      NewFuzzModel(80, 24),
 		editor:    NewEditorModel(),
+		imprt:     NewImportModel(),
+		vault:     NewVaultModel(),
+		newfile:   NewNewFileModel(),
 	}
 	if doc != nil {
 		for r := range doc.Requests() {
@@ -391,6 +415,8 @@ func (m *Model) startRun() tea.Msg {
 		return runStartedMsg{}
 	}
 	m.report = engine.AcquireTelemetry()
+	m.doctor = ""
+	m.touched = true
 	ctx, cancel := context.WithCancel(m.baseCtx)
 	m.cancel = cancel
 	ctx = engine.Attach(ctx, m.report)
@@ -454,6 +480,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stream.Flush()
 		m.stream.Finish()
 		m.res = msg.res
+		m.doctor = ""
 		m.phase = phaseDone
 		if m.report != nil {
 			m.report.End()
@@ -462,10 +489,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
+	case saveDoneMsg:
+		if msg.err != nil {
+			m.toast = "save failed: " + firstLine(msg.err.Error())
+		} else {
+			m.touched = true
+			m.toast = "saved " + msg.rel
+		}
+		return m, nil
+	case fileLoadedMsg:
+		if msg.err != nil {
+			m.toast = "file failed: " + firstLine(msg.err.Error())
+		} else {
+			m.swapDocument(msg.rel, msg.content)
+		}
+		return m, nil
+	case sealedMsg:
+		if msg.err != nil {
+			m.toast = "seal failed: " + firstLine(msg.err.Error())
+		} else {
+			m.touched = true
+			m.toast = "sealed {{" + msg.name + "}}"
+			if doctorVar(m.err) == msg.name {
+				m.doctor = ""
+				m.toast += " — resend to retry"
+			}
+		}
+		return m, nil
 	case runFailedMsg:
 		m.stream.Flush()
 		m.stream.Finish()
-		m.err = msg.err
+		m.applyFailedRun(msg.err)
 		m.phase = phaseFailed
 		if m.report != nil {
 			m.report.End()
@@ -558,19 +612,51 @@ func (m *Model) jumpToCurrent() {
 func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := m.keys
 
-	if m.editor.Active() {
+	// Modal precedence (opacity order): new-file, vault, import, composer,
+	// then palette, then search. A letter that types text in one focus
+	// and acts in another is resolved by focus inside updateComposer.
+	if m.newfile.Active() {
 		switch msg.String() {
 		case "esc":
-			m.editor.Close()
+			m.newfile.Close()
 			return m, nil
 		case "enter":
-			return m, m.submitEditor()
+			return m, m.createFileCmd()
+		}
+		m.newfile.Update(msg)
+		return m, nil
+	}
+
+	if m.vault.Active() {
+		switch msg.String() {
+		case "esc":
+			m.vault.Close()
+			return m, nil
 		case "tab":
-			m.editor.Cycle()
+			m.vault.Toggle()
+			return m, nil
+		case "enter":
+			return m, m.sealVaultCmd()
+		}
+		m.vault.Update(msg)
+		return m, nil
+	}
+
+	if m.imprt.Active() {
+		switch msg.String() {
+		case "esc":
+			m.imprt.Close()
+			return m, nil
+		case "enter":
+			m.submitImport()
 			return m, nil
 		}
-		m.editor.Update(msg)
+		m.imprt.Update(msg)
 		return m, nil
+	}
+
+	if m.editor.Active() {
+		return m.updateComposer(msg)
 	}
 
 	if m.palette.Active() {
@@ -632,8 +718,9 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Shift+N is matched by the folded "n" binding below, so the exact
-	// previous-hit key is checked first, on the canonical form.
+	// Capital N steps to the previous hit (n moved to new-file in Phase
+	// 2.2; next is ctrl+n). The exact form is checked before the map so
+	// a shifted rune never falls through to another binding.
 	if tea.Key(msg).String() == "N" {
 		m.search.Prev()
 		m.jumpToCurrent()
@@ -673,11 +760,22 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.palette.Activate(m.paletteItems())
 		return m, nil
 	case k.Match(k.Editor, msg):
-		m.editor.Open(m.method, m.url, 1)
+		m.openComposer()
 		return m, nil
-	case k.Match(k.EditorAlt, msg):
-		m.editor.Open(m.method, m.url, 2)
+	case k.Match(k.Import, msg):
+		m.imprt.Open()
 		return m, nil
+	case k.Match(k.Vault, msg):
+		m.vault.Open(doctorVar(m.err))
+		return m, nil
+	case k.Match(k.Yank, msg):
+		m.yankCurrent()
+		return m, nil
+	case k.Match(k.NewFile, msg):
+		m.newfile.Open()
+		return m, nil
+	case k.Match(k.Starter, msg):
+		return m, m.starterCmd()
 	case k.Match(k.Select, msg):
 		if m.focus == 0 {
 			if item, ok := m.tree.Selected(); ok {

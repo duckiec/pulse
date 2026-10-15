@@ -20,7 +20,11 @@ type Binding struct {
 
 // KeyMap is the central key registry (DESIGN_SYSTEM.md §5). Uniformity law:
 // the same key does the same thing in every pane, so matching is global and
-// pane focus only changes scroll targets, never bindings.
+// pane focus only changes scroll targets, never bindings. Modals take
+// precedence in opacity order (vault/new-file/import over composer over
+// palette over search), and each modal documents its own local keys in its
+// footer line — a letter that types text in one focus and acts in another
+// is resolved by focus, never by pane.
 type KeyMap struct {
 	Quit       Binding
 	Send       Binding
@@ -39,7 +43,12 @@ type KeyMap struct {
 	SearchNext Binding
 	Palette    Binding
 	Editor     Binding
-	EditorAlt  Binding
+	Import     Binding
+	Vault      Binding
+	Yank       Binding
+	NewFile    Binding
+	Starter    Binding
+	Save       Binding
 	FuzzTab    Binding
 	Select     Binding
 	Help       Binding
@@ -48,6 +57,13 @@ type KeyMap struct {
 // DefaultKeyMap is the complete binding set. Every entry names a wired
 // action: a keymap entry for an unwired action would be a lie the help
 // overlay tells with confidence.
+//
+// Phase 2.2 assignments: e opens the composer (the old i), i imports a
+// pasted curl, g generates the starter collection (top/bottom keep
+// home/end; vim-style g/G yield to the blank-state verbs), n creates a
+// file (search-next moves to ctrl+n, previous stays N), v seals a secret,
+// y yanks curl, f stays the fuzz tab globally and formats JSON inside the
+// composer, ctrl+s sends globally and saves inside the composer.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Quit:       Binding{Keys: []string{"q", "ctrl+c"}, Help: "q quit", Desc: "Quit (cancels any in-flight run)"},
@@ -56,19 +72,24 @@ func DefaultKeyMap() KeyMap {
 		Focus:      Binding{Keys: []string{"tab"}, Help: "tab pane", Desc: "Cycle pane focus"},
 		Down:       Binding{Keys: []string{"j", "down"}, Help: "j/k scroll", Desc: "Scroll down one line"},
 		Up:         Binding{Keys: []string{"k", "up"}, Help: "", Desc: "Scroll up one line"},
-		Top:        Binding{Keys: []string{"g", "home"}, Help: "g/G top/bot", Desc: "Jump to top"},
-		Bottom:     Binding{Keys: []string{"G", "end"}, Help: "", Desc: "Jump to bottom"},
+		Top:        Binding{Keys: []string{"home"}, Help: "home/end", Desc: "Jump to top"},
+		Bottom:     Binding{Keys: []string{"end"}, Help: "", Desc: "Jump to bottom"},
 		HalfDown:   Binding{Keys: []string{"ctrl+d", "pgdown"}, Help: "^D/^U page", Desc: "Half-page down"},
 		HalfUp:     Binding{Keys: []string{"ctrl+u", "pgup"}, Help: "", Desc: "Half-page up"},
 		FullDown:   Binding{Keys: []string{"ctrl+f"}, Help: "", Desc: "Full page down"},
 		FullUp:     Binding{Keys: []string{"ctrl+b"}, Help: "", Desc: "Full page up"},
 		Pause:      Binding{Keys: []string{"p"}, Help: "p pause", Desc: "Pause/resume the stream"},
 		Search:     Binding{Keys: []string{"/"}, Help: "/ find", Desc: "Search the stream tail"},
-		SearchNext: Binding{Keys: []string{"n"}, Help: "n/N next", Desc: "Next search hit (N: previous)"},
+		SearchNext: Binding{Keys: []string{"ctrl+n"}, Help: "^N/N next", Desc: "Next search hit (N: previous)"},
 		Palette:    Binding{Keys: []string{"ctrl+p"}, Help: "^P palette", Desc: "Command palette"},
-		Editor:     Binding{Keys: []string{"i"}, Help: "i edit", Desc: "Edit request (URL first)"},
-		EditorAlt:  Binding{Keys: []string{"e"}, Help: "", Desc: "Edit request (headers first)"},
-		FuzzTab:    Binding{Keys: []string{"f"}, Help: "f fuzz", Desc: "Toggle fuzz dashboard"},
+		Editor:     Binding{Keys: []string{"e"}, Help: "e edit", Desc: "Compose the request (method, URL, headers, body)"},
+		Import:     Binding{Keys: []string{"i"}, Help: "i curl", Desc: "Import a pasted curl command into the composer"},
+		Vault:      Binding{Keys: []string{"v"}, Help: "v vault", Desc: "Seal a secret without leaving the TUI"},
+		Yank:       Binding{Keys: []string{"y"}, Help: "y yank", Desc: "Yank the request as a curl command"},
+		NewFile:    Binding{Keys: []string{"n"}, Help: "n new", Desc: "New collection file in the workspace"},
+		Starter:    Binding{Keys: []string{"g"}, Help: "g start", Desc: "Generate the starter collection"},
+		Save:       Binding{Keys: []string{"ctrl+s", "w"}, Help: "", Desc: "Save the composer request to disk (composer only)"},
+		FuzzTab:    Binding{Keys: []string{"f"}, Help: "f fuzz", Desc: "Toggle fuzz dashboard (formats JSON in composer)"},
 		Select:     Binding{Keys: []string{"enter"}, Help: "", Desc: "Activate tree/palette selection"},
 		Help:       Binding{Keys: []string{"?"}, Help: "? help", Desc: "Toggle this help overlay"},
 	}
@@ -91,7 +112,7 @@ func (k KeyMap) Match(b Binding, msg tea.KeyMsg) bool {
 // with no Help text (secondary keys that share a token with their primary).
 func (k KeyMap) FooterHelp() []string {
 	out := []string{}
-	for _, b := range []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Top, k.HalfDown, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.FuzzTab, k.Help} {
+	for _, b := range []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Top, k.HalfDown, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.Import, k.NewFile, k.Starter, k.Vault, k.Yank, k.FuzzTab, k.Help} {
 		if b.Help != "" {
 			out = append(out, b.Help)
 		}
@@ -99,8 +120,14 @@ func (k KeyMap) FooterHelp() []string {
 	return out
 }
 
+// ScratchFooter is the blank-state boot's hint line: the five verbs an
+// empty workspace offers, in the order a beginner meets them.
+func (k KeyMap) ScratchFooter() string {
+	return "[e] Edit   [i] Import cURL   [g] Generate Starter   [n] New File   [?] Help"
+}
+
 // All returns every binding, for the help overlay and the completeness gate:
 // a binding the overlay cannot see is a binding that does not exist.
 func (k KeyMap) All() []Binding {
-	return []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Up, k.Top, k.Bottom, k.HalfDown, k.HalfUp, k.FullDown, k.FullUp, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.EditorAlt, k.FuzzTab, k.Select, k.Help}
+	return []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Up, k.Top, k.Bottom, k.HalfDown, k.HalfUp, k.FullDown, k.FullUp, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.Import, k.Vault, k.Yank, k.NewFile, k.Starter, k.Save, k.FuzzTab, k.Select, k.Help}
 }

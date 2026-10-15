@@ -82,8 +82,16 @@ func (m *Model) View() string {
 	b.WriteString(m.viewHeader())
 	b.WriteByte('\n')
 	switch {
+	case m.newfile.Active():
+		b.WriteString(m.newfile.View(m.width-2, m.ascii))
+	case m.vault.Active():
+		b.WriteString(m.vault.View(m.width-2, m.ascii))
+	case m.imprt.Active():
+		b.WriteString(m.imprt.View(m.width-2, m.ascii))
 	case m.editor.Active():
 		b.WriteString(m.editor.View(m.width-2, m.ascii))
+	case m.scratch && !m.touched:
+		b.WriteString(m.viewWelcome())
 	case m.palette.Active():
 		b.WriteString(m.palette.View(m.width-2, m.ascii))
 	case m.width >= 100:
@@ -169,7 +177,26 @@ func (m *Model) renderResponsePane(w int) string {
 		title += " (paused)"
 	}
 	content := m.stream.Visible()
+	if m.doctor != "" {
+		content = styleWarn.Render(m.doctor) + "\n" + content
+	}
 	return st.Width(w).Render(title + "\n" + content)
+}
+
+// viewWelcome is the blank-state boot: what an empty workspace greets a
+// first run with. It names the in-memory Untitled Request and the five
+// verbs that take it somewhere — the same line the footer carries, so
+// the hint survives both reading orders (pane first, footer first).
+func (m *Model) viewWelcome() string {
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("welcome to pulse") + "\n")
+	b.WriteString(styleMuted.Render("empty workspace — an in-memory Untitled Request is loaded.\n"))
+	b.WriteString("send it against a local server, or start here:\n")
+	b.WriteString("  " + styleAccent.Render("[e]") + " Edit the request      " + styleAccent.Render("[i]") + " Import a curl command\n")
+	b.WriteString("  " + styleAccent.Render("[g]") + " Generate a starter    " + styleAccent.Render("[n]") + " New collection file\n")
+	b.WriteString("  " + styleAccent.Render("[?]") + " Help overlay\n")
+	b.WriteString(styleMuted.Render("saving writes requests.http beside you (atomic, never truncated)."))
+	return paneStyle(true, m.ascii).Width(m.width - 2).Render(b.String())
 }
 
 // viewTiming is the telemetry strip: status and phases on one row. The
@@ -223,8 +250,13 @@ func (m *Model) viewStatus() string {
 
 // viewFooter renders the contextual keybinding hints from the central keymap:
 // the footer cannot advertise a binding the keymap does not hold, because it
-// reads the same struct the dispatcher matches.
+// reads the same struct the dispatcher matches. The untouched scratchpad
+// carries the five blank-state verbs verbatim instead of the full map — a
+// beginner's first screen is not the place for seventeen tokens.
 func (m *Model) viewFooter() string {
+	if m.scratch && !m.touched {
+		return styleMuted.Render(m.keys.ScratchFooter())
+	}
 	return styleMuted.Render("?: help   " + strings.Join(m.keys.FooterHelp(), "   "))
 }
 
