@@ -16,7 +16,9 @@ package rag_test
 // The corpus is fully deterministic (no randomness, no network), so the gate
 // is reproducible machine to machine; only the latency leg depends on clock
 // speed, and 50ms against a millisecond-scale scan leaves an order of
-// magnitude of headroom.
+// magnitude of headroom. Under the race detector the clock measures
+// instrumentation overhead instead of product latency, so that leg reports
+// its p99 without enforcing the budget there; the native suite enforces it.
 
 import (
 	"context"
@@ -216,7 +218,9 @@ func TestGate50kChunkLatencyAndMemory(t *testing.T) {
 	t.Logf("retrieval over %d chunks, %d queries: p50=%v p99=%v max=%v (budget %v)",
 		chunks, gateQueries, p50, p99, time.Duration(lats[gateQueries-1])*time.Nanosecond, gateP99Budget)
 	t.Logf("hybrid legs alive: fts=%d/%d queries, vec=%d/%d queries", ftsLeg, gateQueries, vecLeg, gateQueries)
-	if p99 >= gateP99Budget {
+	if underRaceDetector {
+		t.Logf("latency leg NOT RUN (reason: race detector owns the clock; p99=%v measures instrumentation, the %v budget binds native runs)", p99, gateP99Budget)
+	} else if p99 >= gateP99Budget {
 		t.Errorf("p99 retrieval latency %v >= %v budget at %d chunks", p99, gateP99Budget, chunks)
 	}
 	if ftsLeg == 0 {
