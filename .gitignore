@@ -1,101 +1,36 @@
-# Build outputs
-/pulse
-/pulse.exe
-/bin/
+# Pulse local-only cluster (governance docs, skills, harness lock)
+.agents/
+/triage-labels.md
+/issue-tracker.md
+/domain.md
+skills-lock.json
+ARCHITECTURE.md
+GLOSSARY.md
+MEMORY.md
+PRD.md
+ROADMAP.md
+TASKS.md
+AGENTS.md
+DESIGN_SYSTEM.md
 
-# Test artifacts
-*.test
-*.out
-coverage.txt
+# Zero-value AI exhaust at root
+/HANDOFF.md
+/post15rewrite.md
 
-# Local state (never committed; secrets never touch disk by design)
-.pulse/
+# Root build/test/harness artifacts (never committed)
+ast.test
+engine.test
+opencode.json
+pulse
+
+# Public front door (Phase 4)
+/assets/banner.svg
 
 # Agent-environment vendoring (ponytail plugin + third-party skills).
-# Restore with the installers in ~/.local/share/opencode-skill-src/ (MEMORY.md ADL-0013).
 .opencode/
-opencode.json
 
-# ---------------------------------------------------------------------------
-# Markdown lockdown
-# ---------------------------------------------------------------------------
-# AGENTS.md §4.6 defines a COMPLETE documentation surface: seven Essential Vibe
-# Coding Files and nothing else. Ignoring *.md by default makes that structural
-# rather than aspirational — a stray notes file, a scratch README inside a test
-# fixture directory, or a vendored third-party README cannot be committed by
-# accident, and cannot be mistaken for state a reviewer is expected to read.
-#
-# The default-deny is the point. A repository that lists what it tracks is a
-# repository where every unlisted file is a decision nobody made; a repository
-# that lists what it does NOT track is one where every tracked file was.
-#
-# Two git semantics decide whether this rule actually does what it looks like
-# it does. Both were verified by `git check-ignore` rather than assumed, and
-# the first one was WRONG on the first attempt:
-#
-#   1. A `!pattern` containing no slash matches at EVERY depth. An unanchored
-#      `!README.md` therefore resurrects `vendor/README.md` and
-#      testdata/fixture/README.md — which is the precise thing this rule
-#      exists to prevent. Every negation below is anchored with a leading
-#      slash so it matches only at the repository root.
-#   2. A `!pattern` cannot rescue a file whose parent DIRECTORY is excluded,
-#      because git never descends into an excluded directory. No directory is
-#      excluded here, so root negations apply normally.
-*.md
-
-# --- the tracked documentation surface ---
-# Six negations. Anything else ending in .md is denied by the rule above.
-# README.md and CONTRIBUTING.md do not exist yet; their negations are
-# permissions, not files.
-!/AGENTS.md
-!/PRD.md
-!/ARCHITECTURE.md
-!/README.md
-!/CONTRIBUTING.md
-!/LICENSE
-
-# --- tracked but NOT whitelisted, and why that is not a contradiction ---
-# Four of the seven Essential Vibe Coding Files - DESIGN_SYSTEM.md, ROADMAP.md,
-# TASKS.md, MEMORY.md - plus GLOSSARY.md and the three .agents/*.md config files
-# are tracked in HEAD while this file no longer whitelists them.
-#
-# THIS IS NOT A LIE, IT IS GIT SEMANTICS: an ignore rule only ever governs
-# UNTRACKED files. A tracked file stays tracked no matter what .gitignore says,
-# so dropping these negations denies every FUTURE .md file without untracking a
-# single existing one. The working set is unchanged.
-#
-# Actually untracking them is a SEPARATE, DESTRUCTIVE step (`git rm --cached`)
-# and was NOT taken here, for two reasons that are load-bearing rather than
-# stylistic:
-#
-#   * scripts/ci/doc-sync-gate.sh greps
-#     `^(AGENTS|PRD|ROADMAP|ARCHITECTURE|DESIGN_SYSTEM|TASKS|MEMORY)\.md$`
-#     over `git diff --name-only`, which only ever lists TRACKED files. Untrack
-#     those four and the gate can never match, so every commit touching cmd/ or
-#     internal/ would fail CI permanently - the gate would reject correct work
-#     for the reason that the work carried no documentation, which is the
-#     opposite of what AGENTS.md 4.6 asks of it.
-#   * MEMORY.md is the append-only ADL ledger. ADL-0015 - the rule that makes
-#     origin/main canonical and forbids force-pushing it - lives there, so
-#     untracking it removes the provenance rule the repository is built on.
-#
-# To genuinely slim the public surface, the change belongs in doc-sync-gate.sh
-# and AGENTS.md 4.6, not in this file.
-
-# --- local agent scratch ---
-# HANDOFF.md and anything like it: working notes for one session, never state.
-# A handoff should POINT at TASKS.md or MEMORY.md, both of which are tracked.
-/HANDOFF.md
-
-# --- runtime + E2E artifacts (never committed) ---
-# The bare-metal crucible (e2e/) compiles the binary and runs real workspaces
-# under t.TempDir(), so these should never appear — the rules below are the
-# backstop so a stray artifact can never pollute git status. No tracked file
-# matches any of them (verified with git ls-files); SQLite and vault
-# containers are runtime state, and the store must stay secret-free (§3.4).
+# Build + test artifacts + ephemeral secrets
 .e2e-tmp/
-e2e/bin/
-*.db
-*.db-wal
-*.db-shm
+*.db*
 *.vault
+avail*
