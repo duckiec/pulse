@@ -197,6 +197,14 @@ func (a *App) MCPServer() (*mcp.Server, error) {
 	if a.Sessions == nil {
 		a.Sessions = mcp.NewFuzzSessions()
 	}
+	// The authoring tools resolve the workspace to the process directory
+	// per call and probe sealed values through the chain's Lookup — the
+	// same resolution every executor uses, so validate_collection and a
+	// run cannot disagree about whether a secret is set.
+	var lookup func(string) (string, error)
+	if a.Chain != nil {
+		lookup = a.Chain.Lookup
+	}
 	return mcp.NewServerWithConfig(mcp.Config{
 		Exec:         a.Executor,
 		FuzzRunner:   a.FuzzRunner,
@@ -205,6 +213,7 @@ func (a *App) MCPServer() (*mcp.Server, error) {
 		History:      &storeHistory{db: a.Store},
 		Sessions:     a.Sessions,
 		Retriever:    a.Retriever,
+		Authoring:    &mcp.Authoring{Redactor: a.Redactor, Lookup: lookup},
 		Options:      []mcp.Option{mcp.WithFailureBinder(a.Binder)},
 	})
 }

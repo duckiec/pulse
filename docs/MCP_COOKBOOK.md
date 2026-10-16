@@ -10,7 +10,7 @@ It speaks JSON-RPC 2.0 over stdio: `initialize` → `initialized` →
 operation loop → `shutdown` → exit. **Stdout is the protocol channel.**
 Nothing but JSON-RPC may be written there; diagnostics go to stderr.
 
-## Tool catalog (10 tools)
+## Tool catalog (16 tools)
 
 | Tool | What it does |
 |---|---|
@@ -24,6 +24,12 @@ Nothing but JSON-RPC may be written there; diagnostics go to stderr.
 | `fuzz_start` | Open an iterative fuzz session over an OpenAPI subset. |
 | `fuzz_next` | Pull the next fuzz case from the session. |
 | `fuzz_report` | Close the session with a TAP 13 report. |
+| `get_http_syntax_spec` | Authoritative `.http` grammar + `{{VAR}}` rules. Read this before writing. |
+| `create_collection` | Create a new workspace `.http` file (jailed, never overwrites). |
+| `upsert_request` | Create or replace one named request block (lossless splice). |
+| `delete_request` | Delete one named request block. |
+| `import_curl` | Import a raw curl command sanitized (secrets → placeholders). |
+| `validate_collection` | Syntax diagnostics + present-vs-missing `{{SECRET}}` check (names only). |
 
 ## Recipe 1: run a checked-in request
 
@@ -50,6 +56,36 @@ Nothing but JSON-RPC may be written there; diagnostics go to stderr.
 Then loop `fuzz_next` until the session is exhausted and close with
 `fuzz_report`. Boundary findings persist to the store; secret-bearing
 fields are refused before merge, never echoed back.
+
+## Recipe 4: author a collection, then verify
+
+1. `get_http_syntax_spec` for the grammar — never hallucinate syntax.
+2. `create_collection` with placeholder references (`{{API_TOKEN}}`),
+   never literal secrets.
+3. `upsert_request` per endpoint; `import_curl` for copied commands
+   (credentials arrive back as placeholder names + `pulse vault set`
+   instructions, never values).
+4. Ask the user to seal each placeholder (`pulse vault set NAME`).
+5. `validate_collection` to confirm syntax and that nothing is missing.
+6. `execute_request` to run it.
+
+## The zero-trust AI write chokepoint
+
+Every disk-writing authoring tool (`create_collection`,
+`upsert_request`, `import_curl`) scans URLs, headers, and bodies BEFORE
+a byte lands. A literal API key, Bearer token, `.env` payload, URL
+userinfo, or already-sealed value aborts the whole write — nothing
+partial is left behind — and the call returns:
+
+```text
+Refused to write literal credential in header/body. Replace the literal
+value with a {{SECRET_NAME}} placeholder and ask the user to run
+pulse vault set SECRET_NAME.
+```
+
+Write `Authorization: Bearer {{API_TOKEN}}`, not the token. The
+chokepoint cannot be bypassed by wording: placeholder-shaped values
+pass, everything else in a credential position is refused.
 
 ## Zero-trust rules for agents
 

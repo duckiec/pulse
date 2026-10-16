@@ -62,6 +62,10 @@ type Config struct {
 	Retriever Retriever
 	// Options are shared register options, e.g. WithFailureBinder.
 	Options []Option
+	// Authoring backs the six .http authoring tools
+	// (get_http_syntax_spec, create_collection, upsert_request,
+	// delete_request, import_curl, validate_collection). Nil omits all six.
+	Authoring *Authoring
 }
 
 // NewServer builds an MCP server exposing the Pulse tools.
@@ -102,6 +106,9 @@ func NewServerWithConfig(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	if err := RegisterIterativeFuzzTools(srv, cfg.Sessions, cfg.FuzzRunner, cfg.Redactor, cfg.Retriever, cfg.FuzzFindings); err != nil {
+		return nil, err
+	}
+	if err := RegisterAuthoringTools(srv, cfg.Authoring); err != nil {
 		return nil, err
 	}
 	return &Server{mcp: srv}, nil

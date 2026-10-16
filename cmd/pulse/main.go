@@ -316,7 +316,7 @@ func startTeaProgram(stdin io.Reader, stdout, stderr io.Writer, model *ui.Model)
 // describeTools is used only by `--help`, and exists so the CLI and the MCP
 // registry cannot disagree about what Pulse offers: both read the same
 // constants. Every tool the server can register is listed — a help text
-// that names two of ten is how an operator concludes the other eight do
+// that names ten of sixteen is how an operator concludes the other six do
 // not exist.
 func describeTools() string {
 	return strings.Join([]string{
@@ -330,6 +330,12 @@ func describeTools() string {
 		mcp.ToolFuzzStart,
 		mcp.ToolFuzzNext,
 		mcp.ToolFuzzReport,
+		mcp.ToolGetHTTPSyntaxSpec,
+		mcp.ToolCreateCollection,
+		mcp.ToolUpsertRequest,
+		mcp.ToolDeleteRequest,
+		mcp.ToolImportCurl,
+		mcp.ToolValidateCollect,
 	}, ", ")
 }
 
