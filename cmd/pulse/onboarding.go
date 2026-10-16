@@ -189,12 +189,22 @@ Accept: application/json
 
 // runInit implements `pulse init [file] [--force]`.
 func runInit(args []string, stdout, stderr io.Writer) int {
+	// Help everywhere: `pulse init --help`, `pulse init -h`, `pulse init help`.
+	// A file literally named `help` is still reachable as `./help`.
+	if len(args) == 1 && args[0] == "help" {
+		printHelp(stdout, initHelp)
+		return exitOK
+	}
+	if wantsFlagHelp(args) {
+		printHelp(stdout, initHelp)
+		return exitOK
+	}
 	args = shiftFlags(args, map[string]bool{"force": false})
 	fs := flag.NewFlagSet("pulse init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "overwrite the target file when it already exists")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: pulse init [file] [--force]")
+		fmt.Fprintln(stderr, initHelp)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -247,12 +257,21 @@ type doctorResult struct {
 // is a WARNING, never a failure: headless machines degrade by design and a
 // fresh workspace has no vault yet.
 func runDoctor(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Help everywhere: `pulse doctor --help`, `pulse doctor -h`, `pulse doctor help`.
+	if len(args) == 1 && args[0] == "help" {
+		printHelp(stdout, doctorHelp)
+		return exitOK
+	}
+	if wantsFlagHelp(args) {
+		printHelp(stdout, doctorHelp)
+		return exitOK
+	}
 	args = shiftFlags(args, map[string]bool{"key-id": true})
 	fs := flag.NewFlagSet("pulse doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	keyID := fs.String("key-id", "", "keychain account suffix; empty selects the default")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: pulse doctor [--key-id ID]")
+		fmt.Fprintln(stderr, doctorHelp)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

@@ -66,9 +66,18 @@ func main() {
 //  5. bare `pulse` with a pipe stdout         -> fail closed, exit 2
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, stdoutIsTTY bool) int {
 	if len(args) > 0 {
+		// Help is available everywhere: `pulse help`, `pulse --help`,
+		// `pulse -h`, and `pulse help <command> [subcommand]`.
+		if args[0] == "help" {
+			return runHelp(args[1:], stdout, stderr)
+		}
+		if args[0] == "--help" || args[0] == "-h" {
+			printHelp(stdout, topHelp)
+			return exitOK
+		}
 		switch args[0] {
 		case "mcp":
-			return runMCP(ctx, args[1:], stderr)
+			return runMCP(ctx, args[1:], stdout, stderr)
 		case "test":
 			return runTest(ctx, args[1:], stdout, stderr)
 		case "vault":
@@ -80,6 +89,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		case "sync":
 			return runSync(ctx, args[1:], stdin, stdout, stderr)
 		}
+		// `pulse <file.http> --help` shows the top help instead of
+		// opening the TUI over a file literally named --help.
+		for _, a := range args {
+			if a == "--help" || a == "-h" {
+				printHelp(stdout, topHelp)
+				return exitOK
+			}
+		}
 	}
 
 	fs := flag.NewFlagSet("pulse", flag.ContinueOnError)
@@ -89,18 +106,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		verFlag = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: pulse [flags]")
-		fmt.Fprintln(stderr, "       pulse <file.http>")
-		fmt.Fprintln(stderr, "       pulse mcp")
-		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent]")
-		fmt.Fprintln(stderr, "       pulse vault init|encrypt|decrypt <file> [--key-id ID]")
-		fmt.Fprintln(stderr, "       pulse vault set <KEY> [VALUE]")
-		fmt.Fprintln(stderr, "       pulse vault list")
-		fmt.Fprintln(stderr, "       pulse vault unset <KEY>")
-		fmt.Fprintln(stderr, "       pulse init [file] [--force]")
-		fmt.Fprintln(stderr, "       pulse doctor [--key-id ID]")
-		fmt.Fprintln(stderr, "       pulse sync serve <dir>")
-		fmt.Fprintln(stderr, "       pulse sync status")
+		fmt.Fprintln(stderr, topHelp)
 		fmt.Fprintln(stderr, "mcp mode exposes: "+describeTools())
 		fs.PrintDefaults()
 	}
@@ -113,7 +119,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stdout, "pulse "+version)
 		return exitOK
 	case *mcpFlag:
-		return runMCP(ctx, fs.Args(), stderr)
+		return runMCP(ctx, fs.Args(), stdout, stderr)
 	case !stdoutIsTTY:
 		// Fail closed: never attach a TUI to a pipe, and never treat a
 		// non-TTY as an implicit MCP invitation (ARCHITECTURE.md §2.1).
@@ -396,6 +402,15 @@ func vaultKeyID(flagVal string) string {
 // The exit code is a pure function of the run, mirrored from the engine's own
 // mapping so the CLI and the runner cannot disagree (ROADMAP.md §4.1.4).
 func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	// Help everywhere: `pulse test --help`, `pulse test -h`, `pulse test help`.
+	if len(args) == 1 && args[0] == "help" {
+		printHelp(stdout, testHelp)
+		return exitOK
+	}
+	if wantsFlagHelp(args) {
+		printHelp(stdout, testHelp)
+		return exitOK
+	}
 	args = shiftFlags(args, map[string]bool{
 		"parallel": true, "timeout": true, "strict-blocked": false,
 		"format": true, "silent": false,
@@ -413,7 +428,7 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			"suppress all stdout output; the exit code still reflects the run")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: pulse test <dir> [--format tap|json] [--silent]")
+		fmt.Fprintln(stderr, testHelp)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -489,6 +504,48 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // point: it is generated, written to the keychain, read back, and zeroised
 // (AGENTS.md §3.4).
 func runVault(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Help everywhere, before flag shifting so `--help` after a positional
+	// still shows help instead of failing closed in Parse:
+	// `pulse vault --help`, `pulse vault help`, `pulse vault help set`,
+	// `pulse vault set --help`, `pulse vault set help`.
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt, decrypt, add-recipient, rotate, set, list or unset is required")
+		fmt.Fprintln(stderr, "run `pulse help vault` for usage.")
+		return exitUsage
+	}
+	if isHelpToken(args[0]) {
+		if len(args) > 1 {
+			// `pulse vault help --help` is the vault help, not an
+			// unknown subcommand.
+			if isHelpToken(args[1]) {
+				printHelp(stdout, vaultHelp)
+				return exitOK
+			}
+			if vaultSubHelp(args[1], stdout, stderr) {
+				return exitOK
+			}
+			fmt.Fprintf(stderr, "pulse vault: unknown subcommand %q\n", args[1])
+			return exitUsage
+		}
+		printHelp(stdout, vaultHelp)
+		return exitOK
+	}
+	if len(args) == 1 && wantsFlagHelp(args) {
+		printHelp(stdout, vaultHelp)
+		return exitOK
+	}
+	if len(args) == 2 && args[1] == "help" {
+		if vaultSubHelp(args[0], stdout, stderr) {
+			return exitOK
+		}
+	}
+	if len(args) >= 2 && wantsFlagHelp(args[1:]) {
+		if vaultSubHelp(args[0], stdout, stderr) {
+			return exitOK
+		}
+		printHelp(stdout, vaultHelp)
+		return exitOK
+	}
 	args = shiftFlags(args, map[string]bool{
 		"key-id": true, "out": true, "recipients": true,
 	})
@@ -500,15 +557,7 @@ func runVault(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		recipients = fs.String("recipients", secrets.DefaultRecipientsFile, "recipient list for rotate")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: pulse vault init [--key-id ID]")
-		fmt.Fprintln(stderr, "       pulse vault keygen [--key-id ID]")
-		fmt.Fprintln(stderr, "       pulse vault encrypt <path.env> [--key-id ID] [--recipients FILE]")
-		fmt.Fprintln(stderr, "       pulse vault decrypt <path.env.vault> [--key-id ID] [--out PATH]")
-		fmt.Fprintln(stderr, "       pulse vault add-recipient <pulse-pub-...> [--recipients FILE]")
-		fmt.Fprintln(stderr, "       pulse vault rotate <path.env> [--key-id ID] [--recipients FILE]")
-		fmt.Fprintln(stderr, "       pulse vault set <KEY> [VALUE]")
-		fmt.Fprintln(stderr, "       pulse vault list")
-		fmt.Fprintln(stderr, "       pulse vault unset <KEY>")
+		fmt.Fprintln(stderr, vaultHelp)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -661,10 +710,29 @@ func vaultExit(err error) int {
 func runSync(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "pulse sync: serve <dir> or status is required")
+		fmt.Fprintln(stderr, "run `pulse help sync` for usage.")
 		return exitUsage
+	}
+	// Help everywhere: `pulse sync --help`, `pulse sync help`,
+	// `pulse sync serve --help`, `pulse sync serve help`, and the status pair.
+	// A flag-help in first position always means the sync help, whatever
+	// trails it — never a dispatch into serve or status.
+	if isHelpToken(args[0]) {
+		printHelp(stdout, syncHelp)
+		return exitOK
 	}
 	switch args[0] {
 	case "serve":
+		// A help token ANYWHERE after `serve` is a help request.
+		// Without this scan, `pulse sync serve <dir> --help` would
+		// ignore the flag and SERVE the directory — a help request
+		// must never start a network server.
+		for _, a := range args[1:] {
+			if isHelpToken(a) {
+				printHelp(stdout, syncServeHelp)
+				return exitOK
+			}
+		}
 		if len(args) < 2 || args[1] == "" {
 			fmt.Fprintln(stderr, "pulse sync serve: a collection directory is required")
 			return exitUsage
@@ -672,6 +740,10 @@ func runSync(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return runSyncServe(ctx, args[1], stdin, stderr)
 	case "status":
 		if len(args) > 1 {
+			if isHelpToken(args[1]) {
+				printHelp(stdout, syncStatusHelp)
+				return exitOK
+			}
 			fmt.Fprintf(stderr, "pulse: unexpected argument %q after `pulse sync status`\n", args[1])
 			return exitUsage
 		}
@@ -763,8 +835,12 @@ func runSyncStatus(ctx context.Context, stdout, stderr io.Writer) int {
 // what catches that case. Folding the lock into a convenience constructor would
 // look safe to call late, which is how a boot log ends up on the JSON-RPC
 // channel (AGENTS.md §3.3).
-func runMCP(ctx context.Context, args []string, stderr io.Writer) int {
+func runMCP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
+		if len(args) == 1 && isHelpToken(args[0]) {
+			printHelp(stdout, mcpHelp)
+			return exitOK
+		}
 		fmt.Fprintf(stderr, "pulse: unexpected argument %q after `pulse mcp`\n", args[0])
 		return exitUsage
 	}

@@ -44,6 +44,7 @@ pulse init                  # scaffold quickstart.http; refuses to overwrite wit
 pulse api.http              # TUI: j/k scroll, Ctrl+S send, ? help; empty dir boots a scratchpad
 pulse --mcp                 # MCP server over stdio (alias of `pulse mcp`); stdout is protocol only
 pulse test . --format tap   # headless asserts; exit 0 pass, 1 fail, 2 usage/parse, 3 secret
+pulse help                  # help for any command: `pulse help vault set`
 ```
 
 A request in `api.http`:
