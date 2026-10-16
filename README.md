@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/duckiec/pulse/actions/workflows/ci.yml"><img src="https://github.com/duckiec/pulse/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go" alt="Go 1.27+" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="License: MIT" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square" alt="License: AGPL v3" /></a>
   <a href="scripts/ci/build-matrix.sh"><img src="https://img.shields.io/badge/platform-linux_%7C_macos_%7C_windows-4C7CF3?style=flat-square" alt="Platforms: Linux, macOS, Windows" /></a>
 </p>
 
@@ -76,10 +76,19 @@ You resolve secrets in this order: `keychain → ephemeral in-memory .env → se
 
 The MCP server exposes 16 tools: `execute_request`, `execute_fuzz_run`, `list_collections`, `list_requests`, `get_request`, `get_run`, `get_history`, `fuzz_start`, `fuzz_next`, `fuzz_report`, `get_http_syntax_spec`, `create_collection`, `upsert_request`, `delete_request`, `import_curl`, `validate_collection`. The server refuses literal credentials and tells you to run `pulse vault set`.
 
-## Build
+## Build (local directory only)
+
+No install, no PATH changes, no root needed. The binary lands at `./pulse` in the repo root (gitignored) and stays there:
 
 ```sh
-CGO_ENABLED=0 go build ./...
+CGO_ENABLED=0 go build -trimpath -o ./pulse ./cmd/pulse
+./pulse --version
+./pulse doctor
+```
+
+Full checks, still local:
+
+```sh
 go vet ./...
 bash scripts/all-gates.sh
 ```
@@ -119,4 +128,4 @@ bash scripts/ci/run-with-keyring.sh bash scripts/all-gates.sh
 
 ## License
 
-MIT. See `LICENSE`.
+GNU AGPLv3. See `LICENSE`.
