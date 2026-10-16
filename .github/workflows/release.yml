@@ -20,10 +20,21 @@ jobs:
         with:
           go-version: "1.27"
       - run: bash scripts/release/build.sh "${GITHUB_REF_NAME}"
-      - run: >
-          gh release create "${GITHUB_REF_NAME}"
-          --title "${GITHUB_REF_NAME}"
-          --generate-notes
-          dist/pulse-* dist/checksums.txt
+      # Idempotent publication: `gh release create` fails when the tag's
+      # release object already exists (e.g. a prior run registered it before
+      # failing on assets), so a re-run must upload into the existing
+      # release instead of crashing. --clobber lets rerun assets overwrite.
+      - name: Publish or Update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists. Uploading/updating assets..."
+            gh release upload "${GITHUB_REF_NAME}" dist/pulse-* dist/checksums.txt --clobber
+          else
+            echo "Creating fresh release for ${GITHUB_REF_NAME}..."
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              dist/pulse-* dist/checksums.txt
+          fi
