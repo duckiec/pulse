@@ -21,7 +21,7 @@ DESIGN_SYSTEM.md
 ast.test
 engine.test
 opencode.json
-pulse
+/pulse
 
 # Public front door (Phase 4) — tracked
 

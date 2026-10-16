@@ -11,7 +11,42 @@ go run ./cmd/pulse --tui
 Browse files with `j/k`, open a request, press `Ctrl+S` to send.
 Bodies stream in chunks; the UI stays responsive under a 50 MB response.
 
-## 2. Write your first request
+## 2. Scaffold a workspace
+
+```sh
+go run ./cmd/pulse init
+```
+
+This writes a richly commented `quickstart.http` (a GET, a POST with a
+JSON body, an authenticated request using `{{DEMO_TOKEN}}`, and a
+`@wasm-sign` example). It refuses to overwrite an existing file unless
+you pass `--force`.
+
+Seal the demo token in one step — no prior keygen or init needed:
+
+```sh
+go run ./cmd/pulse vault set DEMO_TOKEN <value>
+```
+
+With no VALUE argument the command prompts securely (no echo) on a TTY
+or reads the value from piped stdin. The first `set` on a fresh machine
+automatically mints the device identity and seals a new `.pulse.vault`;
+`pulse vault list` prints sorted key names only (never values) and
+`pulse vault unset <KEY>` removes one.
+
+Check the workspace end to end:
+
+```sh
+go run ./cmd/pulse doctor
+```
+
+Doctor verifies keyring reachability, `.pulse.vault` integrity, and
+SQLite health; reports `file:line` syntax errors across every `.http`
+file; warns when a `{{SECRET}}` is set nowhere; and prints a
+ready-to-copy `mcpServers` JSON block for Claude Desktop, Cursor,
+Windsurf, and OpenCode.
+
+## 3. Write your first request
 
 Create `api.http`:
 
@@ -27,7 +62,7 @@ Accept: application/json
 Blocks are separated by `###`. A method line, headers, a blank line, then
 an optional body. See [HTTP_SYNTAX.md](HTTP_SYNTAX.md) for the full grammar.
 
-## 3. Use a variable instead of pasting a secret
+## 4. Use a variable instead of pasting a secret
 
 ```http
 @base = https://localhost:8080
@@ -44,7 +79,7 @@ in-memory `.env`, then a hard error. Pulse never writes the secret to disk,
 the store, or logs — it prints as `[REDACTED]`. Never commit a raw token
 into an `.http` file; files are Git-native plaintext by design.
 
-## 4. Test from the command line
+## 5. Test from the command line
 
 ```sh
 go run ./cmd/pulse test --format tap
@@ -54,7 +89,7 @@ Assertions (`# @assert status == 200`) run headless with TAP 13 output and
 semantic exit codes: `0` pass, `1` failure, `2` usage/parse error,
 `3` secret-resolution failure.
 
-## 5. Let an agent drive it
+## 6. Let an agent drive it
 
 ```sh
 go run ./cmd/pulse --mcp

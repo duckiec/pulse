@@ -69,7 +69,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		case "test":
 			return runTest(ctx, args[1:], stdout, stderr)
 		case "vault":
-			return runVault(ctx, args[1:], stdout, stderr)
+			return runVault(ctx, args[1:], stdin, stdout, stderr)
+		case "init":
+			return runInit(args[1:], stdout, stderr)
+		case "doctor":
+			return runDoctor(ctx, args[1:], stdin, stdout, stderr)
 		case "sync":
 			return runSync(ctx, args[1:], stdin, stdout, stderr)
 		}
@@ -87,6 +91,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stderr, "       pulse mcp")
 		fmt.Fprintln(stderr, "       pulse test <dir>   [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent]")
 		fmt.Fprintln(stderr, "       pulse vault init|encrypt|decrypt <file> [--key-id ID]")
+		fmt.Fprintln(stderr, "       pulse vault set <KEY> [VALUE]")
+		fmt.Fprintln(stderr, "       pulse vault list")
+		fmt.Fprintln(stderr, "       pulse vault unset <KEY>")
+		fmt.Fprintln(stderr, "       pulse init [file] [--force]")
+		fmt.Fprintln(stderr, "       pulse doctor [--key-id ID]")
 		fmt.Fprintln(stderr, "       pulse sync serve <dir>")
 		fmt.Fprintln(stderr, "       pulse sync status")
 		fmt.Fprintln(stderr, "mcp mode exposes: "+describeTools())
@@ -470,7 +479,7 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // The key never reaches the repository, a config file or a temp dir at any
 // point: it is generated, written to the keychain, read back, and zeroised
 // (AGENTS.md §3.4).
-func runVault(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func runVault(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	args = shiftFlags(args, map[string]bool{
 		"key-id": true, "out": true, "recipients": true,
 	})
@@ -488,6 +497,9 @@ func runVault(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "       pulse vault decrypt <path.env.vault> [--key-id ID] [--out PATH]")
 		fmt.Fprintln(stderr, "       pulse vault add-recipient <pulse-pub-...> [--recipients FILE]")
 		fmt.Fprintln(stderr, "       pulse vault rotate <path.env> [--key-id ID] [--recipients FILE]")
+		fmt.Fprintln(stderr, "       pulse vault set <KEY> [VALUE]")
+		fmt.Fprintln(stderr, "       pulse vault list")
+		fmt.Fprintln(stderr, "       pulse vault unset <KEY>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -498,7 +510,7 @@ func runVault(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	kid := vaultKeyID(*keyID)
 	cmd := fs.Arg(0)
 	if cmd == "" {
-		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt, decrypt, add-recipient or rotate is required")
+		fmt.Fprintln(stderr, "pulse vault: init, keygen, encrypt, decrypt, add-recipient, rotate, set, list or unset is required")
 		return exitUsage
 	}
 
@@ -595,6 +607,19 @@ func runVault(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 		fmt.Fprintf(stderr, "pulse: wrote %s\n", plain)
 		return exitOK
+
+	case "set":
+		return runVaultSet(ctx, application, kid, fs.Args()[1:], stdin, stdout, stderr)
+
+	case "list":
+		if fs.NArg() > 1 {
+			fmt.Fprintf(stderr, "pulse vault list: unexpected argument %q\n", fs.Arg(1))
+			return exitUsage
+		}
+		return runVaultList(ctx, application, kid, stdout, stderr)
+
+	case "unset":
+		return runVaultUnset(ctx, application, kid, fs.Args()[1:], stderr)
 
 	default:
 		fmt.Fprintf(stderr, "pulse vault: unknown subcommand %q\n", cmd)
