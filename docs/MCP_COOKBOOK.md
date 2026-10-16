@@ -35,8 +35,12 @@ Nothing but JSON-RPC may be written there; diagnostics go to stderr.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call",
- "params":{"name":"execute_request","arguments":{"path":"api.http","name":"get-user"}}}
+ "params":{"name":"execute_request","arguments":{"path":"api.http","index":0}}}
 ```
+
+`index` selects the request (0-based). There is no `name` argument —
+look the index up with `list_requests` first, or address the block by
+name with `upsert_request` and then run it.
 
 ## Recipe 2: iterate on a failure, then verify
 

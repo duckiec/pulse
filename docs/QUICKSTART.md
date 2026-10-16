@@ -5,9 +5,10 @@ You need: a terminal, Go 1.27+, no account, no network.
 ## 1. Run it
 
 ```sh
-go run ./cmd/pulse --tui
+go run ./cmd/pulse api.http
 ```
 
+With no file argument Pulse boots a blank-state scratchpad instead.
 Browse files with `j/k`, open a request, press `Ctrl+S` to send.
 Bodies stream in chunks; the UI stays responsive under a 50 MB response.
 
@@ -82,7 +83,7 @@ into an `.http` file; files are Git-native plaintext by design.
 ## 5. Test from the command line
 
 ```sh
-go run ./cmd/pulse test --format tap
+go run ./cmd/pulse test . --format tap
 ```
 
 Assertions (`# @assert status == 200`) run headless with TAP 13 output and

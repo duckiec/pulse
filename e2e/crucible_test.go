@@ -169,7 +169,7 @@ func start(t *testing.T, bin string, penv []string, args ...string) *liveProc {
 	t.Cleanup(func() {
 		if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
 			_ = stdin.Close()
-		_ = cmd.Wait()
+			_ = cmd.Wait()
 		}
 	})
 	return p
@@ -360,6 +360,7 @@ func TestCrucible(t *testing.T) {
 	stageMCP(t, bin, ws, srv, tr)
 	stageSync(t, bin, ws, tr)
 	stageTUI(t, bin, ws, tr)
+	stageOnboarding(t, bin, ws, tr)
 	stageLeakScan(t, ws, tr, canary)
 }
 

@@ -9,15 +9,18 @@ Pulse is an offline, Git-native API workbench. You design HTTP requests in plain
 Write a request in `api.http`:
 
 ```http
-### Get user
+# @name get-user
+# @assert status == 200
 GET https://localhost:8080/users/1
-Authorization: Bearer {{token}}
+Accept: application/json
+
+###
 ```
 
 Run the TUI:
 
 ```sh
-go run ./cmd/pulse --tui
+go run ./cmd/pulse api.http
 ```
 
 You browse the file tree with `j/k`, open a request, press `Ctrl+S` to send. Bodies stream in chunks. The UI stays responsive under a 50 MB response.
@@ -28,12 +31,12 @@ Run the headless MCP server for agents:
 go run ./cmd/pulse --mcp
 ```
 
-Your agent calls `list-requests`, `get-request`, `run-request` over JSON-RPC on stdio. Stdout carries protocol bytes only. Diagnostics go to stderr.
+Your agent calls `list_requests`, `get_request`, `execute_request` (plus twelve more: history, fuzz, and `.http` authoring tools) over JSON-RPC on stdio. Stdout carries protocol bytes only. Diagnostics go to stderr.
 
 Run requests without the UI:
 
 ```sh
-go run ./cmd/pulse test --format tap
+go run ./cmd/pulse test . --format tap
 ```
 
 ## Guarantees
@@ -83,6 +86,8 @@ internal/secrets/ keychain bindings, vault, redaction
 internal/rag/     local codebase index
 internal/fuzz/    OpenAPI subset reader, boundary matrix, TAP 13
 internal/mcp/     JSON-RPC server over stdio
+internal/sync/    P2P collection sync (HLC + CRDT, mTLS TOFU, zeroconf)
+internal/wasm/    sandboxed WASM signers (wazero, no ambient authority)
 internal/ui/      Bubble Tea models, Lip Gloss styling
 internal/app/     composition root, lifecycle
 ```

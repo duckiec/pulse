@@ -63,7 +63,9 @@ func stageMCP(t *testing.T, bin, ws string, srv *targetServer, tr *transcriptLog
 		}
 	}
 	for _, want := range []string{"execute_request", "list_collections", "list_requests",
-		"get_request", "get_run", "get_history", "fuzz_start", "fuzz_next", "fuzz_report"} {
+		"get_request", "get_run", "get_history", "fuzz_start", "fuzz_next", "fuzz_report",
+		"get_http_syntax_spec", "create_collection", "upsert_request",
+		"delete_request", "import_curl", "validate_collection"} {
 		if !names[want] {
 			t.Fatalf("tools/list is missing %q: %v", want, names)
 		}
@@ -154,7 +156,7 @@ func stageMCP(t *testing.T, bin, ws string, srv *targetServer, tr *transcriptLog
 	if !seen {
 		t.Fatal("watcher hot-reload: the reloaded chunk never served within 90s")
 	}
-	t.Logf("stage 3: 9 tools live, history persisted, RAG-bound 500, hot-reload proven")
+	t.Logf("stage 3: 15 tools live, history persisted, RAG-bound 500, hot-reload proven")
 
 	code, stderr := p.kill(t)
 	if code != 0 {

@@ -33,7 +33,9 @@ Authorization: Bearer {{token}}
    Supported forms include `status == 200`, `status in 200..299`, and
    `body contains "ok"`. They run headless via `pulse test`.
 5. **Request line.** `METHOD URL` with an optional `HTTP/1.1` version token,
-   e.g. `GET https://api.example.com/health HTTP/1.1`.
+   e.g. `GET https://api.example.com/health HTTP/1.1`. Methods: `GET`,
+   `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` — anything else is
+a syntax error, never a guess.
 6. **Headers.** `Name: value` lines after the request line. A `#`-commented
    header line is a disabled header — it stays in the file but is not sent.
 7. **Body.** After exactly one blank line, the raw body runs to the next

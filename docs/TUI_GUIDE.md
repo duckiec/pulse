@@ -3,8 +3,11 @@
 Launch:
 
 ```sh
-go run ./cmd/pulse --tui
+go run ./cmd/pulse [file.http]
 ```
+
+With no file argument Pulse boots the blank-state scratchpad (see
+"Starting empty" below) instead of erroring.
 
 The UI is a Bubble Tea Elm loop (`Model` / `Update` / `View`) styled with
 Lip Gloss. The render thread never does I/O: network and disk run in
@@ -23,6 +26,10 @@ while a 50 MB body lands in bounded chunks from a pooled buffer ring.
 | Key | Action |
 |---|---|
 | `j` / `k` | Move down / up (vim motions; arrows work too) |
+| `home` / `end` | Jump to top / bottom |
+| `Ctrl+D` / `Ctrl+U` | Half-page down / up (`PgDn` / `PgUp` work too) |
+| `Ctrl+F` / `Ctrl+B` | Full page down / up |
+| `p` | Pause / resume the stream |
 | `Enter` | Open / confirm |
 | `Ctrl+S` | Send the selected request (saves inside the composer) |
 | `Ctrl+X` | Cancel a running stream |
