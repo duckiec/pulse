@@ -11,8 +11,6 @@
 
 <p align="center">
 
-**pulse**
-
 The offline, Git-native API workbench.
 
 ```sh
