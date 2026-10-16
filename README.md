@@ -3,6 +3,13 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/duckiec/pulse/actions/workflows/ci.yml"><img src="https://github.com/duckiec/pulse/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go" alt="Go 1.27+" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="License: MIT" /></a>
+  <a href="scripts/ci/build-matrix.sh"><img src="https://img.shields.io/badge/platform-linux_%7C_macos_%7C_windows-4C7CF3?style=flat-square" alt="Platforms: Linux, macOS, Windows" /></a>
+</p>
+
+<p align="center">
 
 **pulse**
 
@@ -16,10 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
 irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
 ```
 
-[![Go 1.27+](https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go)](go.mod)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-[![CGO: Free](https://img.shields.io/badge/CGO-free-34D399?style=flat-square)](scripts/ci/build-matrix.sh)
-[![Offline: First](https://img.shields.io/badge/offline-first-22D3EE?style=flat-square)](docs/QUICKSTART.md)
+[Quickstart](docs/QUICKSTART.md) · [HTTP syntax](docs/HTTP_SYNTAX.md) · [TUI guide](docs/TUI_GUIDE.md) · [MCP cookbook](docs/MCP_COOKBOOK.md)
 
 </p>
 
