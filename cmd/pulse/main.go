@@ -47,7 +47,10 @@ const (
 	exitIntr  = 130
 )
 
-const version = "0.0.0-dev"
+// version is the release tag stamped by the release workflow
+// (scripts/release/build.sh passes -X main.version=<tag>). A dev build
+// reports 0.0.0-dev so an unstamped binary never claims a release.
+var version = "0.0.0-dev"
 
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr,

@@ -1,0 +1,29 @@
+name: release
+
+# Hand-rolled releases: pushing a v* tag builds the six CGO-free binaries
+# with the tag stamped in and attaches them to a GitHub Release. The
+# installers (install.sh/install.ps1) download these assets by name, so
+# the asset naming in scripts/release/build.sh is a contract, not a detail.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - run: bash scripts/release/build.sh "${GITHUB_REF_NAME}"
+      - run: >
+          gh release create "${GITHUB_REF_NAME}"
+          --title "${GITHUB_REF_NAME}"
+          --generate-notes
+          dist/pulse-* dist/checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

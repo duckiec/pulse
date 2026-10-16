@@ -1,11 +1,31 @@
 # QUICKSTART — Pulse in five minutes
 
-You need: a terminal, Go 1.27+, no account, no network.
+You need: a terminal. No account, no network, no Go toolchain.
+
+## 0. Install it
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
+```
+
+The script drops the `pulse` binary into your user bin directory,
+verifies its checksum, and proves it with `pulse --version` plus
+`pulse doctor` before handing control back. If `pulse` is not found
+afterward, add the printed directory to your `PATH` and open a fresh
+terminal.
 
 ## 1. Run it
 
 ```sh
-go run ./cmd/pulse api.http
+pulse api.http
 ```
 
 With no file argument Pulse boots a blank-state scratchpad instead.
@@ -15,7 +35,7 @@ Bodies stream in chunks; the UI stays responsive under a 50 MB response.
 ## 2. Scaffold a workspace
 
 ```sh
-go run ./cmd/pulse init
+pulse init
 ```
 
 This writes a richly commented `quickstart.http` (a GET, a POST with a
@@ -26,7 +46,7 @@ you pass `--force`.
 Seal the demo token in one step — no prior keygen or init needed:
 
 ```sh
-go run ./cmd/pulse vault set DEMO_TOKEN <value>
+pulse vault set DEMO_TOKEN <value>
 ```
 
 With no VALUE argument the command prompts securely (no echo) on a TTY
@@ -38,7 +58,7 @@ automatically mints the device identity and seals a new `.pulse.vault`;
 Check the workspace end to end:
 
 ```sh
-go run ./cmd/pulse doctor
+pulse doctor
 ```
 
 Doctor verifies keyring reachability, `.pulse.vault` integrity, and
@@ -83,7 +103,7 @@ into an `.http` file; files are Git-native plaintext by design.
 ## 5. Test from the command line
 
 ```sh
-go run ./cmd/pulse test . --format tap
+pulse test . --format tap
 ```
 
 Assertions (`# @assert status == 200`) run headless with TAP 13 output and
@@ -93,7 +113,7 @@ semantic exit codes: `0` pass, `1` failure, `2` usage/parse error,
 ## 6. Let an agent drive it
 
 ```sh
-go run ./cmd/pulse --mcp
+pulse --mcp
 ```
 
 The same engine is exposed over JSON-RPC on stdio for local AI clients.

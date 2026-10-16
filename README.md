@@ -4,6 +4,22 @@
 
 Pulse is an offline, Git-native API workbench. You design HTTP requests in plain `.http` files, run them from a terminal UI, and let local agents run the same requests through an MCP server. One engine drives both clients. No cloud. No accounts. No telemetry.
 
+## Install it
+
+Linux and macOS (no Go toolchain needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
+```
+
+You get the latest static binary in `~/.local/bin` (`%LocalAppData%\pulse\bin` on Windows), checksum-verified, with `pulse --version` and `pulse doctor` already run as a self-check. Pin a release with `--version vX.Y.Z` (`-Version` in PowerShell) or pick another directory with `--prefix` (`-Prefix`). Building from source still works: `CGO_ENABLED=0 go build ./...` with Go 1.27+.
+
 ## Use it
 
 Write a request in `api.http`:
