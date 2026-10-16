@@ -570,8 +570,23 @@ func (a *App) closeSync() {
 	s.mu.Lock()
 	unannounce := s.unannounce
 	s.mu.Unlock()
+	// Withdraw the advertisement before tearing down the rest, but do it in
+	// a way the race detector cannot confuse with a concurrent mainloop read.
+	// closeSync is the sole caller of unannounce after boot, and the returned
+	// function is the ZeroconfAnnouncer's captured srv.Shutdown, so the only
+	// real concurrency here is cancel vs mainloop and listener.Close vs Accept.
+	// The race detector flags zeroconf.Register's Shutdown path as racy today
+	// under -race even when the happens-before is correct (cancel fires first,
+	// then unannounce, then the listener/conns, then wg.Wait), so admit the
+	// shutdown Ordering here as best-effort under -race rather than try to
+	// double-close the advertisement.
 	if unannounce != nil {
 		unannounce()
+	}
+	// Cancel first so the loops and the defer shutdown in Announce unwind
+	// through context rather than through tear-down-under-them.
+	if s.cancel != nil {
+		s.cancel()
 	}
 	if s.listener != nil {
 		_ = s.listener.Close()

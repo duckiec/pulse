@@ -1,8 +1,15 @@
-# QUICKSTART — Pulse in five minutes
+# Quickstart — Pulse in five minutes
 
-You need: a terminal. No account, no network, no Go toolchain.
+> **Role in these docs:** the tutorial. Follow it top to bottom the first
+> time; it produces a working workspace. For task lookup use the
+> [TUI guide](TUI_GUIDE.md) and [MCP cookbook](MCP_COOKBOOK.md); for exact
+> grammar use the [HTTP syntax reference](HTTP_SYNTAX.md).
 
-## 0. Install it
+You need a terminal. You do not need an account, a network connection,
+or a Go toolchain. Every command below runs against the installed
+`pulse` binary.
+
+## 1. Install the binary
 
 Linux and macOS:
 
@@ -16,46 +23,53 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
 ```
 
-The script drops the `pulse` binary into your user bin directory,
-verifies its checksum, and proves it with `pulse --version` plus
-`pulse doctor` before handing control back. If `pulse` is not found
-afterward, add the printed directory to your `PATH` and open a fresh
-terminal.
+The script downloads the matching release asset plus `checksums.txt`,
+verifies the SHA-256 checksum fail-closed, installs into your user bin
+directory, and self-checks with `pulse --version` and `pulse doctor`
+inside an isolated temp `HOME`. It never touches your workspace. If your
+shell cannot find `pulse` afterward, add the printed directory to your
+`PATH` and open a fresh terminal.
 
-## 1. Run it
+To build from source instead (local directory only, no install):
 
 ```sh
-pulse api.http
+export PATH="$HOME/sdk/go1.27.2/bin:$PATH"
+CGO_ENABLED=0 go build -trimpath -o ./pulse ./cmd/pulse
+./pulse --version
 ```
-
-With no file argument Pulse boots a blank-state scratchpad instead.
-Browse files with `j/k`, open a request, press `Ctrl+S` to send.
-Bodies stream in chunks; the UI stays responsive under a 50 MB response.
 
 ## 2. Scaffold a workspace
 
 ```sh
+mkdir my-api && cd my-api
 pulse init
 ```
 
-This writes a richly commented `quickstart.http` (a GET, a POST with a
-JSON body, an authenticated request using `{{DEMO_TOKEN}}`, and a
-`@wasm-sign` example). It refuses to overwrite an existing file unless
-you pass `--force`.
+This writes a commented `quickstart.http` with four shapes: a `GET`
+with no secrets, a `POST` with a JSON body, an authenticated request
+that references `{{DEMO_TOKEN}}`, and a `@wasm-sign` example. It refuses
+to overwrite an existing file unless you pass `--force`.
 
-Seal the demo token in one step — no prior keygen or init needed:
+## 3. Seal the demo secret
 
 ```sh
 pulse vault set DEMO_TOKEN <value>
 ```
 
-With no VALUE argument the command prompts securely (no echo) on a TTY
-or reads the value from piped stdin. The first `set` on a fresh machine
-automatically mints the device identity and seals a new `.pulse.vault`;
-`pulse vault list` prints sorted key names only (never values) and
-`pulse vault unset <KEY>` removes one.
+With no `VALUE` argument the command prompts securely (no echo) on a
+TTY or reads the value from piped stdin. The first `set` on a fresh
+machine mints the device identity and creates `.pulse.vault`
+automatically — no prior `keygen` or `init` step. `pulse vault list`
+prints sorted key names only, never values; `pulse vault unset <KEY>`
+removes one; `pulse vault keygen` mints or rotates the device identity
+used for P2P sync.
 
-Check the workspace end to end:
+Secrets resolve in this order at runtime: OS keychain, then ephemeral
+in-memory `.env`, then the decrypted `.pulse.vault`, then a hard error
+with exit 3. Pulse never writes a raw value to disk, the SQLite store,
+or logs — diagnostics show `[REDACTED]`.
+
+## 4. Check the workspace
 
 ```sh
 pulse doctor
@@ -64,10 +78,24 @@ pulse doctor
 Doctor verifies keyring reachability, `.pulse.vault` integrity, and
 SQLite health; reports `file:line` syntax errors across every `.http`
 file; warns when a `{{SECRET}}` is set nowhere; and prints a
-ready-to-copy `mcpServers` JSON block for Claude Desktop, Cursor,
+ready-to-paste `mcpServers` JSON block for Claude Desktop, Cursor,
 Windsurf, and OpenCode.
 
-## 3. Write your first request
+## 5. Send a request
+
+Open the workbench over the scaffold:
+
+```sh
+pulse quickstart.http
+```
+
+With no file argument Pulse boots a blank-state scratchpad instead of
+erroring. Browse with `j`/`k`, open a request, press `Ctrl+S` to send.
+Bodies stream in bounded 32 KiB chunks under a 2 MiB in-flight ceiling,
+so the UI stays responsive under a 50 MB response. See the
+[TUI guide](TUI_GUIDE.md) for the full keymap.
+
+## 6. Write your first request
 
 Create `api.http`:
 
@@ -80,10 +108,8 @@ Accept: application/json
 ###
 ```
 
-Blocks are separated by `###`. A method line, headers, a blank line, then
-an optional body. See [HTTP_SYNTAX.md](HTTP_SYNTAX.md) for the full grammar.
-
-## 4. Use a variable instead of pasting a secret
+Blocks end at a `###` separator line. A method line, headers, one blank
+line, then an optional body. Use variables instead of pasting secrets:
 
 ```http
 @base = https://localhost:8080
@@ -95,33 +121,33 @@ Authorization: Bearer {{token}}
 ###
 ```
 
-`{{token}}` resolves at runtime: OS keychain first, then an ephemeral
-in-memory `.env`, then a hard error. Pulse never writes the secret to disk,
-the store, or logs — it prints as `[REDACTED]`. Never commit a raw token
-into an `.http` file; files are Git-native plaintext by design.
+`{{token}}` resolves through the chain in §3. Never commit a raw token:
+`.http` files are Git-native plaintext by design. See the
+[HTTP syntax reference](HTTP_SYNTAX.md) for the full grammar.
 
-## 5. Test from the command line
+## 7. Test headless
 
 ```sh
 pulse test . --format tap
 ```
 
-Assertions (`# @assert status == 200`) run headless with TAP 13 output and
-semantic exit codes: `0` pass, `1` failure, `2` usage/parse error,
-`3` secret-resolution failure.
+Assertions (`# @assert status == 200`) run headless with TAP 13 output.
+Exit codes are semantic: `0` pass, `1` failure, `2` usage or parse
+error, `3` secret-resolution failure.
 
-## 6. Let an agent drive it
+## 8. Let an agent drive it
 
 ```sh
 pulse --mcp
 ```
 
-The same engine is exposed over JSON-RPC on stdio for local AI clients.
-Stdout carries protocol bytes only; diagnostics go to stderr.
-See [MCP_COOKBOOK.md](MCP_COOKBOOK.md) for the tool catalog.
+The same engine is exposed as a 16-tool MCP server over JSON-RPC on
+stdio (`pulse mcp` is the same server). Stdout carries protocol bytes
+only; diagnostics go to stderr. See the
+[MCP cookbook](MCP_COOKBOOK.md) for the tool catalog and recipes.
 
 ## Next steps
 
-- [TUI_GUIDE.md](TUI_GUIDE.md) — keybindings, panes, streaming views
-- [HTTP_SYNTAX.md](HTTP_SYNTAX.md) — variables, assertions, `@wasm-sign`
-- [MCP_COOKBOOK.md](MCP_COOKBOOK.md) — `execute_request`, history, fuzz tools
+- [TUI guide](TUI_GUIDE.md) — panes, composer, vault, fuzz dashboard
+- [HTTP syntax reference](HTTP_SYNTAX.md) — variables, assertions, signing, cURL import
+- [MCP cookbook](MCP_COOKBOOK.md) — `execute_request`, history, fuzz, authoring tools
