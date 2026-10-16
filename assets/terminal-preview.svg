@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="520" viewBox="0 0 860 520" role="img" aria-label="Pulse terminal session: init, vault seal, doctor, test">
+  <rect width="860" height="520" rx="16" fill="#0B0F19"/>
+  <rect x="1" y="1" width="858" height="518" rx="15" fill="none" stroke="#1E293B" stroke-width="2"/>
+  <rect x="1" y="1" width="858" height="56" rx="15" fill="#111827"/>
+  <rect x="1" y="40" width="858" height="16" fill="#111827"/>
+  <circle cx="36" cy="29" r="8" fill="#F87171"/>
+  <circle cx="62" cy="29" r="8" fill="#FBBF24"/>
+  <circle cx="88" cy="29" r="8" fill="#34D399"/>
+  <text x="120" y="36" font-family="monospace" font-size="16" fill="#64748B">pulse — quickstart</text>
+  <g font-family="monospace" font-size="17">
+    <text x="32" y="96" fill="#34D399">$</text>
+    <text x="52" y="96" fill="#E2E8F0">pulse init</text>
+    <text x="32" y="122" fill="#64748B">wrote quickstart.http (refused to overwrite without --force)</text>
+    <text x="32" y="154" fill="#34D399">$</text>
+    <text x="52" y="154" fill="#E2E8F0">pulse vault set DEMO_TOKEN</text>
+    <text x="32" y="180" fill="#64748B">sealed DEMO_TOKEN (value hidden, names-only in list)</text>
+    <text x="32" y="212" fill="#34D399">$</text>
+    <text x="52" y="212" fill="#E2E8F0">pulse doctor</text>
+    <text x="32" y="238" fill="#64748B">ok: keyring reachable · vault sound · 2 files, 0 errors</text>
+    <text x="32" y="270" fill="#34D399">$</text>
+    <text x="52" y="270" fill="#E2E8F0">pulse test . --format tap</text>
+    <text x="32" y="296" fill="#E2E8F0">TAP version 13</text>
+    <text x="32" y="322" fill="#E2E8F0">ok 1 — GET /health</text>
+    <text x="32" y="348" fill="#E2E8F0">ok 2 — POST /notes</text>
+    <text x="32" y="374" fill="#E2E8F0">1..2</text>
+    <text x="32" y="406" fill="#64748B"># @assert status == 200 passed; body tail streamed in 32 KiB chunks</text>
+    <text x="32" y="438" fill="#34D399">$</text>
+    <text x="52" y="438" fill="#E2E8F0">pulse api.http</text>
+    <text x="32" y="464" fill="#64748B">TUI: tree · request · stream — j/k scroll, ^S send, ? help</text>
+    <text x="32" y="496" fill="#475569">illustrative layout; commands and grammar are verbatim from QUICKSTART.md</text>
+  </g>
+</svg>
