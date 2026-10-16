@@ -16,15 +16,18 @@ curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
 irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
 ```
 
-`Go 1.27+` · `MIT` · `CGO-free` · `offline-first`
+[![Go 1.27+](https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![CGO: Free](https://img.shields.io/badge/CGO-free-34D399?style=flat-square)](scripts/ci/build-matrix.sh)
+[![Offline: First](https://img.shields.io/badge/offline-first-22D3EE?style=flat-square)](docs/QUICKSTART.md)
 
 </p>
 
 ---
 
-Cloud API clients store your collections on someone else's server and your tokens in their sync. Pulse keeps requests as plain `.http` files in your repo and resolves secrets at runtime. One engine drives a terminal UI for humans and a 16-tool MCP server for local agents. No accounts. No telemetry. No network to Pulse infrastructure, because none exists.
+Cloud API clients store your collections on someone else's server and your tokens in their sync. Pulse keeps requests as plain `.http` files in your repo and resolves secrets at runtime. One engine drives a terminal UI for humans and a 16-tool MCP server for local agents. You create no account. Pulse sends no telemetry and opens no connection to Pulse infrastructure.
 
-Requests stream in bounded 32 KiB chunks under a 2 MiB in-flight ceiling, so a 50 MB response renders without wedging the UI. Secrets live in the OS keychain, an ephemeral in-memory `.env`, or a sealed `.pulse.vault` — never in the file, the store, or the logs.
+You stream a 50 MB response in bounded 32 KiB chunks under a 2 MiB in-flight ceiling, and the UI stays responsive. You seal secrets in the OS keychain, an ephemeral in-memory `.env`, or a sealed `.pulse.vault`. Raw values stay out of files, the store, and logs.
 
 <p align="center">
   <img src="assets/terminal-preview.svg" alt="Pulse terminal session: init, vault seal, doctor, test" width="100%" />
@@ -63,11 +66,11 @@ Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{ba
 | ![dual-mode](assets/icons/dual-mode.svg) Dual-mode | TUI and MCP share the engine. Define a request once, drive it from either. |
 | ![single binary](assets/icons/single-binary.svg) Single binary | One CGO-free executable on Linux, macOS, Windows (`CGO_ENABLED=0 go build ./...`, Go 1.27+). |
 
-What Pulse does not claim: no startup-time figure and no rival memory number are published here, because none is measured in this repo. The measured budgets are the 2 MiB in-flight streaming ceiling (`internal/engine/stream.go`: 64×32 KiB pooled chunks), the 1 MiB UI tail, and the offline/no-telemetry invariant. Cloud alternatives require accounts and store collections server-side; Pulse stores history metadata in local SQLite and refuses secret-capable columns at every open.
+This README publishes no startup-time figure and no rival memory number. The repo measures neither. The measured budgets are the 2 MiB in-flight streaming ceiling (`internal/engine/stream.go`: 64×32 KiB pooled chunks), the 1 MiB UI tail, and the offline/no-telemetry invariant. Cloud alternatives require accounts and store collections server-side; Pulse stores history metadata in local SQLite and refuses secret-capable columns at every open.
 
-Secrets resolve `keychain → ephemeral in-memory .env → sealed .pulse.vault → hard error (exit 3)`. Files carry `{{PLACEHOLDER}}` references only. Every sink — stderr, store rows, UI, MCP output — scrubs `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, plus every sealed value, to `[REDACTED]`. Outbound requests carry the real secret; diagnostic copies never do.
+You resolve secrets in this order: `keychain → ephemeral in-memory .env → sealed .pulse.vault → hard error (exit 3)`. You write `{{PLACEHOLDER}}` references in files and keep raw values out. Every sink scrubs `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, plus every sealed value, to `[REDACTED]`: stderr, store rows, UI, MCP output. Outbound requests carry the real secret; diagnostic copies never do.
 
-The MCP server exposes 16 tools: `execute_request`, `execute_fuzz_run`, `list_collections`, `list_requests`, `get_request`, `get_run`, `get_history`, `fuzz_start`, `fuzz_next`, `fuzz_report`, `get_http_syntax_spec`, `create_collection`, `upsert_request`, `delete_request`, `import_curl`, `validate_collection`. Writes refuse literal credentials and name the `pulse vault set` remedy.
+The MCP server exposes 16 tools: `execute_request`, `execute_fuzz_run`, `list_collections`, `list_requests`, `get_request`, `get_run`, `get_history`, `fuzz_start`, `fuzz_next`, `fuzz_report`, `get_http_syntax_spec`, `create_collection`, `upsert_request`, `delete_request`, `import_curl`, `validate_collection`. The server refuses literal credentials and tells you to run `pulse vault set`.
 
 ## Build
 
