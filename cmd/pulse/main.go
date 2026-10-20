@@ -890,6 +890,27 @@ func runMCP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// workspaceVault resolves the vault container every mode should read:
+// PULSE_VAULT_FILE when set, otherwise the workspace default that
+// `pulse vault set` seals into (app.ResolveVaultPath). Without this fallback
+// the documented first-run flow — init, vault set, test — resolves nothing,
+// because vault set writes ./.pulse.vault while the chain only opened a vault
+// named by the environment.
+//
+// An absent default resolves to "" rather than a path, so a command that
+// never touches a vault does not report a degradation for a file nobody
+// created. An explicit PULSE_VAULT_FILE is still passed through untouched:
+// if the user named it, a missing file is their finding, not silence.
+func workspaceVault() string {
+	if v := os.Getenv("PULSE_VAULT_FILE"); v != "" {
+		return v
+	}
+	if info, err := os.Stat(app.DefaultVaultName); err == nil && !info.IsDir() {
+		return app.DefaultVaultName
+	}
+	return ""
+}
+
 // appConfig reads PULSE_* environment variables into a Config.
 //
 // Environment rather than flags: every one of these is a deployment detail an
@@ -901,7 +922,7 @@ func appConfig() app.Config {
 	cfg := app.Config{
 		Home:       os.Getenv("PULSE_HOME"),
 		EnvFile:    os.Getenv("PULSE_ENV_FILE"),
-		VaultFile:  os.Getenv("PULSE_VAULT_FILE"),
+		VaultFile:  workspaceVault(),
 		VaultKeyID: os.Getenv("PULSE_VAULT_KEY_ID"),
 	}
 	if v := os.Getenv("PULSE_RAG_ROOT"); v != "" {

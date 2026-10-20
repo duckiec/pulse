@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"pulse/internal/app"
 	"pulse/internal/mcp"
 )
 
@@ -231,5 +232,37 @@ func TestMCPStdoutAuditTripwire(t *testing.T) {
 	}
 	if !strings.Contains(violations[0].Reason, "not JSON") {
 		t.Errorf("violation reason = %q, want it to explain the JSON-RPC breach", violations[0].Reason)
+	}
+}
+
+// TestAppConfigDefaultsToTheWorkspaceVault pins the first-run contract that
+// `pulse init` -> `pulse vault set` -> `pulse test` depends on: vault set seals
+// into ./.pulse.vault (app.ResolveVaultPath), so every other mode must read
+// that same file with no environment variable exported. An absent vault stays
+// empty, and an explicit PULSE_VAULT_FILE still wins.
+func TestAppConfigDefaultsToTheWorkspaceVault(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	t.Setenv("PULSE_VAULT_FILE", "")
+
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := appConfig().VaultFile; got != "" {
+		t.Fatalf("VaultFile = %q with no workspace vault, want empty", got)
+	}
+	if err := os.WriteFile(app.DefaultVaultName, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := appConfig().VaultFile; got != app.DefaultVaultName {
+		t.Fatalf("VaultFile = %q, want the workspace default %q", got, app.DefaultVaultName)
+	}
+	t.Setenv("PULSE_VAULT_FILE", "explicit.vault")
+	if got := appConfig().VaultFile; got != "explicit.vault" {
+		t.Fatalf("VaultFile = %q, want the explicit override", got)
 	}
 }
