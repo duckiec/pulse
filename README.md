@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
 irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
 ```
 
-[Quickstart](docs/QUICKSTART.md) · [HTTP syntax](docs/HTTP_SYNTAX.md) · [TUI guide](docs/TUI_GUIDE.md) · [MCP cookbook](docs/MCP_COOKBOOK.md)
+[Quickstart](docs/QUICKSTART.md) · [Features](docs/FEATURES.md) · [HTTP syntax](docs/HTTP_SYNTAX.md) · [TUI guide](docs/TUI_GUIDE.md) · [MCP cookbook](docs/MCP_COOKBOOK.md)
 
 </p>
 
@@ -44,6 +44,7 @@ pulse init                  # scaffold quickstart.http; refuses to overwrite wit
 pulse api.http              # TUI: j/k scroll, Ctrl+S send, ? help; empty dir boots a scratchpad
 pulse --mcp                 # MCP server over stdio (alias of `pulse mcp`); stdout is protocol only
 pulse test . --format tap   # headless asserts; exit 0 pass, 1 fail, 2 usage/parse, 3 secret
+pulse test . -u             # accept live responses as snapshot baselines
 pulse help                  # help for any command: `pulse help vault set`
 ```
 
@@ -58,7 +59,7 @@ Accept: application/json
 ###
 ```
 
-Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{base}}`, signing is a bare `@wasm-sign ./sign/auth.wasm` line (one per request). Seal a token without leaving the terminal: `pulse vault set DEMO_TOKEN` (prompts with no echo, or reads piped stdin). Check the workspace: `pulse doctor`.
+Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{base}}`, signing is a bare `@wasm-sign ./sign/auth.wasm` line (one per request). Add `# @assert snapshot` to a named request and Pulse keeps its response in an adjacent `.http.snap` file for structural regression runs. A `.env.pulse` file selects `BASE_URL` by branch, so a checkout changes the environment without a toggle. Seal a token without leaving the terminal: `pulse vault set DEMO_TOKEN` (prompts with no echo, or reads piped stdin). Check the workspace: `pulse doctor`.
 
 ## Guarantees
 
@@ -71,7 +72,7 @@ Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{ba
 
 This README publishes no startup-time figure and no rival memory number. The repo measures neither. The measured budgets are the 2 MiB in-flight streaming ceiling (`internal/engine/stream.go`: 64×32 KiB pooled chunks), the 1 MiB UI tail, and the offline/no-telemetry invariant. Cloud alternatives require accounts and store collections server-side; Pulse stores history metadata in local SQLite and refuses secret-capable columns at every open.
 
-You resolve secrets in this order: `keychain → ephemeral in-memory .env → sealed .pulse.vault → hard error (exit 3)`. You write `{{PLACEHOLDER}}` references in files and keep raw values out. Every sink scrubs `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, plus every sealed value, to `[REDACTED]`: stderr, store rows, UI, MCP output. Outbound requests carry the real secret; diagnostic copies never do.
+You resolve secrets in this order: `keychain → Git-aware .env.pulse → ephemeral in-memory .env → sealed .pulse.vault → hard error (exit 3)`. You write `{{PLACEHOLDER}}` references in files and keep raw values out. Every sink scrubs `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, plus every sealed value, to `[REDACTED]`: stderr, store rows, UI, MCP output. Outbound requests carry the real secret; diagnostic copies never do.
 
 The MCP server exposes 16 tools: `execute_request`, `execute_fuzz_run`, `list_collections`, `list_requests`, `get_request`, `get_run`, `get_history`, `fuzz_start`, `fuzz_next`, `fuzz_report`, `get_http_syntax_spec`, `create_collection`, `upsert_request`, `delete_request`, `import_curl`, `validate_collection`. The server refuses literal credentials and tells you to run `pulse vault set`.
 

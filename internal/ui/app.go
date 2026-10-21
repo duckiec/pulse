@@ -216,6 +216,33 @@ type Model struct {
 	loadFileFn func(root, rel string) tea.Msg
 	sealFn     func(name, value string) tea.Msg
 
+	// bodyBuf is a bounded copy of the response body, kept so assertions
+	// and snapshot checks can read it after the stream ends. The stream's
+	// tailored tail is for rendering; a `body contains` assertion needs the
+	// bytes, and a snapshot must be written exactly once. Capacity is reused
+	// across runs and included in RetainedBytes.
+	bodyBuf       []byte
+	bodyTruncated bool
+	// collectBody is set per run from the request's assertion list. A request
+	// with no directives does not pay a second copy of its stream.
+	collectBody bool
+	// asserts holds the post-run assertion outcomes rendered above the
+	// response body; snap is the snapshot assertion's outcome (nil when the
+	// request carries none).
+	asserts []assertOutcome
+	snap    *snapshotState
+	// snapCheck is injected by the composition root (engine.CheckSnapshot
+	// in production); nil fails a snapshot check closed with a toast.
+	snapCheck func(engine.SnapshotOptions) (engine.SnapshotResult, error)
+	// The run's identity is captured at dispatch, not read at completion:
+	// the composer can swap the document while a stream is in flight, and a
+	// verdict must describe the request that actually ran. runAsserts holds
+	// the directive text, in order.
+	runPath        string
+	runName        string
+	runHasSnapshot bool
+	runAsserts     []string
+
 	toast          string
 	framesRendered int64
 	autoQuit       bool
@@ -362,6 +389,15 @@ func (m *Model) submitEditor() tea.Cmd {
 		m.toast = "edit held: runner is fixed (no factory)"
 		return nil
 	}
+	// The editor's source is a whole document, but it is still the file the
+	// previous document came from: keep the path so snapshots, saves and the
+	// omnibox keep addressing it. Capture it before the old document is
+	// recycled.
+	path := ""
+	if m.doc != nil {
+		path = m.doc.Path
+	}
+	newDoc.Path = path
 	if m.ownedDoc != nil {
 		m.ownedDoc.Release()
 	}
@@ -388,9 +424,12 @@ func (m *Model) Bind(send func(tea.Msg)) { m.send = send }
 func (m *Model) Report() *engine.TelemetryReport { return m.report }
 
 // RetainedBytes is the UI-side memory accounting the G-frame gate asserts.
-// It delegates to the StreamView that owns the bytes, so the assertion and
-// the invariant cannot drift apart.
-func (m *Model) RetainedBytes() int { return m.stream.Stats().RetainedBytes }
+// It delegates to the StreamView that owns the stream bytes and adds the
+// bounded assertion body buffer, so the assertion and the invariant cannot
+// drift apart.
+func (m *Model) RetainedBytes() int {
+	return m.stream.Stats().RetainedBytes + cap(m.bodyBuf)
+}
 
 // Init schedules the frame governor and, in autoStart mode, the run. Both
 // are tea.Cmd values — background goroutines owned by the runtime — so Init
@@ -426,6 +465,14 @@ func (m *Model) startRun() tea.Msg {
 	m.report = engine.AcquireTelemetry()
 	m.doctor = ""
 	m.touched = true
+	// A new run owns new bytes: the previous body, assertions, and snapshot
+	// verdict must not describe the request that is about to stream.
+	m.bodyBuf = m.bodyBuf[:0]
+	m.bodyTruncated = false
+	m.captureRunContext()
+	m.collectBody = len(m.runAsserts) > 0
+	m.asserts = nil
+	m.snap = nil
 	ctx, cancel := context.WithCancel(m.baseCtx)
 	m.cancel = cancel
 	ctx = engine.Attach(ctx, m.report)
@@ -468,6 +515,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stream.Append(nil)
 		} else {
 			m.stream.Append(msg.data)
+			m.appendBody(msg.data)
 		}
 		return m, nil
 	case probeMsg:
@@ -491,12 +539,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.res = msg.res
 		m.doctor = ""
 		m.phase = phaseDone
+		m.evaluateAsserts()
+		// The assertion block is part of the pane's render budget: resize
+		// now so the stream viewport does not render over it.
+		m.sizeViewport()
+		var snapCmd tea.Cmd
+		if m.runHasSnapshot {
+			snapCmd = m.snapshotCheckCmd(false)
+		}
 		if m.report != nil {
 			m.report.End()
 		}
 		if m.autoQuit {
 			return m, tea.Quit
 		}
+		return m, snapCmd
+	case snapshotCheckedMsg:
+		m.applySnapshotResult(msg)
 		return m, nil
 	case saveDoneMsg:
 		if msg.err != nil {
@@ -528,6 +587,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runFailedMsg:
 		m.stream.Flush()
 		m.stream.Finish()
+		m.asserts = nil
+		m.snap = nil
 		m.applyFailedRun(msg.err)
 		m.phase = phaseFailed
 		if m.report != nil {
@@ -785,6 +846,8 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case k.Match(k.Yank, msg):
 		m.yankCurrent()
 		return m, nil
+	case k.Match(k.Snapshot, msg):
+		return m, m.acceptSnapshotCmd()
 	case k.Match(k.NewFile, msg):
 		m.newfile.Open()
 		return m, nil

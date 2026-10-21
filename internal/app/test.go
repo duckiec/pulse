@@ -78,13 +78,28 @@ type TestResult struct {
 	JSON string
 }
 
+// TestOption tunes one test run. Options exist so the common call site stays
+// readable and a new switch (today `--update-snapshots`) does not rewrite
+// every caller's signature.
+//
+// It configures the engine's TestConfig and nothing else: an option can change
+// what a run DOES, never how its results are mapped to an exit code.
+type TestOption func(*engine.TestConfig)
+
+// WithUpdateSnapshots accepts every live response as the new snapshot
+// baseline (`pulse test -u`). It affects only `# @assert snapshot`
+// assertions; every other assertion is evaluated unchanged.
+func WithUpdateSnapshots(update bool) TestOption {
+	return func(c *engine.TestConfig) { c.UpdateSnapshots = update }
+}
+
 // RunTest executes the .http files under root and returns the outcome.
 //
 // `strictBlocked` makes a run with ANY skipped test fail. It is opt-in rather
 // than the default because a BLOCKED test is an environment limit, not a defect
 // in the collection, and CI that failed on every machine without a keychain
 // would be unusable on most machines (AGENTS.md §4.5).
-func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout time.Duration, strictBlocked bool) (*TestResult, error) {
+func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout time.Duration, strictBlocked bool, opts ...TestOption) (*TestResult, error) {
 	files, err := engine.Files(root)
 	if err != nil {
 		return nil, err
@@ -97,11 +112,17 @@ func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout ti
 	}
 	rep := &tapReporter{}
 
-	report, err := runner.Run(ctx, files, engine.TestConfig{
+	cfg := engine.TestConfig{
 		MaxParallel: parallel,
 		Timeout:     timeout,
 		Redactor:    a.Redactor,
-	}, rep)
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	report, err := runner.Run(ctx, files, cfg, rep)
 	if err != nil && report == nil {
 		return nil, err
 	}
@@ -140,6 +161,41 @@ func WriteTestReport(w io.Writer, tap string) error {
 	return nil
 }
 
+// WriteTestReportWithDiffs writes the TAP document and, after it, any
+// snapshot diffs as TAP comments.
+//
+// TAP diagnostics are YAML and the emitter flattens a message onto one line,
+// which is the right shape for "status 500 is not 200" and the wrong shape for
+// a structural diff. A comment line is inert to every TAP consumer and fully
+// readable to the human watching CI, so the diff goes there — line-oriented,
+// prefixed `# `, never able to look like a test result.
+func WriteTestReportWithDiffs(w io.Writer, tap string, entries []engine.Entry) error {
+	if err := WriteTestReport(w, tap); err != nil {
+		return err
+	}
+	wrote := false
+	for _, e := range entries {
+		if e.Diff == "" {
+			continue
+		}
+		if wrote {
+			if _, err := io.WriteString(w, "#\n"); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintf(w, "# snapshot diff: %s %s\n", e.File, e.Request); err != nil {
+			return err
+		}
+		for _, line := range strings.Split(e.Diff, "\n") {
+			if _, err := io.WriteString(w, "#   "+line+"\n"); err != nil {
+				return err
+			}
+		}
+		wrote = true
+	}
+	return nil
+}
+
 // TestDir is the `pulse test <dir>` entry the CLI calls.
 //
 // It writes the TAP document to stdout and returns the process exit code. It is
@@ -155,11 +211,11 @@ func (a *App) TestDir(ctx context.Context, root string, out io.Writer, parallel 
 // code is still the report's own: silence changes what is written, never what
 // is concluded. An unknown format fails closed with exit 2 BEFORE any test
 // executes, so a typo cannot report a green run.
-func (a *App) TestDirEx(ctx context.Context, root string, out io.Writer, parallel int, timeout time.Duration, strictBlocked bool, format TestFormat, silent bool) (int, error) {
+func (a *App) TestDirEx(ctx context.Context, root string, out io.Writer, parallel int, timeout time.Duration, strictBlocked bool, format TestFormat, silent bool, opts ...TestOption) (int, error) {
 	if format != TestFormatTAP && format != TestFormatJSON {
 		return engine.ExitUsage, fmt.Errorf("app: unknown test format %q (want \"tap\" or \"json\")", string(format))
 	}
-	res, err := a.RunTest(ctx, root, parallel, timeout, strictBlocked)
+	res, err := a.RunTest(ctx, root, parallel, timeout, strictBlocked, opts...)
 	if err != nil {
 		return engine.ExitUsage, err
 	}
@@ -172,7 +228,7 @@ func (a *App) TestDirEx(ctx context.Context, root string, out io.Writer, paralle
 			return engine.ExitFailed, err
 		}
 	default:
-		if err := WriteTestReport(out, res.TAP); err != nil {
+		if err := WriteTestReportWithDiffs(out, res.TAP, res.Report.Entries); err != nil {
 			return engine.ExitFailed, err
 		}
 	}
@@ -200,6 +256,7 @@ type JSONTestPoint struct {
 	Skip       bool              `json:"skip,omitempty"`
 	SkipReason string            `json:"skip_reason,omitempty"`
 	Detail     string            `json:"detail,omitempty"`
+	Diff       string            `json:"diff,omitempty"`
 	Fields     map[string]string `json:"fields,omitempty"`
 }
 
@@ -234,6 +291,7 @@ func RenderJSONReport(report *engine.TestReport, entries []engine.Entry) (string
 			Skip:       e.Skip,
 			SkipReason: e.SkipReason,
 			Detail:     e.Detail,
+			Diff:       e.Diff,
 			Fields:     e.Fields,
 		})
 	}

@@ -248,11 +248,20 @@ func (m *Model) responseRows(g geometry) ([]string, string) {
 		vh = 1
 	}
 	rows := m.telemetryRows(g.mainW - 2)
+	// Assertion and snapshot verdicts ride at the top of the body viewport:
+	// they belong to the response, and spending header rows on them would
+	// make the pane's height depend on the request's directives.
+	asserts := m.snapshotLines(g.mainW - 2)
+	if len(asserts) > vh {
+		asserts = asserts[:vh]
+	}
 	vp := strings.Split(m.stream.Visible(), "\n")
-	if len(vp) > vh {
-		vp = vp[len(vp)-vh:]
+	room := vh - len(asserts)
+	if len(vp) > room {
+		vp = vp[len(vp)-room:]
 	}
 	vp = highlightBody(vp)
+	vp = append(asserts, vp...)
 	rows = append(rows, fitRows(vp, vh)...)
 
 	right := ""

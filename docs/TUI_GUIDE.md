@@ -103,6 +103,7 @@ The table below mirrors it.
 | `i` | Import a pasted curl command into the composer |
 | `v` | Seal a secret without leaving the TUI |
 | `y` | Yank the request as a curl command |
+| `u` | Accept the new snapshot when a snapshot assertion fails |
 | `n` | New collection file in the workspace |
 | `g` | Generate the starter collection |
 | `f` | Fuzz dashboard (formats JSON inside the composer) |
@@ -189,6 +190,34 @@ JSON bodies are syntax-coloured (keys, strings, numbers, literals). The
 highlighter never reformats or rewrites: a line it does not recognise passes
 through byte-identical, so a body is always exactly what the server sent.
 
-`# @assert` outcomes are part of the request pane, so the assertion and the
-response are visible at the same time — a failing assert names the expression,
-the expected value, and the actual value with the source line for the failure.
+`# @assert` outcomes ride at the top of the response body, so the assertion
+and the response are visible at the same time — a failing assert names the
+expression, the expected value, and the actual value with the source line for
+the failure.
+
+A `# @assert snapshot` request reports its own line. On a mismatch the pane
+shows the structural diff (JSON paths) or a line diff, plus the
+`[u] accept the new snapshot` hint.
+
+## How to accept a snapshot
+
+When a snapshot assertion fails, read the diff and press `u`. The live
+response becomes the new baseline, `api.http.snap` is rewritten, and the
+toast confirms the update. Commit the `.snap` file with the change — it
+is the reviewed record of the new response shape.
+
+`u` does nothing when the snapshot already matches, and it refuses to
+overwrite a malformed snapshot file: that file needs a human, not a new
+baseline. The first run of a snapshot request writes the file and passes.
+See the [feature guide](FEATURES.md) for the file format and the size
+limit.
+
+## How branch environments apply
+
+Pulse reads `.env.pulse` from the directory you launched it in. The
+checked-out branch selects a `[branch:...]` block, so `{{BASE_URL}}`
+changes when you switch branches; `{{GIT_BRANCH}}` is available inside
+URLs, headers, bodies, and the file itself. The omnibox and the request
+pane show the unresolved template, not the secret or the branch value —
+values resolve at send time. See
+[Git-aware environments](FEATURES.md#git-aware-environments).

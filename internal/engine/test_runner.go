@@ -99,6 +99,11 @@ type Entry struct {
 	SkipReason string
 	// Detail is the failure message.
 	Detail string
+	// Diff is a readable structural or line diff for a failed snapshot
+	// assertion. It is separate from Detail because a diff is multi-line and
+	// TAP diagnostics flatten a message onto one line; the CLIs render this
+	// as its own block.
+	Diff string
 	// secret marks a secret-resolution failure, which makes the whole run
 	// exit 3 rather than 1 (AGENTS.md §4.4).
 	secret bool
@@ -156,6 +161,11 @@ type TestConfig struct {
 	MaxParallel int
 	// Timeout bounds one request. Zero selects DefaultTimeout.
 	Timeout time.Duration
+	// UpdateSnapshots accepts every live response as the new snapshot
+	// baseline (the `-u`/`--update-snapshots` flag). It changes what a
+	// snapshot mismatch does (rewrite instead of fail), never what any other
+	// assertion does.
+	UpdateSnapshots bool
 	// Redactor scrubs failure details before they reach a reporter.
 	Redactor interface{ String(string) string }
 }
@@ -453,8 +463,19 @@ func (r *TestRunner) runFile(ctx context.Context, path string, cfg TestConfig, t
 	var reqs []*ast.Request
 	for req := range doc.Requests() {
 		exprs := doc.AssertsOf(req)
+		name := astString(doc, req.NameStart, req.NameEnd)
 		for _, a := range exprs {
 			text := doc.Str(a.Start, a.End)
+			if IsSnapshotAssert(text) {
+				// The name IS the snapshot namespace. Catching this before
+				// any request runs makes it a usage error (exit 2), not a
+				// test failure discovered halfway through the collection.
+				if strings.TrimSpace(name) == "" {
+					return fileResult{err: fmt.Errorf("%w: %s:%d: %v",
+						ErrParseFailure, path, a.Line, ErrSnapshotUnnamed)}
+				}
+				continue
+			}
 			if _, perr := ParseAssert(text); perr != nil {
 				return fileResult{err: fmt.Errorf("%w: %s:%d: %v",
 					ErrParseFailure, path, a.Line, perr)}
@@ -467,7 +488,7 @@ func (r *TestRunner) runFile(ctx context.Context, path string, cfg TestConfig, t
 	defer func() { _ = router.Close() }()
 
 	for i, req := range reqs {
-		entries = append(entries, r.runOne(ctx, doc, req, i, router, cfg, timeout, rel)...)
+		entries = append(entries, r.runOne(ctx, doc, req, i, router, cfg, timeout, rel, path)...)
 	}
 	return fileResult{entries: entries}
 }
@@ -494,8 +515,10 @@ func (r *TestRunner) runOne(
 	cfg TestConfig,
 	timeout time.Duration,
 	rel string,
+	httpPath string,
 ) []Entry {
-	name := astString(doc, req.NameStart, req.NameEnd)
+	named := astString(doc, req.NameStart, req.NameEnd)
+	name := named
 	if name == "" {
 		name = fmt.Sprintf("request #%d", idx)
 	}
@@ -533,6 +556,10 @@ func (r *TestRunner) runOne(
 	var out []Entry
 	for _, a := range doc.AssertsOf(req) {
 		text := astString(doc, a.Start, a.End)
+		if IsSnapshotAssert(text) {
+			out = append(out, snapshotEntry(res, cfg, rel, named, name, body, httpPath, collector.truncated))
+			continue
+		}
 		assertion, err := ParseAssert(text)
 		if err != nil {
 			continue // already caught in the pre-pass
@@ -566,6 +593,58 @@ func (r *TestRunner) runOne(
 		})
 	}
 	return out
+}
+
+// snapshotEntry evaluates one `# @assert snapshot`.
+//
+// A truncated collection is a FAILURE, not a comparison against a prefix: the
+// stored baseline describes a whole body, and accepting a prefix would create
+// a snapshot that every future run also truncates. The cap is the runner's
+// own MaxCollectedBytes, so this can only happen when the response was large.
+func snapshotEntry(res *RunResult, cfg TestConfig, rel, named, display, body, httpPath string, truncated bool) Entry {
+	e := Entry{
+		File:      rel,
+		Request:   display,
+		Assertion: SnapshotAssertExpr,
+		OK:        true,
+		Fields: map[string]string{
+			"status":   fmt.Sprint(res.Status),
+			"duration": res.Elapsed.String(),
+		},
+	}
+	if named == "" {
+		e.OK = false
+		e.Detail = ErrSnapshotUnnamed.Error()
+		return e
+	}
+	if truncated {
+		e.OK = false
+		e.Detail = fmt.Sprintf("response body exceeds %d bytes; snapshot not compared", MaxCollectedBytes)
+		e.Fields["truncated"] = "true"
+		return e
+	}
+	sr, err := CheckSnapshot(SnapshotOptions{
+		HTTPFile: httpPath,
+		Request:  named,
+		Body:     body,
+		Update:   cfg.UpdateSnapshots,
+	})
+	if sr.Path != "" {
+		e.Fields["snapshot"] = sr.Path
+	}
+	if sr.Action != "" {
+		e.Fields["action"] = string(sr.Action)
+	}
+	switch {
+	case err != nil:
+		e.OK = false
+		e.Detail = redact(cfg.Redactor, err.Error())
+	case !sr.OK:
+		e.OK = false
+		e.Detail = fmt.Sprintf("snapshot %q differs from %s", named, sr.Path)
+		e.Diff = redact(cfg.Redactor, sr.Diff)
+	}
+	return e
 }
 
 // astString reads a span out of the document's arena. It is the same accessor

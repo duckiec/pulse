@@ -146,8 +146,26 @@ stdio (`pulse mcp` is the same server). Stdout carries protocol bytes
 only; diagnostics go to stderr. See the
 [MCP cookbook](MCP_COOKBOOK.md) for the tool catalog and recipes.
 
+## 9. Make the environment follow the branch
+
+Add a `.env.pulse` beside the collection:
+
+```ini
+[default]
+BASE_URL = http://localhost:8080
+
+[branch:staging]
+BASE_URL = https://staging.internal.net
+```
+
+`{{BASE_URL}}` now changes with the checkout. To lock a response shape into
+review, add `# @assert snapshot` to a named request: the first
+`pulse test` writes `api.http.snap`, later runs diff against it, and
+`pulse test -u` accepts a new baseline. In the TUI, `u` does the same thing.
+
 ## Next steps
 
+- [Feature guide](FEATURES.md) — branch environments and snapshot assertions
 - [TUI guide](TUI_GUIDE.md) — panes, composer, vault, fuzz dashboard
 - [HTTP syntax reference](HTTP_SYNTAX.md) — variables, assertions, signing, cURL import
 - [MCP cookbook](MCP_COOKBOOK.md) — `execute_request`, history, fuzz, authoring tools

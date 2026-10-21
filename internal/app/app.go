@@ -44,6 +44,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,6 +52,7 @@ import (
 
 	"pulse/internal/ast"
 	"pulse/internal/engine"
+	pulseenv "pulse/internal/env"
 	"pulse/internal/mcp"
 	"pulse/internal/rag"
 	"pulse/internal/secrets"
@@ -90,8 +92,15 @@ type Config struct {
 	DBPath string
 	// EnvFile is a .env loaded into memory for variable resolution. Never
 	// persisted, never written back. Empty means "no ephemeral env", and the
-	// resolution order becomes keychain → error.
+	// resolution order becomes keychain → .env.pulse → vault → error.
 	EnvFile string
+	// EnvPulseFile is a Git-aware `.env.pulse` read once at boot. The current
+	// branch (bounded `git rev-parse`) selects a `[branch:...]` block, which
+	// layers above the plain .env and injects the reserved {{GIT_BRANCH}}
+	// variable. Empty disables the feature (tests do this so they never depend
+	// on the checkout they run in); the CLI defaults it to `.env.pulse` in the
+	// invocation directory.
+	EnvPulseFile string
 	// RunTimeout bounds one request execution. Zero selects DefaultRunTimeout.
 	RunTimeout time.Duration
 	// FuzzTimeout bounds one fuzz probe. Zero selects mcp.DefaultFuzzTimeout.
@@ -348,6 +357,7 @@ func (a *App) openStore() error {
 // exit 3 rather than starting the process with a half-loaded secret set.
 func (a *App) openSecrets() error {
 	red := secrets.NewRedactor()
+	a.Redactor = red
 
 	var env map[string]string
 	if a.cfg.EnvFile != "" {
@@ -372,6 +382,9 @@ func (a *App) openSecrets() error {
 	}
 	a.keyBackend = backend
 	chainOpts := []secrets.ChainOption{secrets.WithRedactor(red), secrets.WithBackend(backend)}
+	if pulseEnv := a.loadEnvPulse(); len(pulseEnv) > 0 {
+		chainOpts = append(chainOpts, secrets.WithEnvPulse(pulseEnv))
+	}
 	if env != nil {
 		chainOpts = append(chainOpts, secrets.WithEnv(env))
 	}
@@ -383,7 +396,6 @@ func (a *App) openSecrets() error {
 		}
 	}
 	a.Chain = secrets.NewChain(chainOpts...)
-	a.Redactor = red
 
 	if !a.cfg.SkipKeychainProbe {
 		// A missing keychain is a DEGRADATION on every platform CI runs on, and
@@ -397,6 +409,45 @@ func (a *App) openSecrets() error {
 		}
 	}
 	return nil
+}
+
+// loadEnvPulse hydrates the Git-aware environment context: the branch block
+// (or [default]) from the configured `.env.pulse`, plus the reserved
+// {{GIT_BRANCH}} variable.
+//
+// A missing file is silent — most workspaces do not have one, and that is not
+// a problem to report. A malformed file or an unavailable git binary is a
+// DEGRADATION: the app keeps serving with the remaining tiers, and the reason
+// appears in Degradations rather than vanishing.
+//
+// The git subprocess is bounded by env.BranchTimeout. This runs during boot,
+// never on the TUI render thread (AGENTS.md §3.2).
+func (a *App) loadEnvPulse() map[string]string {
+	if a.cfg.EnvPulseFile == "" {
+		return nil
+	}
+	branch, err := pulseenv.Branch(a.ctx, filepath.Dir(a.cfg.EnvPulseFile))
+	if err != nil {
+		a.degrade(fmt.Sprintf("branch-aware env is inactive: %v", err))
+	}
+	out := map[string]string{}
+	if branch != "" {
+		// Reserved, auto-populated, and never read from the file. Outside a
+		// repository it is ABSENT rather than empty, so a request that needs
+		// it fails closed instead of sending an empty segment.
+		out[pulseenv.BranchVar] = branch
+	}
+	doc, err := pulseenv.ParseFile(a.cfg.EnvPulseFile)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			a.degrade(fmt.Sprintf("the .env.pulse at %s could not be read: %v", a.cfg.EnvPulseFile, err))
+		}
+		return out
+	}
+	for k, v := range doc.Effective(branch) {
+		out[k] = v
+	}
+	return out
 }
 
 // openVaultTier decrypts the configured PVLT2 container with the device

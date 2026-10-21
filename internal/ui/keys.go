@@ -46,6 +46,7 @@ type KeyMap struct {
 	Import     Binding
 	Vault      Binding
 	Yank       Binding
+	Snapshot   Binding
 	NewFile    Binding
 	Starter    Binding
 	Save       Binding
@@ -86,6 +87,7 @@ func DefaultKeyMap() KeyMap {
 		Import:     Binding{Keys: []string{"i"}, Help: "i curl", Desc: "Import a pasted curl command into the composer"},
 		Vault:      Binding{Keys: []string{"v"}, Help: "v vault", Desc: "Seal a secret without leaving the TUI"},
 		Yank:       Binding{Keys: []string{"y"}, Help: "y yank", Desc: "Yank the request as a curl command"},
+		Snapshot:   Binding{Keys: []string{"u"}, Help: "u snapshot", Desc: "Accept the new snapshot when a snapshot assertion fails"},
 		NewFile:    Binding{Keys: []string{"n"}, Help: "n new", Desc: "New collection file in the workspace"},
 		Starter:    Binding{Keys: []string{"g"}, Help: "g start", Desc: "Generate the starter collection"},
 		Save:       Binding{Keys: []string{"ctrl+s", "w"}, Help: "", Desc: "Save the composer request to disk (composer only)"},
@@ -158,5 +160,5 @@ func (k KeyMap) ModeKeys(mode string) []string {
 // All returns every binding, for the help overlay and the completeness gate:
 // a binding the overlay cannot see is a binding that does not exist.
 func (k KeyMap) All() []Binding {
-	return []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Up, k.Top, k.Bottom, k.HalfDown, k.HalfUp, k.FullDown, k.FullUp, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.Import, k.Vault, k.Yank, k.NewFile, k.Starter, k.Save, k.FuzzTab, k.Select, k.Help}
+	return []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Up, k.Top, k.Bottom, k.HalfDown, k.HalfUp, k.FullDown, k.FullUp, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.Import, k.Vault, k.Yank, k.Snapshot, k.NewFile, k.Starter, k.Save, k.FuzzTab, k.Select, k.Help}
 }

@@ -6,8 +6,9 @@
 // Three laws govern this package (AGENTS.md §3.4, §4.3, §4.4):
 //
 //  1. A secret is never written to disk — not the repo, not /tmp, not SQLite.
-//  2. Resolution is fail-closed: keychain → ephemeral .env → hard error. There is
-//     no fourth option, no placeholder, and no empty-string fallback.
+//  2. Resolution is fail-closed: keychain → Git-aware .env.pulse → ephemeral
+//     .env → decrypted vault → hard error. There is no placeholder and no
+//     empty-string fallback.
 //  3. A resolved value is registered with the redactor the moment it exists, so
 //     it cannot leak through a payload the redactor has not seen yet.
 //
@@ -63,6 +64,7 @@ type SecretResolver interface {
 type Chain struct {
 	mu       sync.RWMutex
 	backend  SecretResolver    // OS keychain, may be nil
+	pulse    map[string]string // Git-aware .env.pulse context, memory only
 	env      map[string]string // ephemeral .env, memory only
 	vault    map[string]string // decrypted .env.vault, memory only
 	redactor *Redactor         // where every resolved value is registered
@@ -77,6 +79,17 @@ func WithBackend(b SecretResolver) ChainOption { return func(c *Chain) { c.backe
 
 // WithEnv binds an ephemeral, in-memory variable map (parsed from a .env).
 func WithEnv(env map[string]string) ChainOption { return func(c *Chain) { c.env = env } }
+
+// WithEnvPulse binds the Git-aware `.env.pulse` context, already hydrated for
+// the current branch by the composition root.
+//
+// It ranks ABOVE the plain `.env`: the branch block is the more specific
+// statement, and a developer who wrote `[branch:staging] BASE_URL` expects
+// switching branches to change the URL. The map is memory-only and zeroised
+// by Clear exactly like the `.env` tier.
+func WithEnvPulse(env map[string]string) ChainOption {
+	return func(c *Chain) { c.pulse = env }
+}
 
 // WithVaultEnv binds the decrypted vault payload: the PVLT2 container opened
 // with the device identity, parsed as .env, held in memory only. It ranks
@@ -100,12 +113,18 @@ func NewChain(opts ...ChainOption) *Chain {
 	if c.env == nil {
 		c.env = map[string]string{}
 	}
+	if c.pulse == nil {
+		c.pulse = map[string]string{}
+	}
 	if c.vault == nil {
 		c.vault = map[string]string{}
 	}
 	c.order = []string{}
 	if c.backend != nil {
 		c.order = append(c.order, "keychain:"+c.backend.Backend())
+	}
+	if len(c.pulse) > 0 {
+		c.order = append(c.order, "env.pulse")
 	}
 	if len(c.env) > 0 {
 		c.order = append(c.order, "env")
@@ -141,7 +160,7 @@ func (c *Chain) Available() error {
 			return nil
 		}
 	}
-	if len(c.env) > 0 {
+	if len(c.pulse) > 0 || len(c.env) > 0 {
 		return nil
 	}
 	return fmt.Errorf("secrets: no usable source (keychain: %v, env: empty)", c.backendStatusLocked())
@@ -164,7 +183,7 @@ func (c *Chain) backendStatusLocked() string {
 // back, so it can never escape un-scrubbed.
 func (c *Chain) Resolve(key string) (string, error) {
 	c.mu.RLock()
-	backend, env, vault, redactor := c.backend, c.env, c.vault, c.redactor
+	backend, pulse, env, vault, redactor := c.backend, c.pulse, c.env, c.vault, c.redactor
 	c.mu.RUnlock()
 
 	var lastErr error
@@ -183,25 +202,32 @@ func (c *Chain) Resolve(key string) (string, error) {
 			lastErr = fmt.Errorf("keychain unavailable: %w", err)
 		}
 	}
-	// 2. Ephemeral .env.
+	// 2. Git-aware .env.pulse (branch block, then [default]).
+	if v, ok := pulse[key]; ok {
+		if redactor != nil {
+			redactor.Register(v)
+		}
+		return v, nil
+	}
+	// 3. Ephemeral .env.
 	if v, ok := env[key]; ok {
 		if redactor != nil {
 			redactor.Register(v)
 		}
 		return v, nil
 	}
-	// 3. Decrypted .env.vault payload (memory only, opened at boot).
+	// 4. Decrypted .env.vault payload (memory only, opened at boot).
 	if v, ok := vault[key]; ok {
 		if redactor != nil {
 			redactor.Register(v)
 		}
 		return v, nil
 	}
-	// 4. Hard error. No placeholder, no empty string.
+	// 5. Hard error. No placeholder, no empty string.
 	if lastErr != nil {
 		return "", fmt.Errorf("%w: %q (%v)", ErrUnresolved, key, lastErr)
 	}
-	return "", fmt.Errorf("%w: %q (keychain, env, vault)", ErrUnresolved, key)
+	return "", fmt.Errorf("%w: %q (keychain, env.pulse, env, vault)", ErrUnresolved, key)
 }
 
 // ResolveAll resolves every key, failing closed on the first miss. It is used to
@@ -380,6 +406,10 @@ func ExtractVariables(s string) []string {
 func (c *Chain) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for k := range c.pulse {
+		c.pulse[k] = ""
+	}
+	c.pulse = map[string]string{}
 	for k := range c.env {
 		c.env[k] = ""
 	}

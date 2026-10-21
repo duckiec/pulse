@@ -3,7 +3,8 @@
 > **Role in these docs:** the reference. It lists every construct, its
 > exact form, and what the parser does with it. For the guided path use
 > the [quickstart](QUICKSTART.md); for TUI editing use the
-> [TUI guide](TUI_GUIDE.md).
+> [TUI guide](TUI_GUIDE.md); for branch environments and snapshots use
+> the [feature guide](FEATURES.md).
 
 Pulse collections are plain-text `.http` files. One file holds
 variables, requests, and assertions. Git is the database of record.
@@ -45,8 +46,12 @@ Form: `@name = value` (whitespace around `=` is allowed).
 - A `@var` line without `=` is a syntax error (fail closed). Pulse
   never treats it as an empty value.
 - Interpolation `{{var}}` is allowed in URLs, headers, and bodies and
-  resolves at runtime: OS keychain, then ephemeral in-memory `.env`,
+  resolves at runtime: OS keychain, then the Git-aware `.env.pulse`
+  (branch block, then `[default]`), then the ephemeral in-memory `.env`,
   then the decrypted `.pulse.vault`, then a hard error (exit 3).
+- `{{GIT_BRANCH}}` is reserved and auto-populated from
+  `git rev-parse --abbrev-ref HEAD`; it is unresolved outside a branch.
+  See [Git-aware environments](#git-aware-environments).
 
 ## Directives
 
@@ -57,6 +62,7 @@ line is a plain comment and is ignored by the parser.
 |---|---|---|
 | Name | `# @name my-request` | Attaches a name to the next request. |
 | Assert | `# @assert <expr>` | Attaches a check to the next request; evaluated by `pulse test`. |
+| Snapshot | `# @assert snapshot` | Compares the response body with `api.http.snap`; requires `# @name`. |
 
 Assert expressions (see `internal/engine/assert.go`):
 
@@ -68,6 +74,49 @@ Assert expressions (see `internal/engine/assert.go`):
 | Body contains | `body contains "ok"` | Substring match against the response body. |
 | Header contains | `header Content-Type contains "json"` | Substring match against a response header. |
 | Header equality | `header X-Version == "2"` | Exact header match. |
+| Snapshot | `snapshot` | Structural comparison with the stored baseline (see below). |
+
+### Snapshot assertions
+
+`# @assert snapshot` writes the response body to an adjacent
+`<file>.http.snap` on the first run, then compares structurally on later
+runs. JSON key order and whitespace are ignored; a changed value is
+reported at its path. `pulse test -u` accepts the live body as the new
+baseline.
+
+- The request must carry `# @name`; the name is the file's namespace.
+- The compared body is capped at 256 KiB. A larger response fails the
+  assertion rather than storing a prefix.
+- Non-JSON bodies use a line diff.
+
+See [Snapshot assertions](FEATURES.md#snapshot-assertions)
+for the file format, the TUI `u` action, and CI output.
+
+## Git-aware environments
+
+A `.env.pulse` file in the workspace maps branch selectors to variables:
+
+```ini
+[default]
+BASE_URL = http://localhost:8080
+
+[branch:staging]
+BASE_URL = https://staging.internal.net
+
+[branch:feat/*]
+BASE_URL = https://preview-{{GIT_BRANCH}}.internal.net
+```
+
+- `[default]` applies first; a matching `[branch:...]` block overrides it
+  key by key.
+- `*` matches any run of characters (including `/`); `?` matches one.
+- An exact selector beats a glob regardless of file order.
+- Outside a Git repository, or on a detached HEAD, only `[default]`
+  applies and `{{GIT_BRANCH}}` is unresolved.
+
+Set `PULSE_ENV_PULSE_FILE` to read a file outside the invocation
+directory. See [Git-aware environments](FEATURES.md#git-aware-environments)
+for precedence against the keychain and `.env`.
 
 ## Request line
 

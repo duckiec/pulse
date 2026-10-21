@@ -31,6 +31,7 @@ import (
 	"pulse/internal/app"
 	"pulse/internal/ast"
 	"pulse/internal/engine"
+	pulseenv "pulse/internal/env"
 	"pulse/internal/mcp"
 	"pulse/internal/secrets"
 	"pulse/internal/ui"
@@ -269,6 +270,7 @@ func checkTUITermSize(stdout, stderr io.Writer) int {
 func wireTUIModel(_ context.Context, application *app.App, model *ui.Model, wsRoot, saveRel string) {
 	model.SetRunnerFactory(func(d *ast.Document) ui.Runner { return application.RouterFor(d) })
 	model.SetWorkspace(wsRoot, saveRel)
+	model.SetSnapshotChecker(engine.CheckSnapshot)
 	model.SetSavers(
 		ui.RequestSaver(application.UpsertUIRequest),
 		ui.FileSaver(func(root, rel string, content []byte) ([]byte, error) {
@@ -411,9 +413,17 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		printHelp(stdout, testHelp)
 		return exitOK
 	}
+	// `-u` is the short spelling of --update-snapshots. Normalise it to the
+	// long form before shifting so it works before OR after the directory
+	// (Go's flag package stops at the first positional).
+	for i, a := range args {
+		if a == "-u" {
+			args[i] = "--update-snapshots"
+		}
+	}
 	args = shiftFlags(args, map[string]bool{
 		"parallel": true, "timeout": true, "strict-blocked": false,
-		"format": true, "silent": false,
+		"format": true, "silent": false, "update-snapshots": false,
 	})
 	fs := flag.NewFlagSet("pulse test", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -426,6 +436,8 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		formatFlag = fs.String("format", "tap", "output format: tap or json")
 		silent     = fs.Bool("silent", false,
 			"suppress all stdout output; the exit code still reflects the run")
+		updateSnapshots = fs.Bool("update-snapshots", false,
+			"accept the live response as the new snapshot baseline (-u)")
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, testHelp)
@@ -476,7 +488,8 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "pulse test: boot: %v\n", err)
 		return exitFail
 	}
-	code, err := application.TestDirEx(ctx, root, stdout, *parallel, *timeout, *strictBlocked, format, *silent)
+	code, err := application.TestDirEx(ctx, root, stdout, *parallel, *timeout, *strictBlocked, format, *silent,
+		app.WithUpdateSnapshots(*updateSnapshots))
 	if err != nil {
 		fmt.Fprintf(stderr, "pulse test: %v\n", err)
 		// A parse failure is exit 2, a secret failure exit 3, and anything
@@ -911,6 +924,16 @@ func workspaceVault() string {
 	return ""
 }
 
+// envPulseFile resolves the Git-aware environment file: the explicit
+// PULSE_ENV_PULSE_FILE wins, otherwise `.env.pulse` in the invocation
+// directory (the workspace).
+func envPulseFile() string {
+	if v := os.Getenv("PULSE_ENV_PULSE_FILE"); v != "" {
+		return v
+	}
+	return pulseenv.FileName
+}
+
 // appConfig reads PULSE_* environment variables into a Config.
 //
 // Environment rather than flags: every one of these is a deployment detail an
@@ -924,6 +947,10 @@ func appConfig() app.Config {
 		EnvFile:    os.Getenv("PULSE_ENV_FILE"),
 		VaultFile:  workspaceVault(),
 		VaultKeyID: os.Getenv("PULSE_VAULT_KEY_ID"),
+		// Git-aware contexts are on by default: the file lives in the
+		// invocation directory, and PULSE_ENV_PULSE_FILE relocates it for a
+		// collection kept elsewhere. A missing file costs one stat.
+		EnvPulseFile: envPulseFile(),
 	}
 	if v := os.Getenv("PULSE_RAG_ROOT"); v != "" {
 		cfg.CorpusRoot = v

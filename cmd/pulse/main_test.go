@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -120,6 +125,71 @@ func TestTestFlagsAfterDirAreHonored(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "format") {
 		t.Fatalf("stderr does not name the format: %s", stderr.String())
+	}
+}
+
+// TestUpdateSnapshotsFlagAfterDirIsHonored is the CLI end-to-end gate for the
+// snapshot flow: first run creates the baseline, a changed body fails with a
+// readable diff on stdout, and `-u` placed AFTER the directory rewrites it.
+func TestUpdateSnapshotsFlagAfterDirIsHonored(t *testing.T) {
+	t.Setenv("PULSE_HOME", t.TempDir())
+	t.Setenv("PULSE_SKIP_SYNC", "1")
+
+	var body atomic.Value
+	body.Store(`{"v":1}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body.Load().(string)))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	httpFile := filepath.Join(dir, "api.http")
+	if err := os.WriteFile(httpFile, []byte(fmt.Sprintf(
+		"# @name get-snapshot\n# @assert snapshot\nGET %s/s HTTP/1.1\n\n###\n", srv.URL)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapFile := httpFile + ".snap"
+
+	runTest := func(args ...string) (int, string, string) {
+		t.Helper()
+		var stdout, stderr strings.Builder
+		code := run(context.Background(), append([]string{"test"}, args...),
+			strings.NewReader(""), &stdout, &stderr, false)
+		return code, stdout.String(), stderr.String()
+	}
+
+	code, out, errOut := runTest(dir)
+	if code != exitOK {
+		t.Fatalf("first run exit = %d, want 0\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if _, err := os.Stat(snapFile); err != nil {
+		t.Fatalf("snapshot file not created: %v", err)
+	}
+
+	body.Store(`{"v":2}`)
+	code, out, errOut = runTest(dir)
+	if code != exitFail {
+		t.Fatalf("mismatch exit = %d, want 1\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	for _, want := range []string{"not ok", "snapshot diff", "$.v: snapshot 1, live 2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+
+	// The short flag AFTER the positional: exactly the form `shiftFlags`
+	// exists to preserve (Go's flag package would otherwise ignore it).
+	code, out, errOut = runTest(dir, "-u")
+	if code != exitOK {
+		t.Fatalf("-u exit = %d, want 0\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	raw, err := os.ReadFile(snapFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"v":2`) {
+		t.Errorf("snapshot not updated by -u:\n%s", raw)
 	}
 }
 

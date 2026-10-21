@@ -99,7 +99,7 @@ diagnostics go to stderr.
 
 exit codes: 0 clean session end, 1 boot or session failure, 2 stray argument.`
 
-const testHelp = `usage: pulse test <dir> [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent]
+const testHelp = `usage: pulse test <dir> [--parallel N] [--timeout D] [--strict-blocked] [--format tap|json] [--silent] [-u|--update-snapshots]
 
 Run every .http collection under <dir> headless and report TAP 13 (default)
 or JSON. Assertions (# @assert) decide pass/fail per request.
@@ -107,7 +107,11 @@ or JSON. Assertions (# @assert) decide pass/fail per request.
   pulse test . --format tap
   pulse test ./collections --parallel 8 --timeout 30s
   pulse test . --format json --silent
+  pulse test . -u            accept live responses as snapshot baselines
   pulse test --help
+
+Snapshot assertions (# @assert snapshot) write an adjacent <file>.http.snap on
+the first run and compare structurally afterwards. The first run and -u pass.
 
 exit codes: 0 pass, 1 failure, 2 usage/parse error, 3 secret-resolution failure, 130 interrupted.`
 
