@@ -66,10 +66,11 @@ func composerModel(t *testing.T, src string) *Model {
 	return m
 }
 
-// TestScratchpadBootsWelcoming proves the blank-state contract: the
-// template parses, the model flags scratch with the requests.http target,
-// and both the welcome pane and the footer name the five verbs.
-func TestScratchpadBootsWelcoming(t *testing.T) {
+// TestScratchpadBootsIntoWorkbench proves the blank-state contract: the
+// template parses, the model flags scratch with the requests.http target, and
+// the workbench renders that request live — with the authoring verbs on the
+// hint row and no welcome pane in sight.
+func TestScratchpadBootsIntoWorkbench(t *testing.T) {
 	doc, err := ParseScratch()
 	if err != nil {
 		t.Fatalf("ParseScratch: %v", err)

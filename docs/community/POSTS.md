@@ -6,8 +6,8 @@ lives in [BETA_TESTING.md](BETA_TESTING.md).
 
 ## v0.1.1 — the workspace vault reads itself
 
-Pulse **v0.1.1** is out, one day after the first beta, and it fixes the only
-blocker testers hit.
+Pulse **v0.1.1** is out: the first patch to the beta, fixing the only blocker
+testers hit.
 
 In v0.1.0, `pulse vault set DEMO_TOKEN` sealed a token into `./.pulse.vault`,
 but `pulse test` only looked there when `PULSE_VAULT_FILE` was exported. The
