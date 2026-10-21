@@ -506,5 +506,5 @@ func (e EditorModel) View(w int, ascii bool) string {
 	}
 	b.WriteString(row("body  ", e.focus == 4, "") + "\n" + e.body.View() + "\n")
 	b.WriteString(styleMuted.Render("enter apply+send   ctrl+s/w save   f fmt JSON   tab next   esc cancel"))
-	return paneStyle(true, ascii).Width(w).Render(b.String())
+	return b.String()
 }

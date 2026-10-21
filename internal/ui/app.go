@@ -278,15 +278,24 @@ func (m *Model) snapshotTree() {
 	group := m.doc.Path
 	if group == "" {
 		group = "requests"
+		if m.scratch {
+			group = "scratchpad"
+		}
 	}
 	var items []TreeItem
 	idx := 0
 	for r := range m.doc.Requests() {
-		label := r.Method.String() + " " + m.doc.Str(r.URLStart, r.URLEnd)
-		if name := m.doc.Str(r.NameStart, r.NameEnd); name != "" {
+		method := r.Method.String()
+		target := m.doc.Str(r.URLStart, r.URLEnd)
+		name := m.doc.Str(r.NameStart, r.NameEnd)
+		label := method + " " + target
+		if name != "" {
 			label += " @" + name
 		}
-		items = append(items, TreeItem{Group: group, Label: label, Index: idx})
+		items = append(items, TreeItem{
+			Group: group, Method: method, Target: shortTarget(target), Name: name,
+			Label: label, Index: idx,
+		})
 		idx++
 	}
 	m.tree.SetItems(items)
@@ -533,20 +542,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// sizeViewport fits the response pane to the window. Narrow terminals collapse
-// the request pane (DESIGN_SYSTEM.md §3.2); a terminal under 80 columns is
-// refused by the CLI before the program starts, and renders a refusal here
-// if it shrinks mid-run.
+// sizeViewport fits the streaming viewports to the window's resolved grid.
+// The sizes come from computeGeometry — the same function View renders from —
+// so the viewport and the frame around it cannot disagree about how many rows
+// exist. A terminal under 80x24 is refused by the CLI before the program
+// starts, and renders a refusal here if it shrinks mid-run.
 func (m *Model) sizeViewport() {
-	w, h := m.width-4, m.height-9
-	if w < 20 {
-		w = 20
+	g := computeGeometry(m.width, m.height)
+	streamH := g.resH - 2 - responseHeaderRows
+	if streamH < 3 {
+		streamH = 3
 	}
-	if h < 5 {
-		h = 5
+	m.stream.Resize(g.mainW-2, streamH)
+
+	// The fuzz dashboard spends two rows on its own telemetry block.
+	fuzzH := g.bodyH - 2 - 2
+	if fuzzH < 3 {
+		fuzzH = 3
 	}
-	m.stream.Resize(w, h)
-	m.fuzz.Resize(w, h)
+	m.fuzz.Resize(g.mainW-2, fuzzH)
 }
 
 // paletteItems builds the palette rows: every document request plus the

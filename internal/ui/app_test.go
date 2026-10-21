@@ -287,10 +287,19 @@ func TestKeymapIsComplete(t *testing.T) {
 			t.Errorf("help overlay omits %q", b.Desc)
 		}
 	}
-	// The footer advertises only primary tokens; every token names a binding.
-	for _, tok := range k.FooterHelp() {
-		if !strings.Contains(m.viewFooter(), tok) {
-			t.Errorf("footer dropped its own token %q", tok)
+	// Discoverability no longer depends on the footer having room: the
+	// overlay names the keys for every binding, and the status bar carries
+	// the run-critical caps in its own mode.
+	for _, b := range k.All() {
+		if !strings.Contains(help, strings.Join(b.Keys, "/")) {
+			t.Errorf("help overlay omits the keys for %q", b.Desc)
+		}
+	}
+	m.showHelp = false
+	bar := m.viewStatusBar(computeGeometry(160, 50))
+	for _, want := range []string{"NORMAL", "^S send", "^X cancel", "? help"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("NORMAL status bar omits %q", want)
 		}
 	}
 }

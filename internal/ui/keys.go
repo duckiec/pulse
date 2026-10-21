@@ -108,11 +108,18 @@ func (k KeyMap) Match(b Binding, msg tea.KeyMsg) bool {
 	return false
 }
 
-// FooterHelp returns the footer tokens in display order, skipping bindings
-// with no Help text (secondary keys that share a token with their primary).
+// FooterHelp returns the status bar's keycap pool in priority order, skipping
+// bindings with no token (secondary keys that share a token with their
+// primary). Order is priority, not history: the bar fills left to right until
+// it runs out of room, so bailing out (quit), the two run keys, and help must
+// never be the entries that get dropped on an 80-column terminal.
 func (k KeyMap) FooterHelp() []string {
 	out := []string{}
-	for _, b := range []Binding{k.Quit, k.Send, k.Cancel, k.Focus, k.Down, k.Top, k.HalfDown, k.Pause, k.Search, k.SearchNext, k.Palette, k.Editor, k.Import, k.NewFile, k.Starter, k.Vault, k.Yank, k.FuzzTab, k.Help} {
+	for _, b := range []Binding{
+		k.Quit, k.Send, k.Cancel, k.Focus, k.Editor, k.Search, k.Help, k.Palette,
+		k.Import, k.NewFile, k.Starter, k.FuzzTab, k.Vault, k.Yank,
+		k.Down, k.Top, k.HalfDown, k.Pause, k.SearchNext,
+	} {
 		if b.Help != "" {
 			out = append(out, b.Help)
 		}
@@ -120,10 +127,32 @@ func (k KeyMap) FooterHelp() []string {
 	return out
 }
 
-// ScratchFooter is the blank-state boot's hint line: the five verbs an
-// empty workspace offers, in the order a beginner meets them.
-func (k KeyMap) ScratchFooter() string {
-	return "[e] Edit   [i] Import cURL   [g] Generate Starter   [n] New File   [?] Help"
+// ModeKeys is the status bar's keycap set for one input mode. The footer is
+// the only discovery surface on a workbench with no menus, so the tokens are
+// honest by construction: every one names a key this keymap (or the owning
+// modal) actually dispatches in that mode, and anything missing from the
+// visible line is still in the ? overlay.
+func (k KeyMap) ModeKeys(mode string) []string {
+	switch mode {
+	case "EDIT":
+		return []string{"enter apply", "ctrl+s save", "f fmt", "tab next", "esc cancel"}
+	case "VAULT":
+		return []string{"tab field", "enter seal", "esc cancel"}
+	case "IMPORT":
+		return []string{"enter import", "esc cancel"}
+	case "NEW FILE":
+		return []string{"enter create", "esc cancel"}
+	case "PALETTE":
+		return []string{"enter open", "j/k move", "esc close"}
+	case "SEARCH":
+		return []string{"enter run", "ctrl+n next", "N prev", "esc close"}
+	case "HELP":
+		return []string{"? close", "q quit"}
+	case "FUZZ":
+		return []string{"f back", "ctrl+s send", "? help"}
+	default:
+		return k.FooterHelp()
+	}
 }
 
 // All returns every binding, for the help overlay and the completeness gate:

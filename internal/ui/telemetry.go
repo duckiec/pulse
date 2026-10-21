@@ -8,10 +8,11 @@ import (
 	"pulse/internal/engine"
 )
 
-// RenderTelemetry is the dedicated timing component: microsecond-precise
-// transport phases beside the HTTP/gRPC status. It is a pure function of a
-// snapshot and a result — no locks taken here (Snapshot took them), no I/O,
-// no clock — so the G-frame gate can call it per frame without measuring it.
+// RenderTelemetry is the dedicated timing component: a status badge with the
+// protocol, size and wall time on the first row, microsecond transport phases
+// on the second. It is a pure function of a snapshot and a result — no locks
+// taken here (Snapshot took them), no I/O, no clock — so the G-frame gate can
+// call it per frame without measuring it.
 //
 // A phase that never ran renders as "—", never as zero: a reused connection
 // has no DNS phase, and fabricating "0µs" would claim a measurement that
@@ -19,16 +20,30 @@ import (
 func RenderTelemetry(snap engine.TelemetrySnapshot, res *engine.RunResult) string {
 	var b strings.Builder
 	if res != nil {
-		fmt.Fprintf(&b, "%s %d", res.Proto, res.Status)
-		if res.StatusText != "" {
-			fmt.Fprintf(&b, " %s", res.StatusText)
+		label := res.StatusText
+		if label == "" {
+			label = fmt.Sprintf("%d", res.Status)
 		}
-		fmt.Fprintf(&b, "  %s  %s", formatBytes(res.Bytes), res.Elapsed.Round(time.Microsecond))
+		b.WriteString(styleStatus(res.Status).Render(" " + label + " "))
+		proto := res.Proto
+		if proto == "" {
+			proto = "HTTP"
+		}
+		fmt.Fprintf(&b, "  %s", styleMuted.Render(
+			fmt.Sprintf("%s  %s  %s", proto, formatBytes(res.Bytes), res.Elapsed.Round(time.Microsecond))))
 		if res.Symbol != "" {
-			fmt.Fprintf(&b, "  %s", res.Symbol)
+			b.WriteString("  " + styleMuted.Render(res.Symbol))
 		}
 		b.WriteByte('\n')
 	}
+	b.WriteString(phasesLine(snap))
+	return b.String()
+}
+
+// phasesLine is the transport breakdown: one row of "label value" pairs. It
+// is shared by the finished response and the running one, so a live stream
+// shows first-byte as soon as it is known rather than only at the end.
+func phasesLine(snap engine.TelemetrySnapshot) string {
 	rows := []struct {
 		label string
 		d     time.Duration
@@ -40,16 +55,14 @@ func RenderTelemetry(snap engine.TelemetrySnapshot, res *engine.RunResult) strin
 		{"first-byte", snap.FirstByte.Duration()},
 		{"total", snap.Total},
 	}
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString("  ")
-		}
-		fmt.Fprintf(&b, "%s %s", r.label, formatDuration(r.d))
+	parts := make([]string, 0, len(rows)+1)
+	for _, r := range rows {
+		parts = append(parts, r.label+" "+formatDuration(r.d))
 	}
 	if snap.ReusedConn {
-		b.WriteString("  reused-conn")
+		parts = append(parts, "reused-conn")
 	}
-	return b.String()
+	return strings.Join(parts, "  ")
 }
 
 // formatDuration renders a phase for a character-cell grid: microsecond

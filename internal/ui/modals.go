@@ -58,7 +58,7 @@ func (m *ImportModel) Update(msg tea.KeyMsg) { m.paste, _ = m.paste.Update(msg) 
 func (m ImportModel) View(w int, ascii bool) string {
 	body := styleAccent.Render("paste curl:") + "\n" + m.paste.View() + "\n" +
 		styleMuted.Render("enter import   esc cancel   secrets become {{PLACEHOLDERS}}")
-	return paneStyle(true, ascii).Width(w).Render(body)
+	return body
 }
 
 // VaultModel seals one token without leaving the TUI: a name field and a
@@ -149,7 +149,7 @@ func (m VaultModel) View(w int, ascii bool) string {
 	}
 	body := styleAccent.Render("seal a secret:") + "\n" + nameRow + "\n" + valRow + "\n" +
 		styleMuted.Render("enter seal   tab next field   esc cancel   stored in keychain, else memory-only")
-	return paneStyle(true, ascii).Width(w).Render(body)
+	return body
 }
 
 // NewFileModel names a new collection file. Enter creates it with one
@@ -200,5 +200,5 @@ func (m *NewFileModel) Update(msg tea.KeyMsg) { m.name, _ = m.name.Update(msg) }
 func (m NewFileModel) View(w int, ascii bool) string {
 	body := styleAccent.Render("new collection file:") + "\n" + m.name.View() + "\n" +
 		styleMuted.Render("enter create   esc cancel   created inside the workspace root")
-	return paneStyle(true, ascii).Width(w).Render(body)
+	return body
 }

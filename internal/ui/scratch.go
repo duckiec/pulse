@@ -77,6 +77,10 @@ func NewScratchpad(baseCtx context.Context, runner Runner, doc *ast.Document, ws
 	m.scratch = true
 	m.wsRoot = wsRoot
 	m.saveTarget = "requests.http"
+	// The tree labels its group from the workspace, and the workspace is
+	// only known to be a scratchpad after the flag is set — so re-snapshot
+	// rather than teaching New a second boot mode.
+	m.snapshotTree()
 	// The scratch document is arena-owned like any editor-built one:
 	// a later swap releases it, so it must be tracked as owned.
 	m.ownedDoc = doc

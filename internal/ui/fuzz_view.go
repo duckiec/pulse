@@ -178,20 +178,29 @@ func (f *FuzzModel) RPS() float64 { return f.rps }
 // Findings returns the badge window.
 func (f *FuzzModel) Findings() []string { return append([]string(nil), f.findings...) }
 
-// View renders the dashboard: counters and RPS on top, finding badges, then
-// the streaming probe tail.
+// View renders the dashboard body: the achieved rate on a telemetry line,
+// finding badges as pills, then the streaming probe tail. Returned unframed
+// — the workbench owns the border and the inlaid counters.
 func (f *FuzzModel) View(w int, ascii bool) string {
+	dot := "·"
+	if ascii {
+		dot = "-"
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "fuzz  pass %d  fail %d  skip %d  received %d/%d  %.1f rps",
-		f.passed, f.failed, f.skipped, f.received, f.total, f.rps)
+	fmt.Fprintf(&b, "%s  received %d/%d  %s  %.1f rps",
+		styleHeader.Render("probes"), f.received, f.total,
+		styleMuted.Render(fmt.Sprintf("pass %d fail %d skip %d", f.passed, f.failed, f.skipped)), f.rps)
+	b.WriteString("\n")
 	if len(f.findings) > 0 {
-		b.WriteString("\nfindings:")
+		b.WriteString(styleMuted.Render("findings ") + styleWarn.Render(" "+dot+" "))
 		for _, id := range f.findings {
-			b.WriteString(" [" + shortenID(id) + "]")
+			b.WriteString(styleWarn.Render(" "+shortenID(id)+" ") + " ")
 		}
+	} else {
+		b.WriteString(styleMuted.Render("no findings yet"))
 	}
 	b.WriteString("\n" + f.stream.Visible())
-	return paneStyle(true, ascii).Width(w).Render(b.String())
+	return b.String()
 }
 
 func shortenID(id string) string {

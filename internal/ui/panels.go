@@ -1,17 +1,40 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TreeItem is one navigable row: a request under its group (file path).
 // Index is the request's position in the parsed document; selecting it
-// makes that request the run target.
+// makes that request the run target. Method/Target/Name are the row's
+// display parts, snapshotted away from the arena for the same reason the
+// model snapshots its own request: View must not slice per frame.
 type TreeItem struct {
-	Group string
-	Label string
-	Index int
+	Group  string
+	Method string
+	Target string
+	Name   string
+	Label  string
+	Index  int
+}
+
+// shortTarget is the sidebar's reading of a URL: the path alone. Every row in
+// a collection usually shares a host, so repeating it in a 20-column sidebar
+// spends the one scarce resource — columns — on the one piece of information
+// that never differs between rows. A templated target ({{base}}/notes) keeps
+// its template, because there the host is not a constant.
+func shortTarget(url string) string {
+	i := strings.Index(url, "://")
+	if i < 0 {
+		return url
+	}
+	rest := url[i+3:]
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		return rest[j:]
+	}
+	return "/"
 }
 
 // TreeModel is the left-hand browse pane: collections/requests with keyboard
@@ -62,31 +85,63 @@ func (t *TreeModel) Cursor() int { return t.cursor }
 // Len counts the rows.
 func (t *TreeModel) Len() int { return len(t.items) }
 
-// View renders grouped rows with a cursor glyph. Glyphs degrade via ascii:
-// "▸"/"─" become ">" / "-".
-func (t *TreeModel) View(focused bool, w int, ascii bool) string {
-	cur, norm, ell := ">", "-", "..."
-	if !ascii {
-		cur, norm, ell = "▸", "─", "…"
+// Rows renders the sidebar body: a group header, then one row per request.
+// The selected row is a solid bar across the full inner width — the cursor in
+// a list of thirty URLs is not findable as a single leading glyph, and a bar
+// reads as a position rather than as a character.
+//
+// The rows are returned unframed, at exactly w columns, for the sidebar's
+// framed box to place. Group headers repeat only when the group changes, so a
+// file with twelve requests does not repeat its own path twelve times.
+func (t *TreeModel) Rows(w, h int, focused, ascii bool) []string {
+	if w < 4 {
+		w = 4
 	}
-	var b strings.Builder
+	if h < 1 {
+		h = 1
+	}
+	cur, ell, groupMark := "▸", "…", "▾"
+	if ascii {
+		cur, ell, groupMark = ">", "...", "-"
+	}
+	rows := make([]string, 0, len(t.items)+1)
 	lastGroup := ""
 	for i, it := range t.items {
 		if it.Group != lastGroup {
 			lastGroup = it.Group
-			fmt.Fprintf(&b, "%s %s\n", norm, truncFor(it.Group, w-2, ell))
+			rows = append(rows, styleMuted.Render(groupMark+" "+truncDisplay(it.Group, w-2, ell)))
 		}
-		mark := " "
+		mark := "  "
 		if i == t.cursor {
-			mark = cur
+			mark = cur + " "
 		}
-		fmt.Fprintf(&b, "%s %s\n", mark, truncFor(it.Label, w-2, ell))
+		// The @name is worth its columns on both row states: two requests to
+		// the same path are otherwise indistinguishable in the list.
+		label := it.Target
+		if it.Name != "" {
+			name := " @" + it.Name
+			if lipgloss.Width(mark)+lipgloss.Width(it.Method)+1+lipgloss.Width(label)+lipgloss.Width(name) <= w {
+				label += name
+			}
+		}
+		if i == t.cursor {
+			bar := mark + it.Method + " " + truncDisplay(label, max(1, w-lipgloss.Width(mark)-lipgloss.Width(it.Method)-1), ell)
+			st := styleSelection
+			if !focused {
+				st = styleSelectionIdle
+			}
+			rows = append(rows, st.Render(padTo(bar, w)))
+			continue
+		}
+		avail := max(1, w-lipgloss.Width(mark)-lipgloss.Width(it.Method)-1)
+		rows = append(rows, styleMuted.Render(mark)+
+			styleMethodText(it.Method).Render(it.Method)+" "+
+			truncDisplay(label, avail, ell))
 	}
 	if len(t.items) == 0 {
-		b.WriteString("(no requests)\n")
+		rows = append(rows, styleMuted.Render("(no requests)"))
 	}
-	body := strings.TrimRight(b.String(), "\n")
-	return paneStyle(focused, ascii).Width(w).Render(body)
+	return fitWithOverflow(rows, h, ell)
 }
 
 // SearchModel is the / in-buffer search: a query over the active StreamView
@@ -269,27 +324,34 @@ func fuzzyContains(s, q string) bool {
 	return false
 }
 
-// View renders the palette: filter line plus up to 8 rows.
+// View renders the palette body: a filter line with a live caret, then up to
+// eight rows, the cursor as a solid bar. Returned unframed for the modal box.
 func (p *PaletteModel) View(w int, ascii bool) string {
-	mark, ell := "▸", "…"
+	ell := "…"
 	if ascii {
-		mark, ell = ">", "..."
+		ell = "..."
 	}
 	var b strings.Builder
-	b.WriteString("palette: " + p.query + "\n")
+	caret := "▏"
+	if ascii {
+		caret = "|"
+	}
+	b.WriteString(styleMuted.Render("filter: ") + styleHeader.Render(p.query) + caret + "\n")
 	n := len(p.filtered)
 	if n > 8 {
 		n = 8
 	}
 	for i := 0; i < n; i++ {
-		m := " "
+		label := truncDisplay(p.items[p.filtered[i]].Label, max(1, w-2), ell)
 		if i == p.cursor {
-			m = mark
+			b.WriteString(styleSelection.Render(padTo(" "+label, w)))
+		} else {
+			b.WriteString(" " + label)
 		}
-		fmt.Fprintf(&b, "%s %s\n", m, truncFor(p.items[p.filtered[i]].Label, w-2, ell))
+		b.WriteByte('\n')
 	}
 	if len(p.filtered) == 0 {
-		b.WriteString("(no match)\n")
+		b.WriteString(styleMuted.Render("(no match)"))
 	}
-	return paneStyle(true, ascii).Width(w).Render(strings.TrimRight(b.String(), "\n"))
+	return strings.TrimRight(b.String(), "\n")
 }

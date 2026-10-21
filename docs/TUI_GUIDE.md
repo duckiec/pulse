@@ -24,11 +24,60 @@ in-flight ceiling.
 
 ## Layout
 
-- **File tree** — workspace `.http` files and their named requests.
-- **Request pane** — method, URL, headers, body of the selection.
-- **Stream view** — live response: status, headers, chunked body, and
-  assertion outcomes. Long bodies page; the stream can be cancelled
+The workbench is a fixed spatial grid, not a stack of panels. Every frame is
+laid out from the terminal size on each resize, so borders never clip and the
+same panes sit in the same places at 80×24 and at 200×60 — there is no
+"welcome screen" to leave behind, because the workbench is the first screen.
+
+```text
+╭─ pulse ────────────────────────────────────────── requests.http · DONE ─╮
+│  POST   http://localhost:8080/notes                    @create-note       │
+╰─────────────────────────────────────────────────────────────────────────╯
+╭─ [1] Requests (2) ─╮╭─ Request ──────────────────────────────────────────╮
+│▾ requests.http     ││ POST  http://localhost:8080/notes HTTP/1.1         │
+│▸ POST /notes       ││ ✓ @assert status == 201                            │
+│  GET /health       ││ Content-Type: application/json                     │
+│                    │╰─────────────────────────────────────────────────────╯
+│                    │╭─ Response ─────────────────────────────────────────╮
+│                    ││ 201 Created   HTTP/1.1  64B  12.3ms                │
+│                    ││ dns 412µs  tcp 1.2ms  tls —  wrote —  …            │
+│                    ││────────────────────────────────────────────────────│
+│                    ││ {                                                  │
+│                    ││   "id": 7,                                         │
+╰────────────────────╯╰─────────────────────────────────────────────────────╯
+ NORMAL   q quit   ^S send   ^X cancel   tab pane   e edit  …  lines 5  64B
+```
+
+- **Top omnibox** — the live target: a method badge, the interpolated URL, and
+  the `@name`, with the workspace file and run phase inlaid in the border. It
+  is the one strip that never hides, including behind a modal or the help
+  overlay.
+- **Left sidebar** — every request in the document, grouped by file, with the
+  cursor as a solid selection bar. `j`/`k` move it and `Enter` makes it the
+  run target. The sidebar narrows with the terminal but never disappears; at
+  80 columns it shows the method and path (`GET /health`) rather than the
+  whole URL.
+- **Request pane** — the flight line, then `@assert` directives, headers,
+  variables, and a body preview, in that order: it is ordered by what matters
+  if you only have four rows. Overflow is counted (`… +N more`), never
+  silently dropped.
+- **Response pane** — a telemetry header (status badge, protocol, size, wall
+  time, then the transport phases) above a syntax-coloured viewport. JSON
+  keys, strings, numbers and literals are tinted; anything that is not JSON
+  passes through byte-identical. Long bodies page; the stream can be cancelled
   mid-flight with `Ctrl+X`.
+- **Status bar** — one line: the mode (`NORMAL`, `EDIT`, `SEARCH`, …) as a
+  solid chip, the keycaps that apply in that mode, then the run accounting
+  (lines, bytes, drops, backlog) and the last toast. A narrow terminal drops
+  keycaps from the right, never the mode.
+
+Panes carry the accent border only while they hold the focus, so "where do my
+keys go" is answerable at a glance. Every badge also carries its word, so the
+layout survives a monochrome terminal; `--ascii` additionally degrades the box
+glyphs and every chrome decoration.
+
+Below 80×24 the workbench refuses to draw a broken frame and says so in
+words; pipe to `pulse test` for that case.
 
 ## Keybindings
 
@@ -62,11 +111,12 @@ The table below mirrors it.
 
 ## Starting empty
 
-Run `pulse` with no file in an empty directory and it boots a welcome
-state over an in-memory untitled request — never an error. The footer
-offers five verbs: `[e]` edit, `[i]` import curl, `[g]` starter,
-`[n]` new file, `[?]` help. Saving writes `requests.http` beside you
-(atomically, never truncated); nothing is created until you save.
+Run `pulse` with no file in an empty directory and it boots the workbench over
+an in-memory Untitled Request — never an error, and never a welcome wall. The
+request is already in the target slot, ready to send, and the response hint row
+carries the authoring verbs: `e` edit, `i` import curl, `g` starter, `n` new
+file. Saving writes `requests.http` beside you (atomically, never truncated);
+nothing is created until you save.
 
 ## How to compose a request
 
@@ -123,7 +173,22 @@ appear.
 
 ## How to read a response
 
-Select a request and press `Ctrl+S`. Status and headers render first;
-the body follows in chunks. `# @assert` outcomes appear inline — a
-failing assert shows the expression, the expected value, and the actual
-value, with the source line for the failure.
+Select a request and press `Ctrl+S`. The response pane fills top-down: a status
+badge with protocol, size and wall time; the transport phases (`dns`, `tcp`,
+`tls`, `wrote`, `first-byte`, `total`, plus `reused-conn` when the connection
+was kept alive); a rule; then the body in the viewport. A phase that never ran
+reads `—`, never `0µs` — a reused connection has no DNS lookup, and the pane
+does not invent one.
+
+While a body streams, the first line becomes a live `streaming` badge with
+bytes and lines received, the pane border turns accent, and the status bar
+shows `backlog` if the frame governor had to drop chunks. `p` freezes the
+frame without dropping the stream; `Ctrl+X` cancels.
+
+JSON bodies are syntax-coloured (keys, strings, numbers, literals). The
+highlighter never reformats or rewrites: a line it does not recognise passes
+through byte-identical, so a body is always exactly what the server sent.
+
+`# @assert` outcomes are part of the request pane, so the assertion and the
+response are visible at the same time — a failing assert names the expression,
+the expected value, and the actual value with the source line for the failure.

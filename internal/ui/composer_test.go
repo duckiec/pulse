@@ -84,21 +84,27 @@ func TestScratchpadBootsWelcoming(t *testing.T) {
 	}
 	m.width, m.height = 120, 40
 	view := m.View()
-	for _, want := range []string{"welcome to pulse", "Untitled", "[e]", "[i]", "[g]", "[n]", "[?]"} {
+	// The blank state is the workbench, already holding the in-memory
+	// request: no welcome wall, no empty box. The five verbs live on the
+	// response hint row and in the status bar.
+	for _, want := range []string{"Requests (1)", "scratchpad", "localhost:8080/health", "untitled", "^S send", "NORMAL"} {
 		if !strings.Contains(view, want) {
-			t.Errorf("welcome view omits %q", want)
+			t.Errorf("workbench boot omits %q", want)
 		}
 	}
-	if foot := m.viewFooter(); foot != m.keys.ScratchFooter() {
-		t.Errorf("scratch footer = %q, want the five verbs", foot)
+	if strings.Contains(view, "welcome to pulse") {
+		t.Error("the welcome wall must not render; the workbench boots directly")
 	}
-	// First interaction retires the welcome for the workbench.
+	if !strings.Contains(view, "e edit") || !strings.Contains(view, "i curl") {
+		t.Error("the scratchpad hint row lost the authoring verbs")
+	}
+	// First interaction retires the hint, not the workbench.
 	m = updateKeys(t, m, "e")
 	if !m.Touched() || !m.editor.Active() {
 		t.Error("e must touch the pad and open the composer")
 	}
-	if out := m.View(); strings.Contains(out, "welcome to pulse") {
-		t.Error("welcome survived first touch")
+	if out := m.View(); !strings.Contains(out, "Compose") {
+		t.Error("the composer did not open into the body region")
 	}
 }
 
