@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/grandcat/zeroconf"
+	"github.com/libp2p/zeroconf/v2"
 )
 
 func TestTXTAdvertisementRoundTrip(t *testing.T) {
@@ -206,8 +206,8 @@ func TestLoopbackDiscovery(t *testing.T) {
 // forces fast cancellation (and a 1ms sweep timeout, the multicast-failure
 // shape) across 50 iterations under -race: any send-on-close is a fatal
 // panic, and a leaked non-closed channel is a failure. It needs no UDP
-// 5353 — NewResolver succeeds without multicast; Browse blocks, cancel
-// fires, and the lifetime invariant is what is asserted.
+// 5353 — Browse starts the library sweep and blocks, cancel fires, and the
+// lifetime invariant is what is asserted.
 func TestBrowseFastCancelNeverPanics(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		ctx, cancel := context.WithCancel(context.Background())

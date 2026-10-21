@@ -162,24 +162,23 @@ github.com/fsnotify/fsnotify/
 
 # Wave 7 (Issue #10, MEMORY.md ADL-0043): mDNS peer discovery for P2P sync.
 #
-# github.com/grandcat/zeroconf v1.0.0 — pure-Go mDNS advertisement and
-# browsing for _pulse-sync._tcp.local. No stdlib mDNS exists; v1.0.0 is the
-# only tagged release (later work is untagged master — untagged floats are
-# not reproducible, so the tag wins). CGO-free (verified by build matrix).
-# Its transitive deps (miekg/dns wire codec, cenkalti/backoff retry) are
-# indirect-only: Pulse code never imports them, so only the zeroconf rows
-# below are load-bearing for the audit; the comments record the rest.
-github.com/grandcat/zeroconf
-github.com/grandcat/zeroconf/
+# github.com/libp2p/zeroconf/v2 — pure-Go mDNS advertisement and browsing for
+# _pulse-sync._tcp.local. No stdlib mDNS exists. This is the maintained fork of
+# grandcat/zeroconf v1.0.0, which it replaces: v1's Shutdown mutated server
+# state while its receive goroutines could still read it, tripping the race
+# detector on teardown (Issue #14). v2 closes its shutdown channel, closes both
+# sockets, and waits on a refcount before returning. CGO-free (verified by the
+# build matrix). Its transitive deps (miekg/dns wire codec, cenkalti/backoff
+# retry) are indirect-only: Pulse code never imports them, so only the
+# zeroconf rows below are load-bearing for the audit; the comments record the
+# rest.
+github.com/libp2p/zeroconf/v2
+github.com/libp2p/zeroconf/v2/
 
-# Wave 7 transitive deps of zeroconf (all indirect-only; Pulse code never
-# imports them — sanctioned so the tree resolves, per the modernc precedent
-# of listing transitive pure-Go deps explicitly):
-# miekg/dns (mDNS wire codec), cenkalti/backoff (query retry),
-# golang.org/x/crypto (dns dependency). All pure Go, CGO-free.
+# Wave 7 transitive dep of zeroconf (indirect-only; Pulse code never imports
+# it — sanctioned so the tree resolves, per the modernc precedent of listing
+# transitive pure-Go deps explicitly): miekg/dns is the mDNS wire codec. Pure
+# Go, CGO-free. cenkalti/backoff and golang.org/x/crypto were only needed by
+# grandcat/zeroconf v1 and left the module graph with it.
 github.com/miekg/dns
 github.com/miekg/dns/
-github.com/cenkalti/backoff
-github.com/cenkalti/backoff/
-golang.org/x/crypto
-golang.org/x/crypto/
