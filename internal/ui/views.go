@@ -165,7 +165,7 @@ func (m *Model) workbench(g geometry) string {
 // truncated "[1] Requests…" is worse than "Requests": the hotkey is a hint,
 // the name is the information.
 func (m *Model) sidebarTitle(w int) string {
-	if w >= 26 {
+	if w >= sidebarMin {
 		return fmt.Sprintf("[1] Requests (%d)", m.tree.Len())
 	}
 	return fmt.Sprintf("Requests (%d)", m.tree.Len())

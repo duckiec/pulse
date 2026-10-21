@@ -22,9 +22,11 @@ const (
 	minScreenW = 80
 	minScreenH = 24
 
-	// Sidebar width band. Below 20 cells a method badge plus a path is
-	// unreadable; above 34 the response loses more than the list gains.
-	sidebarMin = 20
+	// Sidebar width band. 24 is the narrowest width that keeps the inlaid
+	// hotkey title (`[1] Requests (2)`) intact at 80 columns — the hotkey
+	// is part of the design language, so the reference size must show it.
+	// Above 34 the response loses more than the list gains.
+	sidebarMin = 24
 	sidebarMax = 34
 )
 
