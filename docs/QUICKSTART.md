@@ -3,7 +3,8 @@
 > **Role in these docs:** the tutorial. Follow it top to bottom the first
 > time; it produces a working workspace. For task lookup use the
 > [TUI guide](TUI_GUIDE.md) and [MCP cookbook](MCP_COOKBOOK.md); for exact
-> grammar use the [HTTP syntax reference](HTTP_SYNTAX.md).
+> grammar use the [HTTP syntax reference](HTTP_SYNTAX.md); for the agent
+> policy use the [MCP guide](MCP_GUIDE.md).
 
 You need a terminal. You do not need an account, a network connection,
 or a Go toolchain. Every command below runs against the installed
@@ -163,9 +164,41 @@ review, add `# @assert snapshot` to a named request: the first
 `pulse test` writes `api.http.snap`, later runs diff against it, and
 `pulse test -u` accepts a new baseline. In the TUI, `u` does the same thing.
 
+## 10. Check the collection against the contract
+
+With an OpenAPI document beside the collection:
+
+```sh
+pulse drift openapi.json .
+```
+
+Every request is matched by path and method. The command reports a path the
+spec does not declare, an operation marked `deprecated: true`, and a required
+query parameter or header the request omits, each with `file:line`. It exits
+`0` when the collection matches, `1` on drift, and `2` when the spec or
+collection cannot be read. No request is sent.
+
+## 11. Bound what an agent may do
+
+Before letting an agent drive the MCP server, add `.pulse-guard` to the
+workspace:
+
+```ini
+[mcp]
+allow_methods = GET, POST
+deny_methods = DELETE, PUT, PATCH
+allow_hosts = localhost, *.internal.net
+rate_limit = 10/minute
+```
+
+Without the file, `pulse mcp` allows every method against loopback hosts only.
+A refused call returns `BLOCKED BY POLICY: …` to the model and sends nothing.
+The [MCP guide](MCP_GUIDE.md) documents every key and the failure modes.
+
 ## Next steps
 
-- [Feature guide](FEATURES.md) — branch environments and snapshot assertions
+- [Feature guide](FEATURES.md) — branch environments, snapshots, drift, and the firewall
 - [TUI guide](TUI_GUIDE.md) — panes, composer, vault, fuzz dashboard
 - [HTTP syntax reference](HTTP_SYNTAX.md) — variables, assertions, signing, cURL import
 - [MCP cookbook](MCP_COOKBOOK.md) — `execute_request`, history, fuzz, authoring tools
+- [MCP guide](MCP_GUIDE.md) — `.pulse-guard` and the blast-radius firewall

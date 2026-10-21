@@ -203,6 +203,7 @@ type Engine struct {
 	resolver       Resolver
 	redactor       Redactor
 	signer         Signer
+	gate           PolicyGate
 	userAgent      string
 	teardownBudget time.Duration
 }
@@ -446,6 +447,17 @@ func (e *Engine) buildRequest(ctx context.Context, ar *ast.Request) (*http.Reque
 	}
 	if body != nil {
 		httpReq.ContentLength = int64(len(e.doc.BodyText(ar.Body)))
+	}
+	// The policy gate runs LAST, on the fully expanded request. Anything
+	// earlier would vet placeholders; anything later would have already
+	// dialed. A refusal fails the run without touching the network.
+	if err := e.checkGate(GateRequest{
+		Method: httpReq.Method,
+		URL:    parsed,
+		Header: httpReq.Header,
+		Line:   ar.Line,
+	}); err != nil {
+		return nil, err
 	}
 	return httpReq, nil
 }

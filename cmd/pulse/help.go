@@ -56,6 +56,7 @@ usage:
   pulse <file.http>
   pulse mcp
   pulse test <dir> [flags]
+  pulse drift <openapi-doc> <file-or-dir>
   pulse vault <command> [args] [flags]
   pulse init [file] [--force]
   pulse doctor [--key-id ID]
@@ -65,6 +66,7 @@ usage:
 commands:
   mcp     serve the MCP server (JSON-RPC over stdio)
   test    run .http collections headless (TAP or JSON)
+  drift   check a collection against an OpenAPI document (offline)
   vault   seal, list, and remove secrets (.pulse.vault + keychain)
   init    scaffold a workspace (quickstart.http)
   doctor  diagnose workspace, vault, store, and MCP config
@@ -79,6 +81,7 @@ flags:
 examples:
   pulse quickstart.http
   pulse test . --format tap
+  pulse drift openapi.json .
   pulse vault set API_TOKEN <value>
   pulse doctor
   pulse help vault set
@@ -114,6 +117,25 @@ Snapshot assertions (# @assert snapshot) write an adjacent <file>.http.snap on
 the first run and compare structurally afterwards. The first run and -u pass.
 
 exit codes: 0 pass, 1 failure, 2 usage/parse error, 3 secret-resolution failure, 130 interrupted.`
+
+const driftHelp = `usage: pulse drift <openapi-doc> <file-or-dir>
+
+Check a .http collection against an OpenAPI 3.x document without sending a
+request. Reads JSON or YAML; local $refs are resolved and a remote or cyclic
+ref is refused.
+
+Findings, with file and line:
+  unknown-endpoint         the path+method is not declared in the spec
+  deprecated               the operation is marked deprecated: true
+  missing-required-param   a required query parameter or header is absent
+  unresolved-target        the target cannot be reduced to a path
+
+  pulse drift openapi.json .
+  pulse drift api/openapi.yaml collections/users.http
+  pulse drift --help
+
+Exit codes: 0 no violations, 1 violations found, 2 usage, spec or collection error.
+`
 
 const vaultHelp = `usage: pulse vault <command> [args] [flags]
 
@@ -293,6 +315,9 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "test":
 		printHelp(stdout, testHelp)
+		return exitOK
+	case "drift":
+		printHelp(stdout, driftHelp)
 		return exitOK
 	case "vault":
 		if len(args) > 1 {

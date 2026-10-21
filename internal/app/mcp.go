@@ -197,6 +197,13 @@ func (a *App) MCPServer() (*mcp.Server, error) {
 	if a.Sessions == nil {
 		a.Sessions = mcp.NewFuzzSessions()
 	}
+	// The guard is loaded here, not in New: its failure mode is "refuse to
+	// serve agents", which must not take the TUI down with it. Loading it
+	// before the server is built means a malformed policy is a boot error,
+	// never a session that runs with an unread policy.
+	if err := a.loadGuard(); err != nil {
+		return nil, err
+	}
 	// The authoring tools resolve the workspace to the process directory
 	// per call and probe sealed values through the chain's Lookup — the
 	// same resolution every executor uses, so validate_collection and a

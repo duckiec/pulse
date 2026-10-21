@@ -81,6 +81,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return runMCP(ctx, args[1:], stdout, stderr)
 		case "test":
 			return runTest(ctx, args[1:], stdout, stderr)
+		case "drift":
+			return runDrift(args[1:], stdout, stderr)
 		case "vault":
 			return runVault(ctx, args[1:], stdin, stdout, stderr)
 		case "init":
@@ -934,6 +936,16 @@ func envPulseFile() string {
 	return pulseenv.FileName
 }
 
+// guardFile resolves the MCP blast-radius policy: the explicit
+// PULSE_GUARD_FILE wins, otherwise `.pulse-guard` in the invocation directory.
+// A missing file is the documented loopback-only baseline, not an error.
+func guardFile() string {
+	if v := os.Getenv("PULSE_GUARD_FILE"); v != "" {
+		return v
+	}
+	return mcp.GuardFile
+}
+
 // appConfig reads PULSE_* environment variables into a Config.
 //
 // Environment rather than flags: every one of these is a deployment detail an
@@ -951,6 +963,9 @@ func appConfig() app.Config {
 		// invocation directory, and PULSE_ENV_PULSE_FILE relocates it for a
 		// collection kept elsewhere. A missing file costs one stat.
 		EnvPulseFile: envPulseFile(),
+		// The agent firewall is on by default too. A missing file is the
+		// loopback-only baseline; PULSE_GUARD_FILE relocates it.
+		GuardFile: guardFile(),
 	}
 	if v := os.Getenv("PULSE_RAG_ROOT"); v != "" {
 		cfg.CorpusRoot = v

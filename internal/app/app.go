@@ -65,14 +65,15 @@ import (
 // drifts, this is a build failure rather than a nil-check failure discovered by
 // the first agent whose response happens to carry a token.
 var (
-	_ mcp.Redactor    = (*secrets.Redactor)(nil)
-	_ engine.Redactor = (*secrets.Redactor)(nil)
-	_ engine.Resolver = (*secrets.Chain)(nil)
-	_ engine.Resolver = engineResolver{}
-	_ rag.Embedder    = (*rag.HashingEmbedder)(nil)
-	_ mcp.Executor    = (*mcp.EngineExecutor)(nil)
-	_ mcp.FuzzRunner  = (*mcp.EngineFuzzRunner)(nil)
-	_ mcp.Retriever   = (*mcp.StoreRetriever)(nil)
+	_ mcp.Redactor      = (*secrets.Redactor)(nil)
+	_ engine.Redactor   = (*secrets.Redactor)(nil)
+	_ engine.Resolver   = (*secrets.Chain)(nil)
+	_ engine.Resolver   = engineResolver{}
+	_ engine.PolicyGate = (*mcp.Guard)(nil)
+	_ rag.Embedder      = (*rag.HashingEmbedder)(nil)
+	_ mcp.Executor      = (*mcp.EngineExecutor)(nil)
+	_ mcp.FuzzRunner    = (*mcp.EngineFuzzRunner)(nil)
+	_ mcp.Retriever     = (*mcp.StoreRetriever)(nil)
 )
 
 // Config is the resolved configuration for one App.
@@ -101,6 +102,11 @@ type Config struct {
 	// on the checkout they run in); the CLI defaults it to `.env.pulse` in the
 	// invocation directory.
 	EnvPulseFile string
+	// GuardFile is the `.pulse-guard` policy read when the MCP server is
+	// constructed. Empty selects the default policy (loopback hosts only).
+	// It is loaded on demand, not in New, so a broken policy file stops the
+	// MCP server without also stopping the TUI or `pulse test`.
+	GuardFile string
 	// RunTimeout bounds one request execution. Zero selects DefaultRunTimeout.
 	RunTimeout time.Duration
 	// FuzzTimeout bounds one fuzz probe. Zero selects mcp.DefaultFuzzTimeout.
@@ -213,6 +219,10 @@ type App struct {
 	// It is bound here — never constructed by the engine — so the secret
 	// chain it resolves through is the same one every executor uses.
 	Signer engine.Signer
+	// Guard is the MCP blast-radius policy. It is loaded by MCPServer, not by
+	// New, and is nil until then; the TUI and `pulse test` routers are built
+	// without it because their caller is the human, not the agent.
+	Guard *mcp.Guard
 	// Sessions is the live iterative-fuzz registry (fuzz_start/next/report).
 	// It lives on the App rather than on one server so campaigns survive
 	// across MCPServer() constructions within the process lifetime.
@@ -538,7 +548,7 @@ func (a *App) buildTools() error {
 	a.Executor = &mcp.EngineExecutor{
 		Redactor:  a.Redactor,
 		Resolver:  a.resolver(),
-		NewEngine: a.newRouter,
+		NewEngine: a.newMCPRouter,
 		Recorder:  &execRecorder{db: a.Store, red: a.Redactor},
 	}
 
@@ -594,16 +604,49 @@ func (a *App) resolver() engine.Resolver { return engineResolver{chain: a.Chain}
 // that redacts differently from an MCP call is a redaction gate that passes in
 // one mode and fails in the other.
 func (a *App) newRouter(doc *ast.Document) engine.ProtocolEngine {
+	return a.newRouterWith(doc, nil)
+}
+
+// newMCPRouter is newRouter plus the blast-radius gate. It is a separate entry
+// point rather than a flag on newRouter so no caller can accidentally guard the
+// TUI (or forget to guard MCP): the two modes construct their router through
+// differently named methods, and the difference is visible at the call site.
+func (a *App) newMCPRouter(doc *ast.Document) engine.ProtocolEngine {
+	return a.newRouterWith(doc, a.Guard)
+}
+
+// newRouterWith is the single construction of the protocol router. A nil gate
+// leaves the build ungated.
+func (a *App) newRouterWith(doc *ast.Document, gate engine.PolicyGate) engine.ProtocolEngine {
+	rest := []engine.Option{
+		engine.WithRedactor(a.Redactor),
+		engine.WithResolver(a.resolver()),
+		engine.WithSigner(a.Signer),
+		engine.WithTimeout(a.cfg.RunTimeout),
+		engine.WithUserAgent("pulse/" + Version),
+	}
+	if gate != nil {
+		rest = append(rest, engine.WithPolicyGate(gate))
+	}
 	return engine.NewProtocolRouter(doc, engine.RouterConfig{
-		REST: []engine.Option{
-			engine.WithRedactor(a.Redactor),
-			engine.WithResolver(a.resolver()),
-			engine.WithSigner(a.Signer),
-			engine.WithTimeout(a.cfg.RunTimeout),
-			engine.WithUserAgent("pulse/" + Version),
-		},
+		REST: rest,
 		GRPC: &engine.GRPCConfig{Resolver: a.resolver(), Redactor: a.Redactor},
 	})
+}
+
+// loadGuard reads `.pulse-guard` and compiles it. A missing file is the
+// documented default baseline; a malformed one is a hard error (fail closed).
+func (a *App) loadGuard() error {
+	if a.cfg.GuardFile == "" {
+		a.Guard = mcp.NewGuard(mcp.DefaultGuardPolicy())
+		return nil
+	}
+	policy, err := mcp.LoadGuard(a.cfg.GuardFile)
+	if err != nil {
+		return fmt.Errorf("app: %w", err)
+	}
+	a.Guard = mcp.NewGuard(policy)
+	return nil
 }
 
 // RouterFor exposes the composed protocol router for one document so the TUI

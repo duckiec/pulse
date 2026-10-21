@@ -41,6 +41,10 @@ const (
 	CodeTransport = -32005
 	// CodeUnsupported means the requested shape is refused.
 	CodeUnsupported = -32006
+	// CodePolicyBlocked means `.pulse-guard` refused the request before it
+	// was dispatched. It is separate from transport errors because the agent
+	// can fix it: a different method, a different host, or a wait.
+	CodePolicyBlocked = -32007
 )
 
 // ProtocolError is a domain failure carrying its JSON-RPC code, so a tool
@@ -111,6 +115,7 @@ const (
 	CategoryTimeout     = "timeout"
 	CategoryTransport   = "transport"
 	CategoryUnsupported = "unsupported"
+	CategoryPolicy      = "policy"
 	CategoryInternal    = "internal"
 )
 
@@ -156,6 +161,8 @@ func categoryFor(code int) string {
 		return CategoryTransport
 	case CodeUnsupported:
 		return CategoryUnsupported
+	case CodePolicyBlocked:
+		return CategoryPolicy
 	default:
 		return CategoryInternal
 	}

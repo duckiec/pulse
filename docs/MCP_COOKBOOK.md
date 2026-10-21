@@ -19,6 +19,11 @@ spec lifecycle: `initialize` → `initialized` → operation loop →
 `shutdown` → exit. **Stdout is the protocol channel.** Nothing but
 JSON-RPC may be written there; diagnostics go to stderr.
 
+The server is sandboxed by `.pulse-guard` in the workspace: methods, hosts
+and a request rate. A refused call returns `BLOCKED BY POLICY: …` as text and
+sends nothing. The [MCP guide](MCP_GUIDE.md) documents the file; the recipes
+below assume the request is permitted.
+
 ## Prerequisites
 
 - A workspace with at least one `.http` file (`pulse init` scaffolds

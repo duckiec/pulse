@@ -201,7 +201,10 @@ func (e *EngineExecutor) Execute(ctx context.Context, src, origin string, index 
 	_ = handle.WaitTimeout(engineTeardownBudget)
 	collector.Wait()
 	out, execErr := collector.outcome(origin, index, e.Redactor), collector.Err()
-	if out != nil && e.Recorder != nil {
+	// A policy refusal is not a run. Recording it would put a request Pulse
+	// never sent into history, where `get_history` and the TUI would show it
+	// as an executed (status 0) request.
+	if blocked := errors.Is(execErr, engine.ErrPolicyBlocked); !blocked && out != nil && e.Recorder != nil {
 		rec := ExecutionRecord{
 			Origin: origin, Index: index,
 			Method: out.Method, URLTemplate: out.URL,
@@ -447,6 +450,14 @@ func handleExecuteRequest(ctx context.Context, exec Executor, binder *FailureBin
 	timeout := time.Duration(input.TimeoutMS) * time.Millisecond
 	out, execErr := exec.Execute(ctx, src, origin, input.Index, timeout)
 
+	// A policy refusal is not a failed request: nothing was sent. Return the
+	// reason as plain text the model can read and act on, instead of routing
+	// it through the transport error mapper, which would describe a request
+	// that never happened.
+	if res, ok := policyResult(execErr); ok {
+		return res, nil
+	}
+
 	// A failure must always explain itself. Returning a rendered outcome with a
 	// zero status and no error text would tell the agent the server answered
 	// nothing, which is both false and unfalsifiable. When the run failed and
@@ -592,6 +603,31 @@ func prettyJSON(body string) (string, bool) {
 // "…; index: number is not valid" or "…; sneaky: additional properties not
 // allowed" does. A summary-only error is the failure mode this line exists to
 // prevent.
+// policyResult renders a `.pulse-guard` refusal for the agent. ok is false for
+// every other error, including a wrapped protocol error, so the caller keeps
+// its normal failure path.
+//
+// The text is prefixed exactly once. `BLOCKED BY POLICY:` is the signal a model
+// can key on and the reason is a complete sentence naming the file and the
+// rule, so a self-correcting agent has everything it needs in one block.
+func policyResult(err error) (*mcp.CallToolResult, bool) {
+	var blocked *engine.PolicyBlockedError
+	if !errors.As(err, &blocked) {
+		return nil, false
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.NewTextContent("BLOCKED BY POLICY: " + blocked.Reason),
+		},
+		StructuredContent: map[string]any{
+			"blocked":  true,
+			"category": CategoryPolicy,
+			"reason":   blocked.Reason,
+		},
+		IsError: true,
+	}, true
+}
+
 func errorResult(err error) *mcp.CallToolResult {
 	pe, ok := AsProtocolError(err)
 	if !ok {
@@ -622,6 +658,9 @@ func mapEngineError(err error) error {
 	case errors.Is(err, engine.ErrUnresolved):
 		return WrapProtocolError(CodeSecretUnresolved,
 			"a variable could not be resolved; Pulse does not send placeholders or empty values", err)
+	case errors.Is(err, engine.ErrPolicyBlocked):
+		return WrapProtocolError(CodePolicyBlocked,
+			"the request was blocked by .pulse-guard and nothing was sent", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		return WrapProtocolError(CodeTimeout, "the request exceeded its time budget", err)
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):

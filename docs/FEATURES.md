@@ -1,10 +1,12 @@
-# Feature guide — Git-aware environments and snapshot assertions
+# Feature guide — Git-aware environments, snapshots, drift, and the agent firewall
 
-> **Role in these docs:** the how-to for two Git-native features. It answers
-> "how do I make the environment follow the branch?" and "how do I lock a
-> response shape into the repository?" For exact directive grammar see the
-> [HTTP syntax reference](HTTP_SYNTAX.md); for the terminal workflow see the
-> [TUI guide](TUI_GUIDE.md).
+> **Role in these docs:** the how-to for the Git-native features. It answers
+> "how do I make the environment follow the branch?", "how do I lock a
+> response shape into the repository?", "is this collection still true to its
+> contract?", and "what may an agent send?". For exact directive grammar see
+> the [HTTP syntax reference](HTTP_SYNTAX.md); for the terminal workflow see
+> the [TUI guide](TUI_GUIDE.md); for the full policy reference see the
+> [MCP guide](MCP_GUIDE.md).
 
 Both features are plain text, offline, and reviewable in a diff. Nothing is
 stored in a database or a cloud account.
@@ -158,8 +160,105 @@ named error instead of writing a partial baseline; `# @assert status`,
 document, so a CI dashboard still sees `not ok` and a human still reads a
 clean diff. `--format json` includes a `diff` field per test point.
 
+## Contract drift detection
+
+`pulse drift` compares a collection with an OpenAPI 3.x document without
+sending a request. It catches a collection that still runs but no longer
+describes the API it is testing.
+
+```sh
+pulse drift openapi.json .
+pulse drift api/openapi.yaml collections/users.http
+```
+
+The first argument is the spec (`JSON` or the YAML subset OpenAPI documents
+use); the second is one `.http` file or a directory walked recursively. Local
+`$ref`s are resolved. A remote or cyclic `$ref` is refused rather than
+half-read, and nothing touches the network.
+
+### What is checked
+
+| Kind | Finding |
+|---|---|
+| `unknown-endpoint` | The request's path and method are not declared in the spec. A known path with an undeclared method is reported separately ("declares GET for `/users`, not POST"). |
+| `deprecated` | The matched operation carries `deprecated: true`. |
+| `missing-required-parameter` | A `required: true` query parameter or header is absent. |
+| `unresolved-target` | The target cannot be reduced to a path (`GET users/42`), so it cannot be checked. |
+
+### How a request is matched
+
+- An absolute URL contributes its path: `GET https://api.example.com/users`
+  is checked as `/users`.
+- An origin anchor is dropped at the first slash:
+  `GET {{base}}/users/42` is checked as `/users/42`.
+- A spec template matches one non-empty segment: `/users/{id}` matches
+  `/users/42`. A request segment still written `{{id}}` is treated the same
+  way, because its value is not known offline.
+- A trailing slash is ignored: `/users` and `/users/` are the same endpoint.
+- A required parameter counts as present when its name is present. `?limit=`
+  satisfies `limit`; the checker does not validate the value.
+- Path parameters are satisfied by the path match itself and are not reported
+  again.
+
+### The report and exit codes
+
+```text
+stale.http:2: GET {{base}}/users?limit=5 [missing-required-parameter]: missing required header "X-Trace"
+stale.http:7: DELETE {{base}}/users/7 [deprecated]: DELETE /users/{id} is marked deprecated in the spec
+stale.http:12: GET {{base}}/removed [unknown-endpoint]: no path in the spec matches "/removed"
+drift: 3 violation(s) in 4 request(s) across 2 file(s); 3 spec operation(s) checked (OpenAPI 3.0.3)
+```
+
+| Code | Meaning |
+|---|---|
+| `0` | Every request matched the spec |
+| `1` | At least one violation |
+| `2` | Usage error, unreadable spec, missing collection, or a `.http` file that does not parse |
+
+A file that does not parse fails the whole check with exit 2: a green report
+over a collection Pulse could not read would be worse than no report.
+
+### Limits
+
+Version 1 checks paths, methods, deprecation, and required query/header
+parameters. Request bodies, response schemas, cookie parameters and
+security requirements are not compared. Drift is a static check: it never
+resolves `{{variables}}`, so a path segment whose value comes from a secret
+matches any segment rather than a specific one.
+
+## Agent blast-radius firewall
+
+`pulse mcp` can be sandboxed with a `.pulse-guard` file in the workspace. The
+engine checks the fully resolved request — method, host, and rate — before
+dispatch, and a refusal never opens a socket.
+
+```ini
+[mcp]
+allow_methods = GET, POST
+deny_methods = DELETE, PUT, PATCH
+allow_hosts = localhost, *.internal.net
+deny_hosts = api.production.com
+rate_limit = 10/minute
+```
+
+- With no file, the default policy allows every method against loopback hosts
+  only (`localhost`, `127.0.0.1`, `::1`). A remote host must be named in a
+  committed file.
+- `deny_*` wins over `allow_*`; `allow_*` is exhaustive; `*` in a host list
+  permits every host; `*.internal.net` matches subdomains but not the apex.
+- A malformed file stops `pulse mcp` with `file:line`; it never falls back to
+  the defaults.
+- A blocked call returns readable text instead of a transport error:
+  `BLOCKED BY POLICY: Method DELETE is explicitly denied by .pulse-guard.`
+
+The TUI and `pulse test` are not gated: the firewall exists for the agent,
+which is the untrusted caller. gRPC targets are not covered by this version
+of the policy. The full reference, including the rate-window semantics and the
+structured payload, is in the [MCP guide](MCP_GUIDE.md).
+
 ## Related
 
 - [HTTP syntax reference](HTTP_SYNTAX.md) — directives and variable grammar
 - [TUI guide](TUI_GUIDE.md) — `u`, the response pane, and branch environments
+- [MCP guide](MCP_GUIDE.md) — `.pulse-guard`, defaults, and blocked-request output
 - [Quickstart](QUICKSTART.md) — a first workspace

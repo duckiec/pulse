@@ -60,6 +60,10 @@ type Op struct {
 	Path   string
 	// Params are the path, query and header parameters, sorted by (in, name).
 	Params []Param
+	// Deprecated mirrors the operation's `deprecated` flag. It is read here
+	// because the same projection serves contract-drift checks, where a
+	// deprecated endpoint is a finding rather than a fuzzing target.
+	Deprecated bool
 	// RequestBody is the request body schema, or nil when the operation has none.
 	RequestBody *Schema
 	// Responses maps a status code (as written, e.g. "200", "default") to its
@@ -187,6 +191,7 @@ func ParseOpenAPI(raw []byte) (*IR, error) {
 				continue
 			}
 			op := Op{Method: strings.ToUpper(method), Path: p, ID: strings.ToUpper(method) + " " + p}
+			op.Deprecated, _ = opMap["deprecated"].(bool)
 			op.Params = r.params(opMap, p)
 			if rb, ok := opMap["requestBody"]; ok {
 				op.RequestBody = r.bodySchema(rb)

@@ -178,9 +178,15 @@ func ServeLocked(ctx context.Context, stdout io.Writer, stdin io.Reader) (int, e
 // a response body would reach the model unredacted. The gap is kept
 // visible here so no caller mistakes the convenience for the wired path.
 func DefaultExecutor() Executor {
+	// Even the degraded path carries the default guard. This executor has no
+	// redactor and no resolver, but it does have a network: leaving the
+	// blast-radius policy out here would make the convenience path the one an
+	// agent could use to reach a production host.
+	guard := NewGuard(DefaultGuardPolicy())
 	return &EngineExecutor{
 		NewEngine: func(doc *ast.Document) engine.ProtocolEngine {
 			return engine.NewProtocolRouter(doc, engine.RouterConfig{
+				REST: []engine.Option{engine.WithPolicyGate(guard)},
 				GRPC: &engine.GRPCConfig{Resolver: nil},
 			})
 		},
