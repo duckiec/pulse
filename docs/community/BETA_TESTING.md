@@ -1,8 +1,13 @@
-# v0.1.0 Beta — 5-Minute Sanity Check
+# v0.1.1 Beta — 5-Minute Sanity Check
 
-Pulse v0.1.0 is the first tagged release: a dual-mode HTTP workbench with a
+Pulse v0.1.1 is the first patched beta: a dual-mode HTTP workbench with a
 terminal UI, a headless `pulse test` runner, an encrypted local vault, and an
 MCP server. It ships as six CGO-free binaries with `checksums.txt`.
+
+v0.1.1 fixes the one blocker found in the v0.1.0 beta: `pulse test` now reads
+the workspace vault (`./.pulse.vault`) by default, so the documented
+`pulse vault set` → `pulse test` flow works without exporting
+`PULSE_VAULT_FILE`. Nothing else changed.
 
 We need **five minutes**, not a full test plan. Pick the platform you actually
 run, install from the release assets, and report what breaks. "Everything
@@ -36,7 +41,7 @@ Please report which asset you used:
 
 ```sh
 mkdir -p ~/pulse-beta && cd ~/pulse-beta
-pulse --version    # expect: pulse v0.1.0
+pulse --version    # expect: pulse v0.1.1
 pulse doctor
 ```
 
@@ -52,11 +57,10 @@ printf "hello-beta" | pulse vault set DEMO_TOKEN
 pulse vault list        # prints the key name, never the value
 ```
 
-Known issue in v0.1.0: on a default install, `pulse test` does **not** read
-`./.pulse.vault` unless you export `PULSE_VAULT_FILE=.pulse.vault`. If your run
-fails with exit `3` and `not found in keychain` even
-though the key is listed, that is this bug — not your setup. Workaround:
-export `PULSE_VAULT_FILE=.pulse.vault` for the run.
+Fixed in v0.1.1: `pulse test` reads `./.pulse.vault` by default. If a run still
+exits `3` with `not found in keychain` while `pulse vault list` shows the key,
+that is a **new** bug — please report it with the vault path you used.
+`PULSE_VAULT_FILE` still wins when set, so an explicit path is always honored.
 
 ## 4. Headless run (~1 min)
 
@@ -92,7 +96,7 @@ Anything surprising:
   friction matters as much as the failure.
 - Do not test against systems you do not own.
 
-## What is not in scope for v0.1.0
+## What is not in scope for v0.1.1
 
 P2P sync, gRPC, `@wasm-sign`, and the MCP server are implemented but not part of
 this five-minute pass. Hold those reports for the next beta unless they block
