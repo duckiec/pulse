@@ -55,6 +55,14 @@ const (
 // reports 0.0.0-dev so an unstamped binary never claims a release.
 var version = "0.0.0-dev"
 
+// init propagates the stamped release tag to every surface that reports a
+// version. The linker sets main.version before init runs, so an unstamped
+// development build still reports 0.0.0-dev everywhere.
+func init() {
+	app.Version = version
+	mcp.ServerVersion = version
+}
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr,
 		term.IsTerminal(int(os.Stdout.Fd()))))

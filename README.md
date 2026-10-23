@@ -4,8 +4,6 @@
 
 Postman is a 600MB Electron app that wants you to create a cloud account. Bruno forces you into proprietary `.bru` files. Pulse is a single, CGO-free Go binary that boots in milliseconds, uses standard RFC 7230 `.http` files, and safely exposes your local APIs to AI coding agents without leaking your production keys.
 
-![Pulse Demo](docs/assets/demo.gif)
-
 ---
 
 Cloud API clients store your collections on someone else's server and your tokens in their sync. Pulse keeps requests as plain `.http` files in your repo and resolves secrets at runtime. One engine drives a terminal UI for humans and a 16-tool MCP server for local agents. You create no account. Pulse sends no telemetry and opens no connection to Pulse infrastructure.
@@ -15,6 +13,26 @@ You stream a 50 MB response in bounded 32 KiB chunks under a 2 MiB in-flight cei
 <p align="center">
   <img src="assets/terminal-preview.svg" alt="Pulse terminal session: init, vault seal, doctor, test" width="100%" />
 </p>
+
+## Installation
+
+**macOS / Linux**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
+```
+
+**From source**
+
+```sh
+CGO_ENABLED=0 go build -trimpath -o ./pulse ./cmd/pulse
+```
 
 ## Quickstart
 

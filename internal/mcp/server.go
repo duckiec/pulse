@@ -18,10 +18,10 @@ import (
 
 // ServerName and ServerVersion identify Pulse to the MCP client. They appear in
 // the initialize handshake, so an agent can report which tool server answered.
-const (
-	ServerName    = "pulse"
-	ServerVersion = "0.0.0-dev"
-)
+// ServerVersion is stamped at startup from the build's main.version.
+const ServerName = "pulse"
+
+var ServerVersion = "0.0.0-dev"
 
 // Server wraps the MCP server with the pieces the bridge owns: the executor it
 // dispatches to and the codec's private stdout handle.
