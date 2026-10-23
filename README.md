@@ -1,29 +1,10 @@
-<p align="center">
-  <img src="assets/banner.svg" alt="Pulse — offline, Git-native API workbench" width="100%" />
-</p>
+# Pulse
 
-<p align="center">
-  <a href="https://github.com/duckiec/pulse/actions/workflows/ci.yml"><img src="https://github.com/duckiec/pulse/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go" alt="Go 1.27+" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square" alt="License: AGPL v3" /></a>
-  <a href="scripts/ci/build-matrix.sh"><img src="https://img.shields.io/badge/platform-linux_%7C_macos_%7C_windows-4C7CF3?style=flat-square" alt="Platforms: Linux, macOS, Windows" /></a>
-</p>
+**The anti-bloat, zero-trust API workbench for the terminal.**
 
-<p align="center">
+Postman is a 600MB Electron app that wants you to create a cloud account. Bruno forces you into proprietary `.bru` files. Pulse is a single, CGO-free Go binary that boots in milliseconds, uses standard RFC 7230 `.http` files, and safely exposes your local APIs to AI coding agents without leaking your production keys.
 
-The offline, Git-native API workbench.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/duckiec/pulse/main/install.sh | sh
-```
-
-```powershell
-irm https://raw.githubusercontent.com/duckiec/pulse/main/install.ps1 | iex
-```
-
-[Quickstart](docs/QUICKSTART.md) · [Features](docs/FEATURES.md) · [HTTP syntax](docs/HTTP_SYNTAX.md) · [TUI guide](docs/TUI_GUIDE.md) · [MCP cookbook](docs/MCP_COOKBOOK.md)
-
-</p>
+![Pulse Demo](docs/assets/demo.gif)
 
 ---
 
