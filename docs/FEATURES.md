@@ -1,24 +1,25 @@
-# Feature guide — Git environments, snapshots, drift, replay, capture, merges, and the agent firewall
+# Features
 
-> **Role in these docs:** the how-to for the Git-native features. It answers
-> "how do I make the environment follow the branch?", "how do I lock a
-> response shape into the repository?", "is this collection still true to its
-> contract?", "why did two branches conflict on a request?", and "what may an
-> agent send?". For exact directive grammar see the
-> [HTTP syntax reference](HTTP_SYNTAX.md); for the terminal workflow see
-> the [TUI guide](TUI_GUIDE.md); for the full policy reference see the
-> [MCP guide](MCP_GUIDE.md).
+**The Git-native half of Pulse: branch environments, snapshots, drift, traffic capture, offline replay, merges, WASM hooks, and the agent firewall.**
 
-Request definitions are plain text, offline, and reviewable in a diff. The one
-stateful feature is the air-gap replay cache, which is local SQLite and holds
-only the responses needed to serve `pulse mock --from-cache`. Nothing here
-touches a cloud account.
+<sub>[Quickstart](QUICKSTART.md) · [HTTP syntax](HTTP_SYNTAX.md) · [TUI](TUI_GUIDE.md) · [MCP cookbook](MCP_COOKBOOK.md) · [MCP guide](MCP_GUIDE.md)</sub>
+
+Request definitions are plain text, offline, and reviewable in a diff. The one stateful feature is the air-gap replay cache: local SQLite, holding only the responses needed to serve `pulse mock --from-cache`. Nothing here touches a cloud account.
+
+| Feature | Command or directive | Stateful? |
+|---|---|---|
+| [Branch environments](#git-aware-environments) | `.env.pulse` | No |
+| [Snapshots](#snapshot-assertions) | `# @assert snapshot` | `api.http.snap` in the repo |
+| [Contract drift](#contract-drift-detection) | `pulse drift` | No |
+| [Traffic capture](#traffic-capture-pulse-record) | `pulse record` | Writes `generated.http` |
+| [Offline replay](#air-gap-replay-pulse-mock---from-cache) | `pulse mock --from-cache` | SQLite cache |
+| [Semantic merge](#semantic-git-merge-driver) | `pulse merge` | Git driver |
+| [WASM hooks](#wasm-request-hooks) | `# @wasm`, `@wasm-sign` | No |
+| [Agent firewall](#agent-blast-radius-firewall) | `.pulse-guard` | No |
 
 ## Git-aware environments
 
-A `.env.pulse` file in the directory you launch Pulse from maps Git branches
-to environment variables. Switching branches changes the resolved values on
-the next launch; there is no toggle to remember.
+A `.env.pulse` file in the directory you launch Pulse from maps Git branches to environment variables. Switching branches changes the resolved values on the next launch; there is no toggle to remember.
 
 ```ini
 [default]
@@ -33,32 +34,25 @@ BASE_URL = https://preview-{{GIT_BRANCH}}.internal.net
 
 `{{BASE_URL}}` in a URL, header, or body resolves through the branch block.
 
-### How a branch is selected
+<details>
+<summary>How a branch is selected</summary>
 
-1. Pulse runs `git rev-parse --abbrev-ref HEAD` in the directory holding the
-   file. The call is bounded at two seconds.
+1. Pulse runs `git rev-parse --abbrev-ref HEAD` in the directory holding the file. The call is bounded at two seconds.
 2. `[default]` applies first.
-3. Every `[branch:<pattern>]` glob that matches applies in file order.
-   `*` matches any run of characters, including `/`, so `feat/*` selects
-   `feat/login` and `feat/ui/cards`. `?` matches one character.
-4. An exact selector (for example `[branch:feat/hotfix]`) always beats a glob,
-   whatever its position in the file.
+3. Every `[branch:<pattern>]` glob that matches applies in file order. `*` matches any run of characters, including `/`, so `feat/*` selects `feat/login` and `feat/ui/cards`. `?` matches one character.
+4. An exact selector (for example `[branch:feat/hotfix]`) always beats a glob, whatever its position in the file.
 
-A key the selected block omits falls back to `[default]`. With no matching
-block, or outside a Git repository, `[default]` is used.
+A key the selected block omits falls back to `[default]`. With no matching block, or outside a Git repository, `[default]` is used.
 
-### The reserved `{{GIT_BRANCH}}` variable
+</details>
 
-Pulse injects `GIT_BRANCH` for the current checkout. It is available in
-`.http` files and inside `.env.pulse` values.
+**The reserved `{{GIT_BRANCH}}` variable** is injected for the current checkout and is available in `.http` files and inside `.env.pulse` values.
 
-- A detached HEAD and an unborn branch have no branch name, so
-  `{{GIT_BRANCH}}` is **unresolved** outside a branch. A request that needs it
-  fails closed (exit 3) rather than sending an empty path segment.
-- A value that references `{{GIT_BRANCH}}` with no branch is omitted, so the
-  lookup falls through instead of producing `https://preview-.internal.net`.
+- A detached HEAD and an unborn branch have no branch name, so `{{GIT_BRANCH}}` is **unresolved** outside a branch. A request that needs it fails closed (exit `3`) rather than sending an empty path segment.
+- A value that references `{{GIT_BRANCH}}` with no branch is omitted, so the lookup falls through instead of producing `https://preview-.internal.net`.
 
-### Resolution order and secrets
+<details>
+<summary>Resolution order, secrets, and where the file lives</summary>
 
 `{{var}}` resolves in this order:
 
@@ -66,23 +60,15 @@ Pulse injects `GIT_BRANCH` for the current checkout. It is available in
 2. `.env.pulse` (branch block, then `[default]`)
 3. ephemeral `.env`
 4. decrypted `.pulse.vault`
-5. hard error (exit 3)
+5. hard error (exit `3`)
 
-The branch-specific file ranks above the plain `.env` because it is the more
-specific statement. A keychain entry still wins: a secret overrides
-configuration, never the other way round.
+The branch-specific file ranks above the plain `.env` because it is the more specific statement. A keychain entry still wins: a secret overrides configuration, never the other way round.
 
-`.env.pulse` is configuration, not a secret store. It is committed to the
-repository; keep credentials in the keychain, the vault, or a `.env` that is
-git-ignored. Values loaded from the file are registered with the redactor,
-so they appear as `[REDACTED]` in diagnostics if a server echoes them back.
+`.env.pulse` is configuration, not a secret store. It is committed to the repository; keep credentials in the keychain, the vault, or a `.env` that is git-ignored. Values loaded from the file are registered with the redactor, so they appear as `[REDACTED]` in diagnostics if a server echoes them back.
 
-### Where the file lives
+Pulse reads `.env.pulse` from the invocation directory (the workspace). Set `PULSE_ENV_PULSE_FILE` to another path when the collection lives elsewhere. A missing file is normal and silent. A malformed file is reported as a degradation on stderr, and the rest of the resolution chain keeps working.
 
-Pulse reads `.env.pulse` from the invocation directory (the workspace). Set
-`PULSE_ENV_PULSE_FILE` to another path when the collection lives elsewhere.
-A missing file is normal and silent. A malformed file is reported as a
-degradation on stderr, and the rest of the resolution chain keeps working.
+</details>
 
 ## Snapshot assertions
 
@@ -94,18 +80,17 @@ Attach the directive to a named request:
 GET {{BASE_URL}}/users HTTP/1.1
 ```
 
-- **First run** writes the response body to an adjacent
-  `api.http.snap` file and passes. The file is namespaced by `@name`, so one
-  file holds every snapshot for that collection.
-- **Later runs** load the stored body and compare. A mismatch fails the
-  assertion, and the difference is printed.
-- **`pulse test -u`** (or `--update-snapshots`) accepts the live body as the
-  new baseline. In the TUI, press `u` while viewing a failed snapshot.
+| Run | Behaviour |
+|---|---|
+| First | Writes the response body to an adjacent `api.http.snap` and passes |
+| Later | Loads the stored body, compares, and prints the difference on a mismatch |
+| `pulse test -u` | Accepts the live body as the new baseline |
+| TUI `u` | Same, from a failed snapshot in the response pane |
 
-The request must have `# @name`. Without one there is no namespace, and the
-run fails closed with a usage error (exit 2) before any request is sent.
+The file is namespaced by `@name`, so one file holds every snapshot for that collection. The request must have `# @name`: without one there is no namespace, and the run fails closed with a usage error (exit `2`) before any request is sent.
 
-### The snapshot file
+<details>
+<summary>The snapshot file</summary>
 
 ```text
 # pulse snapshot v1
@@ -116,70 +101,48 @@ run fails closed with a usage error (exit 2) before any request is sent.
 {"id":1,"name":"ada"}
 ```
 
-The format is line-oriented and deterministic: namespaces are sorted, and
-writes go through a temp file plus an atomic rename. A malformed file is
-refused rather than overwritten, so a bad merge does not erase the baseline.
-A body containing a line that starts with `### @name ` cannot be represented;
-Pulse refuses to write it instead of producing a file that would misparse.
+The format is line-oriented and deterministic: namespaces are sorted, and writes go through a temp file plus an atomic rename. A malformed file is refused rather than overwritten, so a bad merge does not erase the baseline. A body containing a line that starts with `### @name ` cannot be represented; Pulse refuses to write it instead of producing a file that would misparse.
 
-### How differences are reported
+</details>
 
-- **JSON** bodies are decoded and compared structurally. Key order and
-  whitespace do not matter; a changed value is reported at its path:
+<details>
+<summary>How differences are reported</summary>
 
-  ```text
-  $.user.name: snapshot "ada", live "grace"
-  $.roles[1]: missing from the live response
-  $.extra: unexpected in the live response
-  ```
+JSON bodies are decoded and compared structurally. Key order and whitespace do not matter; a changed value is reported at its path:
 
-- **Non-JSON** bodies use a line diff with `-` for the stored line and `+` for
-  the live line.
+```text
+$.user.name: snapshot "ada", live "grace"
+$.roles[1]: missing from the live response
+$.extra: unexpected in the live response
+```
 
-The diff is capped at 200 lines and summarised after that.
+Non-JSON bodies use a line diff with `-` for the stored line and `+` for the live line. The diff is capped at 200 lines and summarised after that.
 
-Version 1 is strict: every field must match. A value that changes on every
-request (a timestamp, a generated id) is a real difference and fails the
-snapshot. Keep those endpoints on explicit assertions such as
-`# @assert status == 200` until a projection option exists.
+Version 1 is strict: every field must match. A value that changes on every request (a timestamp, a generated id) is a real difference and fails the snapshot. Keep those endpoints on explicit assertions such as `# @assert status == 200` until a projection option exists.
 
-### Size limit
+</details>
 
-The body kept for assertions and snapshots is capped at 256 KiB
-(`engine.MaxCollectedBytes`). A larger response fails the snapshot with a
-named error instead of writing a partial baseline; `# @assert status`,
-`header`, and `duration` remain usable on large responses.
+**Size limit.** The body kept for assertions and snapshots is capped at 256 KiB (`engine.MaxCollectedBytes`). A larger response fails the snapshot with a named error instead of writing a partial baseline; `# @assert status`, `header`, and `duration` remain usable on large responses.
 
-### Exit codes and CI
+**CI output.** `pulse test --format tap` writes the diff as `# ` comments after the TAP document, so a CI dashboard still sees `not ok` and a human still reads a clean diff. `--format json` includes a `diff` field per test point.
 
-| Code | Meaning |
+| Exit | Meaning |
 |---|---|
 | `0` | Every assertion passed, including snapshots created or updated |
 | `1` | A snapshot or assertion failed |
 | `2` | Usage or parse error, including a snapshot without `@name` |
 | `3` | Secret-resolution failure |
 
-`pulse test --format tap` writes the diff as `# ` comments after the TAP
-document, so a CI dashboard still sees `not ok` and a human still reads a
-clean diff. `--format json` includes a `diff` field per test point.
-
 ## Contract drift detection
 
-`pulse drift` compares a collection with an OpenAPI 3.x document without
-sending a request. It catches a collection that still runs but no longer
-describes the API it is testing.
+`pulse drift` compares a collection with an OpenAPI 3.x document without sending a request. It catches a collection that still runs but no longer describes the API it is testing.
 
 ```sh
 pulse drift openapi.json .
 pulse drift api/openapi.yaml collections/users.http
 ```
 
-The first argument is the spec (`JSON` or the YAML subset OpenAPI documents
-use); the second is one `.http` file or a directory walked recursively. Local
-`$ref`s are resolved. A remote or cyclic `$ref` is refused rather than
-half-read, and nothing touches the network.
-
-### What is checked
+The first argument is the spec (JSON or the YAML subset OpenAPI documents use); the second is one `.http` file or a directory walked recursively. Local `$ref`s are resolved. A remote or cyclic `$ref` is refused rather than half-read, and nothing touches the network.
 
 | Kind | Finding |
 |---|---|
@@ -188,22 +151,17 @@ half-read, and nothing touches the network.
 | `missing-required-parameter` | A `required: true` query parameter or header is absent. |
 | `unresolved-target` | The target cannot be reduced to a path (`GET users/42`), so it cannot be checked. |
 
-### How a request is matched
+<details>
+<summary>How a request is matched</summary>
 
-- An absolute URL contributes its path: `GET https://api.example.com/users`
-  is checked as `/users`.
-- An origin anchor is dropped at the first slash:
-  `GET {{base}}/users/42` is checked as `/users/42`.
-- A spec template matches one non-empty segment: `/users/{id}` matches
-  `/users/42`. A request segment still written `{{id}}` is treated the same
-  way, because its value is not known offline.
+- An absolute URL contributes its path: `GET https://api.example.com/users` is checked as `/users`.
+- An origin anchor is dropped at the first slash: `GET {{base}}/users/42` is checked as `/users/42`.
+- A spec template matches one non-empty segment: `/users/{id}` matches `/users/42`. A request segment still written `{{id}}` is treated the same way, because its value is not known offline.
 - A trailing slash is ignored: `/users` and `/users/` are the same endpoint.
-- A required parameter counts as present when its name is present. `?limit=`
-  satisfies `limit`; the checker does not validate the value.
-- Path parameters are satisfied by the path match itself and are not reported
-  again.
+- A required parameter counts as present when its name is present. `?limit=` satisfies `limit`; the checker does not validate the value.
+- Path parameters are satisfied by the path match itself and are not reported again.
 
-### The report and exit codes
+</details>
 
 ```text
 stale.http:2: GET {{base}}/users?limit=5 [missing-required-parameter]: missing required header "X-Trace"
@@ -212,35 +170,25 @@ stale.http:12: GET {{base}}/removed [unknown-endpoint]: no path in the spec matc
 drift: 3 violation(s) in 4 request(s) across 2 file(s); 3 spec operation(s) checked (OpenAPI 3.0.3)
 ```
 
-| Code | Meaning |
+| Exit | Meaning |
 |---|---|
 | `0` | Every request matched the spec |
 | `1` | At least one violation |
 | `2` | Usage error, unreadable spec, missing collection, or a `.http` file that does not parse |
 
-A file that does not parse fails the whole check with exit 2: a green report
-over a collection Pulse could not read would be worse than no report.
+A file that does not parse fails the whole check with exit `2`: a green report over a collection Pulse could not read would be worse than no report.
 
-### Limits
-
-Version 1 checks paths, methods, deprecation, and required query/header
-parameters. Request bodies, response schemas, cookie parameters and
-security requirements are not compared. Drift is a static check: it never
-resolves `{{variables}}`, so a path segment whose value comes from a secret
-matches any segment rather than a specific one.
+**Limits.** Version 1 checks paths, methods, deprecation, and required query/header parameters. Request bodies, response schemas, cookie parameters and security requirements are not compared. Drift is a static check: it never resolves `{{variables}}`, so a path segment whose value comes from a secret matches any segment rather than a specific one.
 
 ## Traffic capture (`pulse record`)
 
-Write the collection from traffic instead of by hand. `pulse record` is a
-reverse proxy in front of any HTTP server:
+Write the collection from traffic instead of by hand. `pulse record` is a reverse proxy in front of any HTTP server:
 
 ```sh
 pulse record :9000 --target http://localhost:8080 --out generated.http
 ```
 
-Point a frontend, a mobile app, or a few `curl` commands at `:9000` and use the
-real backend. Every distinct request is appended to `generated.http` as a
-complete block:
+Point a frontend, a mobile app, or a few `curl` commands at `:9000` and use the real backend. Every distinct request is appended to `generated.http` as a complete block:
 
 ```http
 ### POST http://localhost:8080/users (captured by pulse record)
@@ -253,29 +201,16 @@ Content-Type: application/json
 {"name":"ada"}
 ```
 
-- **The recorded URL is the target's.** A request captured on `:9000` is
-  written against `http://localhost:8080`, so the collection still works after
-  the recorder is gone.
-- **Credential headers become variables.** `Authorization`,
-  `Proxy-Authorization`, `Cookie`, and `X-Api-Key` (plus any other sensitive
-  header name) are written as `{{AUTH_TOKEN}}`, `{{COOKIE}}`, `{{API_KEY}}`, and
-  so on — placeholders that resolve through the secret chain, not values to
-  commit.
-- **Registered values are scrubbed everywhere else.** Values loaded from the
-  ephemeral `.env` are replaced in URLs, bodies, and ordinary headers; a value
-  the redactor changed becomes that header's variable. The recorder opens no
-  keychain and no vault, so `{{VAR}}` placeholders for those stay yours to name.
-- **Distinct requests are captured once.** Repeating a `GET` does not append a
-  second identical block; a query string that differs counts as distinct.
-- **Bodies are written verbatim** when they are UTF-8 and under 64 KiB. A
-  larger, binary, or `###`-bearing body is omitted with a comment in the block
-  rather than truncated into something that would send different bytes.
-- **Blocks assert the captured status** (`# @assert status == 201`), so the
-  file runs under `pulse test` immediately. Review the generated file and
-  replace the credential variables with the names your vault uses.
+| Rule | Behaviour |
+|---|---|
+| Recorded URL | The target's, not the proxy's, so the collection still works after the recorder is gone |
+| Credentials | `Authorization`, `Proxy-Authorization`, `Cookie`, `X-Api-Key` (and any other sensitive header) become `{{AUTH_TOKEN}}`, `{{COOKIE}}`, `{{API_KEY}}` — placeholders, never values |
+| Other registered values | Values loaded from the ephemeral `.env` are replaced in URLs, bodies, and ordinary headers; a value the redactor changed becomes that header's variable |
+| Distinct requests | Captured once. Repeating a `GET` appends nothing; a differing query string counts as distinct |
+| Bodies | Written verbatim when UTF-8 and under 64 KiB. Larger, binary, or `###`-bearing bodies are omitted with a comment rather than truncated into different bytes |
+| Assertions | Each block carries `# @assert status == <code>`, so the file runs under `pulse test` immediately |
 
-The output file is opened with `0600` and never truncated. Ctrl-C stops the
-proxy cleanly; stop the process before committing the file.
+The recorder opens no keychain and no vault, so `{{VAR}}` placeholders for those stay yours to name. The output file is opened with `0600` and never truncated. Ctrl-C stops the proxy cleanly; stop the process before committing the file.
 
 ## Air-gap replay (`pulse mock --from-cache`)
 
@@ -286,39 +221,19 @@ pulse test .                          # populate/refresh the cache
 pulse mock . --from-cache --port 8080 # serve it
 ```
 
-`pulse mock` parses the collection, builds a method+path router, and answers
-requests from Pulse's local SQLite cache. Nothing is sent upstream, so it works
-with the backend down, a flaky VPN, or no network at all.
+`pulse mock` parses the collection, builds a method+path router, and answers requests from Pulse's local SQLite cache. Nothing is sent upstream, so it works with the backend down, a flaky VPN, or no network at all.
 
-- **Matching is by method and path.** Dynamic segments (`{{id}}`, numeric ids,
-  UUIDs, long hex handles) match their recorded counterparts, and query strings
-  are ignored: `/users/42` and `/users/7` both resolve to the `GET /users/{*}`
-  route.
-- **Replies are the recorded ones.** Status, headers, and body come from the
-  most recent 2xx response for that route. `X-Pulse-Mock: hit` marks a replayed
-  response.
-- **A miss is a 404 with a fix.** An endpoint that has never succeeded returns
-  JSON naming the route and telling you to execute it once with `pulse test` or
-  the MCP server. A path that no `.http` request defines returns a different 404;
-  a defined path with the wrong method returns `405` and an `Allow` header.
-- **The cache is bounded.** One row per route, latest success wins, bodies are
-  capped, and sensitive response headers are stored redacted. Response bodies
-  pass through the same redaction chokepoint as everything else the agent sees.
-- **Capture happens in `pulse test` and in the MCP executor.** Running the
-  collection headless is enough; you do not need to exercise the TUI first.
+- **Matching is by method and path.** Dynamic segments (`{{id}}`, numeric ids, UUIDs, long hex handles) match their recorded counterparts, and query strings are ignored: `/users/42` and `/users/7` both resolve to the `GET /users/{*}` route.
+- **Replies are the recorded ones.** Status, headers, and body come from the most recent 2xx response for that route. `X-Pulse-Mock: hit` marks a replayed response.
+- **A miss is a 404 with a fix.** An endpoint that has never succeeded returns JSON naming the route and telling you to execute it once with `pulse test` or the MCP server. A path that no `.http` request defines returns a different 404; a defined path with the wrong method returns `405` and an `Allow` header.
+- **The cache is bounded.** One row per route, latest success wins, bodies are capped, and sensitive response headers are stored redacted. Response bodies pass through the same redaction chokepoint as everything else the agent sees.
+- **Capture happens in `pulse test` and in the MCP executor.** Running the collection headless is enough; you do not need to exercise the TUI first.
 
-The server binds `127.0.0.1` by default. `--host 0.0.0.0` exposes the cached
-responses to your LAN — useful for a phone talking to your laptop, and a
-deliberate choice worth making explicitly.
+The server binds `127.0.0.1` by default. `--host 0.0.0.0` exposes the cached responses to your LAN — useful for a phone talking to your laptop, and a deliberate choice worth making explicitly.
 
 ## Semantic Git merge driver
 
-`.http` files are records, but Git merges them as lines. Two people can add
-unrelated things to the same request — a header on one branch, an assertion on
-the other — and still get a textual conflict. `pulse merge` is a native Git
-merge driver that reconciles the file at the request and field level instead.
-
-### Bind it once per clone
+`.http` files are records, but Git merges them as lines. Two people can add unrelated things to the same request — a header on one branch, an assertion on the other — and still get a textual conflict. `pulse merge` is a native Git merge driver that reconciles the file at the request and field level instead.
 
 ```sh
 git config merge.pulse.driver "pulse merge %O %A %B"
@@ -330,14 +245,7 @@ and make `.http` files use it, in `.gitattributes` (committed):
 *.http merge=pulse
 ```
 
-Git then invokes the driver only when both sides changed the file. It writes the
-result to `%A` (the current file), and its exit code tells Git what happened.
-
-```sh
-pulse merge base.http current.http other.http
-```
-
-### What is merged
+Git then invokes the driver only when both sides changed the file. It writes the result to `%A` (the current file), and its exit code tells Git what happened.
 
 | Unit | Rule |
 |---|---|
@@ -347,8 +255,7 @@ pulse merge base.http current.http other.http
 | Method + target, body, `# @wasm`, `@wasm-sign` | Scalar three-way merge: an unchanged side defers to the changed one. |
 | New or deleted requests | An addition from either side survives; a request one side deleted and the other did not touch is removed. |
 
-Two sides changing the **same** field to different values cannot be reconciled,
-so standard Git markers are written around the smallest owning unit:
+Two sides changing the **same** field to different values cannot be reconciled, so standard Git markers are written around the smallest owning unit:
 
 ```text
 <<<<<<< current
@@ -358,36 +265,21 @@ Accept: text/plain
 >>>>>>> other
 ```
 
-A header conflict is marked inside the header block; a conflict in the request
-line, body, hook, or signing directive marks the whole request. The result
-replaces the current file and Pulse exits `1`, so Git stages it as conflicted
-and the usual `git diff`/editor workflow resolves it.
+A header conflict is marked inside the header block; a conflict in the request line, body, hook, or signing directive marks the whole request. The result replaces the current file and Pulse exits `1`, so Git stages it as conflicted and the usual `git diff`/editor workflow resolves it.
 
-### Exit codes
-
-| Code | Meaning |
+| Exit | Meaning |
 |---|---|
 | `0` | Clean semantic merge written to `<current>` |
 | `1` | Conflicts written to `<current>`; a human must resolve the markers |
 | `2` | Usage error or a side that is not a valid `.http` document |
 
-Input is parsed before anything is written, and the write is a temp file plus
-rename: a failed merge never truncates `%A`.
+Input is parsed before anything is written, and the write is a temp file plus rename: a failed merge never truncates `%A`.
 
-### What is preserved
-
-A request that did not change is copied byte-for-byte, comments and spacing
-included, and so is an unchanged file preamble. A request that actually merged
-is re-emitted canonically — free comments and disabled `#` headers have no AST
-node, so they survive only inside an untouched copy. Conflict markers are
-deliberately not valid `.http` syntax, the same way a conflicted source file is
-not valid source.
+**What is preserved.** A request that did not change is copied byte-for-byte, comments and spacing included, and so is an unchanged file preamble. A request that actually merged is re-emitted canonically — free comments and disabled `#` headers have no AST node, so they survive only inside an untouched copy. Conflict markers are deliberately not valid `.http` syntax, the same way a conflicted source file is not valid source.
 
 ## Wasm request hooks
 
-A hook rewrites the pending request before Pulse sends it: AWS SigV4 with a body
-digest, an HMAC over a canonical form, a token exchange that needs the final
-URL. It runs in the same zero-capability WebAssembly sandbox as `@wasm-sign`.
+A hook rewrites the pending request before Pulse sends it: AWS SigV4 with a body digest, an HMAC over a canonical form, a token exchange that needs the final URL. It runs in the same zero-capability WebAssembly sandbox as `@wasm-sign`.
 
 ```http
 # @wasm ./hooks/sigv4.wasm
@@ -397,18 +289,14 @@ Content-Type: application/json
 {"name":"widget"}
 ```
 
-- At most one `# @wasm` per request; it attaches to the following request like
-  `# @name`. A missing path is a parse error, not a silent skip.
-- It runs **after** `{{variable}}` interpolation and **before** signing and the
-  `.pulse-guard` firewall, so the policy judges the request the script
-  produced, not the template the file contained.
+- At most one `# @wasm` per request; it attaches to the following request like `# @name`. A missing path is a parse error, not a silent skip.
+- It runs **after** `{{variable}}` interpolation and **before** signing and the `.pulse-guard` firewall, so the policy judges the request the script produced, not the template the file contained.
 - A request without the directive never loads the sandbox.
 
-### The data contract
+<details>
+<summary>The guest data contract</summary>
 
-The guest exports `memory`, `allocate(size) -> ptr` and
-`handle_request(ptr, len) -> i32`. Pulse writes the pending request into the
-guest's memory as JSON:
+The guest exports `memory`, `allocate(size) -> ptr` and `handle_request(ptr, len) -> i32`. Pulse writes the pending request into the guest's memory as JSON:
 
 ```json
 {
@@ -419,32 +307,17 @@ guest's memory as JSON:
 }
 ```
 
-Headers are `[name, value]` pairs, so order and repeated names survive. The
-guest rewrites the document in place and returns the new length; Pulse validates
-it strictly (known fields only, a token-shaped method, an absolute `http(s)` URL,
-token-shaped header names, no CR/LF in a value) and replaces the outbound
-request's method, URL, headers and body. A body that is not valid UTF-8 is
-refused rather than corrupted by JSON encoding.
+Headers are `[name, value]` pairs, so order and repeated names survive. The guest rewrites the document in place and returns the new length; Pulse validates it strictly (known fields only, a token-shaped method, an absolute `http(s)` URL, token-shaped header names, no CR/LF in a value) and replaces the outbound request's method, URL, headers and body. A body that is not valid UTF-8 is refused rather than corrupted by JSON encoding.
 
-### The sandbox
+</details>
 
-Instantiated with no secret resolver, a hook has **no host module at all**: no
-filesystem, environment, network, clock, randomness, or WASI. Reading
-`/etc/passwd` or `PULSE_VAULT_FILE` is not blocked by a check that could be
-bypassed — every import fails at load, so there is no capability to misuse.
-Time and calls are bounded by the same deadline and call budget as signing
-(50 ms and 1,000,000 invocations by default), and a guest that exceeds either is
-closed rather than reused.
+**The sandbox.** Instantiated with no secret resolver, a hook has **no host module at all**: no filesystem, environment, network, clock, randomness, or WASI. Reading `/etc/passwd` or `PULSE_VAULT_FILE` is not blocked by a check that could be bypassed — every import fails at load, so there is no capability to misuse. Time and calls are bounded by the same deadline and call budget as signing (50 ms and 1,000,000 invocations by default), and a guest that exceeds either is closed rather than reused.
 
-Use `@wasm-sign` instead when the script only appends signature headers: it has
-a narrower append-only contract, and its `pulse/env` module offers keyed HMAC
-without exposing key material.
+Use `@wasm-sign` instead when the script only appends signature headers: it has a narrower append-only contract, and its `pulse/env` module offers keyed HMAC without exposing key material.
 
 ## Agent blast-radius firewall
 
-`pulse mcp` can be sandboxed with a `.pulse-guard` file in the workspace. The
-engine checks the fully resolved request — method, host, and rate — before
-dispatch, and a refusal never opens a socket.
+`pulse mcp` can be sandboxed with a `.pulse-guard` file in the workspace. The engine checks the fully resolved request — method, host, and rate — before dispatch, and a refusal never opens a socket.
 
 ```ini
 [mcp]
@@ -455,20 +328,12 @@ deny_hosts = api.production.com
 rate_limit = 10/minute
 ```
 
-- With no file, the default policy allows every method against loopback hosts
-  only (`localhost`, `127.0.0.1`, `::1`). A remote host must be named in a
-  committed file.
-- `deny_*` wins over `allow_*`; `allow_*` is exhaustive; `*` in a host list
-  permits every host; `*.internal.net` matches subdomains but not the apex.
-- A malformed file stops `pulse mcp` with `file:line`; it never falls back to
-  the defaults.
-- A blocked call returns readable text instead of a transport error:
-  `BLOCKED BY POLICY: Method DELETE is explicitly denied by .pulse-guard.`
+- With no file, the default policy allows every method against loopback hosts only (`localhost`, `127.0.0.1`, `::1`). A remote host must be named in a committed file.
+- `deny_*` wins over `allow_*`; `allow_*` is exhaustive; `*` in a host list permits every host; `*.internal.net` matches subdomains but not the apex.
+- A malformed file stops `pulse mcp` with `file:line`; it never falls back to the defaults.
+- A blocked call returns readable text instead of a transport error: `BLOCKED BY POLICY: Method DELETE is explicitly denied by .pulse-guard.`
 
-The TUI and `pulse test` are not gated: the firewall exists for the agent,
-which is the untrusted caller. gRPC targets are not covered by this version
-of the policy. The full reference, including the rate-window semantics and the
-structured payload, is in the [MCP guide](MCP_GUIDE.md).
+The TUI and `pulse test` are not gated: the firewall exists for the agent, which is the untrusted caller. gRPC targets are not covered by this version of the policy. The full reference, including the rate-window semantics and the structured payload, is in the [MCP guide](MCP_GUIDE.md).
 
 ## Related
 

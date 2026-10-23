@@ -1,49 +1,63 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="860" height="560" viewBox="0 0 860 560" role="img" aria-label="Pulse terminal session: init, vault seal, doctor, test">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" width="100%" role="img" aria-labelledby="demo-title demo-desc" preserveAspectRatio="xMidYMid meet">
+  <title id="demo-title">Pulse demo: doctor, test, record, mock</title>
+  <desc id="demo-desc">A terminal session running pulse doctor, pulse test with TAP output, pulse record, and pulse mock --from-cache.</desc>
   <defs>
     <linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#16203200"/>
       <stop offset="0" stop-color="#141C2E"/>
       <stop offset="1" stop-color="#0F1626"/>
     </linearGradient>
   </defs>
-  <rect width="860" height="560" rx="16" fill="#0B0F19"/>
-  <rect x="1" y="1" width="858" height="558" rx="15" fill="none" stroke="#263349" stroke-width="2"/>
-  <rect x="1" y="1" width="858" height="54" rx="15" fill="url(#chrome)"/>
-  <rect x="1" y="38" width="858" height="16" fill="#0F1626"/>
-  <line x1="1" y1="54" x2="859" y2="54" stroke="#263349" stroke-width="1"/>
-  <circle cx="36" cy="28" r="8" fill="#F87171"/>
-  <circle cx="62" cy="28" r="8" fill="#FBBF24"/>
-  <circle cx="88" cy="28" r="8" fill="#34D399"/>
-  <text x="120" y="35" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#7C8AA5">pulse — quickstart</text>
-  <text x="788" y="35" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#475569">80 × 24</text>
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">
-    <text x="32" y="96" fill="#34D399">$</text>
-    <text x="52" y="96" fill="#E2E8F0">pulse init</text>
-    <text x="32" y="122" fill="#64748B">wrote quickstart.http (refused to overwrite without --force)</text>
-    <text x="32" y="154" fill="#34D399">$</text>
-    <text x="52" y="154" fill="#E2E8F0">pulse vault set DEMO_TOKEN</text>
-    <text x="32" y="180" fill="#64748B">sealed DEMO_TOKEN (value hidden, names-only in list)</text>
-    <text x="32" y="212" fill="#34D399">$</text>
-    <text x="52" y="212" fill="#E2E8F0">pulse doctor</text>
-    <text x="32" y="238" fill="#34D399">ok:</text>
-    <text x="68" y="238" fill="#64748B">keyring reachable · vault sound · 2 files, 0 errors</text>
-    <text x="32" y="270" fill="#34D399">$</text>
-    <text x="52" y="270" fill="#E2E8F0">pulse test . --format tap</text>
-    <rect x="28" y="286" width="804" height="112" rx="8" fill="#060A13" stroke="#1E293B" stroke-width="1"/>
-    <text x="44" y="312" fill="#E2E8F0">TAP version 13</text>
-    <text x="44" y="338" fill="#34D399">ok</text>
-    <text x="72" y="338" fill="#E2E8F0">1 — GET /health</text>
-    <text x="44" y="364" fill="#34D399">ok</text>
-    <text x="72" y="364" fill="#E2E8F0">2 — POST /notes</text>
-    <text x="44" y="390" fill="#64748B">1..2</text>
-    <text x="32" y="424" fill="#64748B"># @assert status == 200 passed; body tail streamed in 32 KiB chunks</text>
-    <text x="32" y="456" fill="#34D399">$</text>
-    <text x="52" y="456" fill="#E2E8F0">pulse api.http</text>
-    <rect x="52" y="444" width="11" height="20" fill="#34D399" opacity="0.85"/>
-    <text x="32" y="484" fill="#64748B">TUI: tree · request · stream — j/k scroll, ^S send, ? help</text>
+
+  <rect width="900" height="620" rx="14" fill="#0B0F19"/>
+  <rect x="1" y="1" width="898" height="618" rx="13" fill="none" stroke="#263349" stroke-width="2"/>
+
+  <rect x="1" y="1" width="898" height="44" rx="13" fill="url(#chrome)"/>
+  <rect x="1" y="30" width="898" height="15" fill="#0F1626"/>
+  <line x1="1" y1="44" x2="899" y2="44" stroke="#263349" stroke-width="1"/>
+  <circle cx="26" cy="23" r="6" fill="#F87171"/>
+  <circle cx="46" cy="23" r="6" fill="#FBBF24"/>
+  <circle cx="66" cy="23" r="6" fill="#34D399"/>
+  <text x="88" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#7C8AA5">pulse — ~/my-api</text>
+  <text x="806" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#475569">bash</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">
+    <text x="28" y="80" fill="#34D399">$</text>
+    <text x="46" y="80" fill="#E2E8F0">pulse doctor</text>
+    <text x="28" y="104" fill="#64748B">keyring write ok · keyring read ok · sqlite ok</text>
+    <text x="28" y="126" fill="#34D399">vault ok</text>
+    <text x="98" y="126" fill="#64748B">· .pulse.vault sound · 4 .http files, 0 errors</text>
+
+    <text x="28" y="164" fill="#34D399">$</text>
+    <text x="46" y="164" fill="#E2E8F0">pulse test . --format tap</text>
+    <text x="28" y="188" fill="#E2E8F0">TAP version 13</text>
+    <text x="28" y="210" fill="#34D399">ok</text>
+    <text x="54" y="210" fill="#94A3B8">1 - users.http list / status == 200</text>
+    <text x="28" y="232" fill="#34D399">ok</text>
+    <text x="54" y="232" fill="#94A3B8">2 - users.http list / snapshot</text>
+    <text x="28" y="254" fill="#64748B">1..2</text>
+
+    <text x="28" y="292" fill="#34D399">$</text>
+    <text x="46" y="292" fill="#E2E8F0">pulse record :9000 --target http://localhost:8080</text>
+    <text x="28" y="316" fill="#64748B">captured</text>
+    <text x="98" y="316" fill="#22D3EE">POST http://localhost:8080/notes</text>
+    <text x="350" y="316" fill="#64748B">-&gt; generated.http</text>
+    <text x="28" y="338" fill="#64748B">Authorization header written as {{AUTH_TOKEN}} (0600, never truncated)</text>
+
+    <text x="28" y="376" fill="#34D399">$</text>
+    <text x="46" y="376" fill="#E2E8F0">pulse mock . --from-cache --port 8080</text>
+    <text x="28" y="400" fill="#64748B">serving 2 routes on 127.0.0.1:8080 from the local cache</text>
+    <text x="28" y="422" fill="#64748B"># Cmd-C from the frontend; the backend is off. X-Pulse-Mock: hit</text>
   </g>
-  <rect x="1" y="505" width="858" height="54" fill="#0F1626"/>
-  <rect x="1" y="505" width="858" height="54" rx="0" fill="none" stroke="#263349" stroke-width="1"/>
-  <line x1="1" y1="505" x2="859" y2="505" stroke="#263349" stroke-width="1"/>
-  <text x="32" y="531" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#475569">illustrative layout; commands and grammar are verbatim from QUICKSTART.md</text>
+
+  <rect x="28" y="450" width="844" height="112" rx="8" fill="#060A13" stroke="#1E293B" stroke-width="1"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">
+    <text x="46" y="474" fill="#64748B">$</text>
+    <text x="62" y="474" fill="#E2E8F0">curl -s http://127.0.0.1:8080/notes</text>
+    <text x="46" y="498" fill="#22D3EE">HTTP/1.1 201 Created</text>
+    <text x="46" y="520" fill="#94A3B8">x-pulse-mock: hit</text>
+    <text x="46" y="542" fill="#94A3B8">[{"id":1,"title":"hello"}]</text>
+  </g>
+
+  <line x1="1" y1="584" x2="899" y2="584" stroke="#263349" stroke-width="1"/>
+  <text x="28" y="606" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#475569">composite session; every line is verbatim CLI output shape — flags and exit codes from docs/QUICKSTART.md</text>
 </svg>
