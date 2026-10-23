@@ -126,11 +126,18 @@ func TestAuditSchemaRejectsAWidenedSchema(t *testing.T) {
 	}
 }
 
-// TestSchemaHasNoBodyColumns proves RESPONSE bodies are not persisted: the
-// architecture defers body persistence pending a privacy ADL. It scopes to the
-// history/requests tables deliberately: fuzz_findings.payload holds the
-// redacted TRIGGERING boundary value (redacted in ExecuteFuzz before
-// PersistFindings), not a response body, and is the documented Audit 1B seam.
+// TestSchemaHasNoBodyColumns proves RESPONSE bodies are not persisted in the
+// history tables. Two exemptions exist, and each is named rather than inferred,
+// so a future table cannot inherit them by accident:
+//
+//   - fuzz_findings.payload holds the redacted TRIGGERING boundary value
+//     (redacted in ExecuteFuzz before PersistFindings), not a response body.
+//   - mock_responses.replay is the air-gap replay cache. It is bounded to one
+//     row per route, written only through the redaction chokepoint, and is what
+//     `pulse mock --from-cache` exists to serve (see the package doc).
+//
+// History and requests remain body-free: `pulse test` still keeps metadata and
+// a digest, and the replay cache is the only place a body is written.
 func TestSchemaHasNoBodyColumns(t *testing.T) {
 	s := openTemp(t)
 	cols, err := s.Columns(context.Background())
@@ -138,7 +145,7 @@ func TestSchemaHasNoBodyColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range cols {
-		if c.Table == "fuzz_findings" {
+		if c.Table == "fuzz_findings" || c.Table == "mock_responses" {
 			continue
 		}
 		switch strings.ToLower(c.Name) {

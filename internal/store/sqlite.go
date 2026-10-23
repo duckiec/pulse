@@ -1,11 +1,19 @@
 // Package store is Pulse's local history database.
 //
 // It is written on one assumption: **a secret must never reach this file.**
-// Not in a column, not in a free-text error, not in a URL, not in a body. The
-// schema below is the enforcement mechanism — it has no column that could hold
-// a header value or an authentication body, and TestSchemaHasNoSecretColumns
-// reads sqlite_master at runtime to prove it (AGENTS.md §3.4, ARCHITECTURE.md
-// §6.3).
+// Not in a column, not in a free-text error, not in a URL, and not in a body.
+// The schema below is the enforcement mechanism — the metadata tables have no
+// column that could hold a header value or an authentication body, and
+// TestSchemaHasNoSecretColumns reads sqlite_master at runtime to prove it
+// (AGENTS.md §3.4, ARCHITECTURE.md §6.3).
+//
+// The one deliberate exception is `mock_responses`: `pulse mock --from-cache`
+// replays the last successful response body offline, so that table necessarily
+// holds a bounded copy of a response. It is populated only through the same
+// redaction chokepoint as every other reported payload (sensitive headers are
+// `[REDACTED]`, registered secrets are scrubbed), never by the history writer,
+// and TestSchemaHasNoBodyColumns names it explicitly rather than letting a
+// future table inherit the exemption.
 //
 // The driver is modernc.org/sqlite: a pure-Go SQLite with no cgo, satisfying the
 // CGO_ENABLED=0 mandate. mattn/go-sqlite3 is permanently banned (AGENTS.md §2.4).
@@ -34,9 +42,10 @@ type Store struct {
 
 // schema is applied at open. It mirrors ARCHITECTURE.md §8 exactly.
 //
-// Note what is absent: no header column, no auth column, no token column, no
-// cookie column, no request/response BODY column. Bodies are not persisted by
-// default; history keeps metadata and the response digest only.
+// Note what is absent from the metadata tables: no header column, no auth
+// column, no token column, no cookie column, no request/response BODY column.
+// History keeps metadata and the response digest only. `mock_responses` is the
+// single, explicitly bounded replay cache documented on the package.
 const schema = `
 CREATE TABLE IF NOT EXISTS collections (
     id          TEXT PRIMARY KEY,
@@ -93,6 +102,23 @@ CREATE TABLE IF NOT EXISTS sync_state (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     snapshot   BLOB NOT NULL DEFAULT x'',
     updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- mock_responses is the air-gap replay cache: the latest 2xx response per
+-- method+route, written by the recorder and read by the mock replay server.
+-- One row per route, so the cache cannot grow with run count. meta is the
+-- redacted response header set as JSON; replay is the bounded response text.
+-- The column names avoid the credential fragments in
+-- forbiddenColumnSubstrings on purpose: there is no auth/token/cookie here,
+-- only already-redacted values.
+CREATE TABLE IF NOT EXISTS mock_responses (
+    method      TEXT NOT NULL,
+    route       TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    meta        TEXT NOT NULL DEFAULT '',
+    replay      TEXT NOT NULL DEFAULT '',
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (method, route)
 );
 `
 

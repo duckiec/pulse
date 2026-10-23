@@ -57,6 +57,8 @@ usage:
   pulse mcp
   pulse test <dir> [flags]
   pulse drift <openapi-doc> <file-or-dir>
+  pulse mock <file-or-dir> --from-cache [--port N]
+  pulse record <listen> --target <url> [--out file]
   pulse merge <ancestor> <current> <other>
   pulse vault <command> [args] [flags]
   pulse init [file] [--force]
@@ -68,6 +70,8 @@ commands:
   mcp     serve the MCP server (JSON-RPC over stdio)
   test    run .http collections headless (TAP or JSON)
   drift   check a collection against an OpenAPI document (offline)
+  mock    replay the last successful responses from the local cache (offline)
+  record  capture live traffic into a .http file through a reverse proxy
   merge   three-way semantic merge of a .http collection (Git driver)
   vault   seal, list, and remove secrets (.pulse.vault + keychain)
   init    scaffold a workspace (quickstart.http)
@@ -84,6 +88,8 @@ examples:
   pulse quickstart.http
   pulse test . --format tap
   pulse drift openapi.json .
+  pulse mock . --from-cache --port 8080
+  pulse record :9000 --target http://localhost:8080 --out generated.http
   pulse merge base.http current.http other.http
   pulse vault set API_TOKEN <value>
   pulse doctor
@@ -139,6 +145,45 @@ Findings, with file and line:
 
 Exit codes: 0 no violations, 1 violations found, 2 usage, spec or collection error.
 `
+
+const mockHelp = `usage: pulse mock <file-or-dir> --from-cache [--port N] [--host ADDR]
+
+Start a local HTTP server that replays the most recent 2xx response Pulse
+recorded for each request in the collection. Nothing is sent upstream and no
+network is required: the server is the air-gap development target.
+
+Requests are matched by method and path. Dynamic path segments ({id}, numeric
+ids, UUIDs) match their recorded counterparts, query strings are ignored, and
+an endpoint with no cached response answers 404 with the command that
+populates it.
+
+The cache is the local SQLite store, filled by ` + "`pulse test`" + ` and by the MCP
+executor. Only the latest success per route is kept.
+
+  pulse mock . --from-cache
+  pulse mock collections/users.http --from-cache --port 8080
+  pulse mock . --from-cache --host 0.0.0.0 --port 8080
+  pulse mock --help
+
+Exit codes: 0 clean shutdown, 1 cache or listener failure, 2 usage error.`
+
+const recordHelp = `usage: pulse record <listen> --target <url> [--out file]
+
+Run a reverse proxy on <listen> that forwards to --target and appends every
+distinct request it sees to a .http file (default generated.http). The file is
+created if absent and never truncated.
+
+Captured blocks carry ` + "`# @name`" + ` and ` + "`# @assert status == <code>`" + `, so the
+collection runs under ` + "`pulse test`" + ` immediately. Credential headers
+(Authorization, Cookie, X-API-Key, Proxy-Authorization) are replaced with
+` + "`{{AUTH_TOKEN}}`" + `-style variables; registered values from the ephemeral
+.env are scrubbed too. Review the file before sharing it.
+
+  pulse record :9000 --target http://localhost:8080
+  pulse record :9000 --target https://api.example.com --out api.http
+  pulse record --help
+
+Exit codes: 0 clean shutdown, 1 listener or write failure, 2 usage error.`
 
 const mergeHelp = `usage: pulse merge <ancestor> <current> <other>
 
@@ -343,6 +388,12 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "drift":
 		printHelp(stdout, driftHelp)
+		return exitOK
+	case "mock":
+		printHelp(stdout, mockHelp)
+		return exitOK
+	case "record":
+		printHelp(stdout, recordHelp)
 		return exitOK
 	case "merge":
 		printHelp(stdout, mergeHelp)

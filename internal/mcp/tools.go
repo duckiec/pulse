@@ -126,21 +126,30 @@ type EngineExecutor struct {
 
 // ExecutionRecord is one executed request's metadata for the history.
 //
-// Secrets never belong here: the URL template is recorded RAW (anchors
-// unresolved), and the error text is scrubbed by the recorder before it
-// touches the store — the store itself refuses interpolation anchors.
+// Secrets never belong here: the URL is the engine's already-redacted value,
+// and the error text is scrubbed by the recorder before it touches the store —
+// the store itself refuses interpolation anchors. Headers and Body are the
+// redacted response as well; they exist only so the air-gap replay cache can
+// serve the run offline, and the recorder decides whether to keep them.
 type ExecutionRecord struct {
 	Origin        string // file path, or "<inline payload>"
 	Index         int    // request ordinal in the document
 	Name          string
 	Method        string
-	URLTemplate   string // raw, anchors intact
+	URLTemplate   string // resolved and redacted URL
 	Status        int
 	RequestBytes  int64
 	ResponseBytes int64
 	Digest        string
 	ElapsedMS     int64
 	Err           string // engine error text, possibly empty
+	// Headers is the redacted response header set.
+	Headers http.Header
+	// Body is the redacted response body, capped by the collector.
+	Body string
+	// BodyTruncated reports that the collector capped Body; an exact replay
+	// cannot be built from a prefix, so the recorder skips it.
+	BodyTruncated bool
 }
 
 // ExecutionRecorder persists execution records. Implementations must never fail
@@ -211,6 +220,7 @@ func (e *EngineExecutor) Execute(ctx context.Context, src, origin string, index 
 			Status: out.Status, RequestBytes: int64(len(src)),
 			ResponseBytes: out.BodyBytes, Digest: out.Digest,
 			ElapsedMS: out.ElapsedMS,
+			Headers:   out.Headers, Body: out.Body, BodyTruncated: out.Truncated,
 		}
 		if execErr != nil {
 			rec.Err = execErr.Error()

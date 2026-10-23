@@ -2,10 +2,12 @@
 // for humans and a headless MCP server for local AI agents (AGENTS.md §1,
 // ARCHITECTURE.md §2).
 //
-// Four modes are wired: `pulse mcp` serves the MCP server, `pulse test <dir>`
-// runs a headless pipeline, `pulse vault ...` manages encrypted
-// configuration, and `pulse <file.http>` starts the fullscreen TUI over the
-// same composition root the other modes share.
+// The modes are wired here: `pulse mcp` serves the MCP server, `pulse test
+// <dir>` runs a headless pipeline, `pulse drift` checks a collection against
+// OpenAPI, `pulse record` proxies and captures traffic, `pulse mock` replays the
+// local cache, `pulse vault ...` manages encrypted configuration, and `pulse
+// <file.http>` starts the fullscreen TUI over the same composition root the
+// other modes share.
 //
 // This file wires modes and maps outcomes to exit codes. It does not open a
 // store, read a keychain or build a domain service: that is internal/app's work,
@@ -83,6 +85,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return runTest(ctx, args[1:], stdout, stderr)
 		case "drift":
 			return runDrift(args[1:], stdout, stderr)
+		case "mock":
+			return runMock(ctx, args[1:], stdout, stderr)
+		case "record":
+			return runRecord(ctx, args[1:], stdout, stderr)
 		case "merge":
 			return runMerge(args[1:], stdout, stderr)
 		case "vault":

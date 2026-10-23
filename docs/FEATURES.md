@@ -1,4 +1,4 @@
-# Feature guide — Git environments, snapshots, drift, merges, and the agent firewall
+# Feature guide — Git environments, snapshots, drift, replay, capture, merges, and the agent firewall
 
 > **Role in these docs:** the how-to for the Git-native features. It answers
 > "how do I make the environment follow the branch?", "how do I lock a
@@ -9,8 +9,10 @@
 > the [TUI guide](TUI_GUIDE.md); for the full policy reference see the
 > [MCP guide](MCP_GUIDE.md).
 
-Every feature here is plain text, offline, and reviewable in a diff. Nothing is
-stored in a database or a cloud account.
+Request definitions are plain text, offline, and reviewable in a diff. The one
+stateful feature is the air-gap replay cache, which is local SQLite and holds
+only the responses needed to serve `pulse mock --from-cache`. Nothing here
+touches a cloud account.
 
 ## Git-aware environments
 
@@ -226,6 +228,88 @@ parameters. Request bodies, response schemas, cookie parameters and
 security requirements are not compared. Drift is a static check: it never
 resolves `{{variables}}`, so a path segment whose value comes from a secret
 matches any segment rather than a specific one.
+
+## Traffic capture (`pulse record`)
+
+Write the collection from traffic instead of by hand. `pulse record` is a
+reverse proxy in front of any HTTP server:
+
+```sh
+pulse record :9000 --target http://localhost:8080 --out generated.http
+```
+
+Point a frontend, a mobile app, or a few `curl` commands at `:9000` and use the
+real backend. Every distinct request is appended to `generated.http` as a
+complete block:
+
+```http
+### POST http://localhost:8080/users (captured by pulse record)
+# @name record-post-users
+# @assert status == 201
+POST http://localhost:8080/users HTTP/1.1
+Authorization: {{AUTH_TOKEN}}
+Content-Type: application/json
+
+{"name":"ada"}
+```
+
+- **The recorded URL is the target's.** A request captured on `:9000` is
+  written against `http://localhost:8080`, so the collection still works after
+  the recorder is gone.
+- **Credential headers become variables.** `Authorization`,
+  `Proxy-Authorization`, `Cookie`, and `X-Api-Key` (plus any other sensitive
+  header name) are written as `{{AUTH_TOKEN}}`, `{{COOKIE}}`, `{{API_KEY}}`, and
+  so on — placeholders that resolve through the secret chain, not values to
+  commit.
+- **Registered values are scrubbed everywhere else.** Values loaded from the
+  ephemeral `.env` are replaced in URLs, bodies, and ordinary headers; a value
+  the redactor changed becomes that header's variable. The recorder opens no
+  keychain and no vault, so `{{VAR}}` placeholders for those stay yours to name.
+- **Distinct requests are captured once.** Repeating a `GET` does not append a
+  second identical block; a query string that differs counts as distinct.
+- **Bodies are written verbatim** when they are UTF-8 and under 64 KiB. A
+  larger, binary, or `###`-bearing body is omitted with a comment in the block
+  rather than truncated into something that would send different bytes.
+- **Blocks assert the captured status** (`# @assert status == 201`), so the
+  file runs under `pulse test` immediately. Review the generated file and
+  replace the credential variables with the names your vault uses.
+
+The output file is opened with `0600` and never truncated. Ctrl-C stops the
+proxy cleanly; stop the process before committing the file.
+
+## Air-gap replay (`pulse mock --from-cache`)
+
+Turn the last successful responses into a local server:
+
+```sh
+pulse test .                          # populate/refresh the cache
+pulse mock . --from-cache --port 8080 # serve it
+```
+
+`pulse mock` parses the collection, builds a method+path router, and answers
+requests from Pulse's local SQLite cache. Nothing is sent upstream, so it works
+with the backend down, a flaky VPN, or no network at all.
+
+- **Matching is by method and path.** Dynamic segments (`{{id}}`, numeric ids,
+  UUIDs, long hex handles) match their recorded counterparts, and query strings
+  are ignored: `/users/42` and `/users/7` both resolve to the `GET /users/{*}`
+  route.
+- **Replies are the recorded ones.** Status, headers, and body come from the
+  most recent 2xx response for that route. `X-Pulse-Mock: hit` marks a replayed
+  response.
+- **A miss is a 404 with a fix.** An endpoint that has never succeeded returns
+  JSON naming the route and telling you to execute it once with `pulse test` or
+  the MCP server. A path that no `.http` request defines returns a different 404;
+  a defined path with the wrong method returns `405` and an `Allow` header.
+- **The cache is bounded.** One row per route, latest success wins, bodies are
+  capped, and sensitive response headers are stored redacted. Response bodies
+  pass through the same redaction chokepoint as everything else the agent sees.
+- **Capture happens in `pulse test` and in the MCP executor.** Running the
+  collection headless is enough; you do not need to exercise the TUI first.
+
+The server binds `127.0.0.1` by default. `--host 0.0.0.0` exposes the cached
+responses to your LAN — useful for a phone talking to your laptop, and a
+deliberate choice worth making explicitly.
 
 ## Semantic Git merge driver
 

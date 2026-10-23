@@ -46,6 +46,8 @@ pulse --mcp                 # MCP server over stdio (alias of `pulse mcp`); stdo
 pulse test . --format tap   # headless asserts; exit 0 pass, 1 fail, 2 usage/parse, 3 secret
 pulse test . -u             # accept live responses as snapshot baselines
 pulse drift openapi.json .  # check the collection against the contract; exit 1 on drift
+pulse mock . --from-cache --port 8080  # replay the last successful responses offline
+pulse record :9000 --target http://localhost:8080  # capture live traffic into generated.http
 pulse merge base.http current.http other.http  # semantic 3-way merge (Git driver)
 pulse help                  # help for any command: `pulse help vault set`
 ```
@@ -61,7 +63,7 @@ Accept: application/json
 ###
 ```
 
-Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{base}}`, signing is a bare `@wasm-sign ./sign/auth.wasm` line (one per request), and `# @wasm ./hooks/auth.wasm` runs a sandboxed request rewriter before the policy gate. Bind the merge driver once with `git config merge.pulse.driver "pulse merge %O %A %B"` and add `*.http merge=pulse` to `.gitattributes`; a header on one branch and an assertion on the other then merge instead of conflicting. Add `# @assert snapshot` to a named request and Pulse keeps its response in an adjacent `.http.snap` file for structural regression runs. A `.env.pulse` file selects `BASE_URL` by branch, so a checkout changes the environment without a toggle. Seal a token without leaving the terminal: `pulse vault set DEMO_TOKEN` (prompts with no echo, or reads piped stdin). Check the workspace: `pulse doctor`.
+Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{base}}`, signing is a bare `@wasm-sign ./sign/auth.wasm` line (one per request), and `# @wasm ./hooks/auth.wasm` runs a sandboxed request rewriter before the policy gate. Bind the merge driver once with `git config merge.pulse.driver "pulse merge %O %A %B"` and add `*.http merge=pulse` to `.gitattributes`; a header on one branch and an assertion on the other then merge instead of conflicting. Add `# @assert snapshot` to a named request and Pulse keeps its response in an adjacent `.http.snap` file for structural regression runs. A `.env.pulse` file selects `BASE_URL` by branch, so a checkout changes the environment without a toggle. Seal a token without leaving the terminal: `pulse vault set DEMO_TOKEN` (prompts with no echo, or reads piped stdin). Check the workspace: `pulse doctor`. Generate a collection from traffic with `pulse record :9000 --target http://localhost:8080`: credential headers become `{{AUTH_TOKEN}}` variables and each block carries its response status as an assertion. Then `pulse mock . --from-cache` serves the last successful responses from local SQLite, so development continues with the backend offline.
 
 ## Guarantees
 
@@ -72,7 +74,7 @@ Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{ba
 | ![dual-mode](assets/icons/dual-mode.svg) Dual-mode | TUI and MCP share the engine. Define a request once, drive it from either. |
 | ![single binary](assets/icons/single-binary.svg) Single binary | One CGO-free executable on Linux, macOS, Windows (`CGO_ENABLED=0 go build ./...`, Go 1.27+). |
 
-This README publishes no startup-time figure and no rival memory number. The repo measures neither. The measured budgets are the 2 MiB in-flight streaming ceiling (`internal/engine/stream.go`: 64×32 KiB pooled chunks), the 1 MiB UI tail, and the offline/no-telemetry invariant. Cloud alternatives require accounts and store collections server-side; Pulse stores history metadata in local SQLite and refuses secret-capable columns at every open.
+This README publishes no startup-time figure and no rival memory number. The repo measures neither. The measured budgets are the 2 MiB in-flight streaming ceiling (`internal/engine/stream.go`: 64×32 KiB pooled chunks), the 1 MiB UI tail, and the offline/no-telemetry invariant. Cloud alternatives require accounts and store collections server-side; Pulse stores history metadata and a bounded, redacted replay cache in local SQLite, and refuses secret-capable columns at every open.
 
 You resolve secrets in this order: `keychain → Git-aware .env.pulse → ephemeral in-memory .env → sealed .pulse.vault → hard error (exit 3)`. You write `{{PLACEHOLDER}}` references in files and keep raw values out. Every sink scrubs `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, plus every sealed value, to `[REDACTED]`: stderr, store rows, UI, MCP output. Outbound requests carry the real secret; diagnostic copies never do.
 

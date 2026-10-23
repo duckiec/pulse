@@ -116,6 +116,10 @@ func (a *App) RunTest(ctx context.Context, root string, parallel int, timeout ti
 		MaxParallel: parallel,
 		Timeout:     timeout,
 		Redactor:    a.Redactor,
+		// Every 2xx a test run sees refreshes the air-gap replay cache, so
+		// `pulse mock --from-cache` is populated by the command developers
+		// already run. A store-less App (some tests) simply records nothing.
+		MockSink: a.mockCacheSink(),
 	}
 	for _, opt := range opts {
 		if opt != nil {

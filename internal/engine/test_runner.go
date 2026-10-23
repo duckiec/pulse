@@ -168,6 +168,10 @@ type TestConfig struct {
 	UpdateSnapshots bool
 	// Redactor scrubs failure details before they reach a reporter.
 	Redactor interface{ String(string) string }
+	// MockSink receives every 2xx response this run produced, so
+	// `pulse mock --from-cache` can replay it offline. Nil disables capture;
+	// the sample is redacted before it is delivered.
+	MockSink func(MockSample)
 }
 
 // DefaultParallel is the conservative concurrency default.
@@ -536,6 +540,17 @@ func (r *TestRunner) runOne(
 
 	res := collector.result
 	body := collector.bodyString()
+
+	// Feed the air-gap replay cache before assertions are evaluated: an
+	// assertion failure says the response was wrong, not that it should be
+	// unreplayable, and a route whose assertion is being fixed is exactly the
+	// one a developer wants available offline.
+	if cfg.MockSink != nil && collector.err == nil && res != nil && res.Status >= 200 && res.Status <= 299 && !collector.truncated {
+		cfg.MockSink(MockSample{
+			Method: res.Method, URL: res.URL, Status: res.Status,
+			Header: res.Header, Body: redact(cfg.Redactor, body),
+		})
+	}
 
 	if res == nil || collector.err != nil {
 		detail := "the request did not complete"

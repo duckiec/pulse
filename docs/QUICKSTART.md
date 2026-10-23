@@ -211,9 +211,47 @@ changing to different values leaves standard conflict markers. Requests may
 also run a sandboxed rewriter with `# @wasm ./hooks/auth.wasm` before signing and
 the policy gate; see [Request hooks](FEATURES.md#wasm-request-hooks).
 
+## 13. Generate a collection from live traffic
+
+Stop hand-writing requests you can capture. Put the recorder in front of the
+server your app already calls:
+
+```sh
+pulse record :9000 --target http://localhost:8080 --out generated.http
+```
+
+Point the frontend at `http://localhost:9000`, click through the flows you care
+about, then Ctrl-C. Each distinct request is appended to `generated.http` with
+an `@name`, the credentials replaced by `{{AUTH_TOKEN}}`-style variables, and an
+`# @assert status == <code>` line. Review it, replace the variables with the
+names in your vault, and commit — `pulse test .` runs it unchanged.
+
+The recorded URL is the upstream's, not the proxy's, so the file keeps working
+after the recorder exits. Larger-than-64 KiB, binary, and `###`-bearing request
+bodies are omitted with a comment in the block instead of being truncated.
+
+## 14. Work offline from the cache
+
+Every 2xx response seen by `pulse test` or the MCP executor is kept in the local
+SQLite replay cache — latest success per method+path. Run the collection once,
+stop the backend, and serve the recorded responses instead:
+
+```sh
+pulse test .
+# stop the backend
+pulse mock . --from-cache --port 8080
+curl http://127.0.0.1:8080/users/1
+```
+
+The server matches method and path (dynamic ids included), ignores query
+strings, and replays the cached status, headers, and body. An endpoint that has
+never succeeded is a 404 with the command that populates it — never an invented
+response. `--host 0.0.0.0` exposes the cache to your LAN for a phone or a
+second machine.
+
 ## Next steps
 
-- [Feature guide](FEATURES.md) — branch environments, snapshots, drift, merges, hooks, and the firewall
+- [Feature guide](FEATURES.md) — branch environments, snapshots, drift, traffic capture, offline replay, merges, hooks, and the firewall
 - [TUI guide](TUI_GUIDE.md) — panes, composer, vault, fuzz dashboard
 - [HTTP syntax reference](HTTP_SYNTAX.md) — variables, assertions, signing, cURL import
 - [MCP cookbook](MCP_COOKBOOK.md) — `execute_request`, history, fuzz, authoring tools
