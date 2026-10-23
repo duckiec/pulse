@@ -195,9 +195,25 @@ Without the file, `pulse mcp` allows every method against loopback hosts only.
 A refused call returns `BLOCKED BY POLICY: …` to the model and sends nothing.
 The [MCP guide](MCP_GUIDE.md) documents every key and the failure modes.
 
+## 12. Merge collections like records
+
+Bind the semantic merge driver once per clone, and tell Git to use it for
+`.http` files:
+
+```sh
+git config merge.pulse.driver "pulse merge %O %A %B"
+echo '*.http merge=pulse' >> .gitattributes
+```
+
+Two branches adding different things to the same request — a header on one, an
+assertion on the other — now merge with both changes kept. Only the same field
+changing to different values leaves standard conflict markers. Requests may
+also run a sandboxed rewriter with `# @wasm ./hooks/auth.wasm` before signing and
+the policy gate; see [Request hooks](FEATURES.md#wasm-request-hooks).
+
 ## Next steps
 
-- [Feature guide](FEATURES.md) — branch environments, snapshots, drift, and the firewall
+- [Feature guide](FEATURES.md) — branch environments, snapshots, drift, merges, hooks, and the firewall
 - [TUI guide](TUI_GUIDE.md) — panes, composer, vault, fuzz dashboard
 - [HTTP syntax reference](HTTP_SYNTAX.md) — variables, assertions, signing, cURL import
 - [MCP cookbook](MCP_COOKBOOK.md) — `execute_request`, history, fuzz, authoring tools

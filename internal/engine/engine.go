@@ -203,6 +203,7 @@ type Engine struct {
 	resolver       Resolver
 	redactor       Redactor
 	signer         Signer
+	hook           RequestHook
 	gate           PolicyGate
 	userAgent      string
 	teardownBudget time.Duration
@@ -293,6 +294,22 @@ func (e *Engine) execute(ctx context.Context, req *ast.Request, sink Sink, h Run
 		return
 	}
 
+	// Pre-dispatch hook seam: only a request carrying `# @wasm` reaches the
+	// hook, and a missing hook fails closed. It runs after interpolation
+	// (buildRequest) and BEFORE signing and the policy gate, so the firewall
+	// judges the request the user's script actually produced.
+	if path := e.doc.WasmHook(req); path != "" {
+		if e.hook == nil {
+			sink.Failed(e.scrubErr(
+				fmt.Errorf("engine: line %d: # @wasm %q needs a request hook and none is bound", req.Line, path)))
+			return
+		}
+		if err := e.hook.Apply(ContextWithHookPath(ctx, path), httpReq); err != nil {
+			sink.Failed(e.scrubErr(fmt.Errorf("engine: line %d: run the wasm hook %q: %w", req.Line, path, err)))
+			return
+		}
+	}
+
 	// Pre-dispatch signing seam (ROADMAP.md §3.4): only a request carrying
 	// @wasm-sign reaches the signer, and a missing signer fails closed —
 	// dispatching unsigned when a signature was asked for would report a
@@ -307,6 +324,20 @@ func (e *Engine) execute(ctx context.Context, req *ast.Request, sink Sink, h Run
 			sink.Failed(e.scrubErr(fmt.Errorf("engine: line %d: sign the request: %w", req.Line, err)))
 			return
 		}
+	}
+
+	// The policy gate runs LAST, on the request as it will go on the wire:
+	// every placeholder expanded, every hook and signature header applied.
+	// Anything earlier would vet a request the network never sees; anything
+	// later would have already dialed.
+	if err := e.checkGate(GateRequest{
+		Method: httpReq.Method,
+		URL:    httpReq.URL,
+		Header: httpReq.Header,
+		Line:   req.Line,
+	}); err != nil {
+		sink.Failed(err)
+		return
 	}
 
 	resp, err := e.client.Do(httpReq)
@@ -447,17 +478,6 @@ func (e *Engine) buildRequest(ctx context.Context, ar *ast.Request) (*http.Reque
 	}
 	if body != nil {
 		httpReq.ContentLength = int64(len(e.doc.BodyText(ar.Body)))
-	}
-	// The policy gate runs LAST, on the fully expanded request. Anything
-	// earlier would vet placeholders; anything later would have already
-	// dialed. A refusal fails the run without touching the network.
-	if err := e.checkGate(GateRequest{
-		Method: httpReq.Method,
-		URL:    parsed,
-		Header: httpReq.Header,
-		Line:   ar.Line,
-	}); err != nil {
-		return nil, err
 	}
 	return httpReq, nil
 }

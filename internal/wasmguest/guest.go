@@ -458,3 +458,59 @@ func SigningGuest() []byte {
 	w.sec(11, wvec(seg))
 	return w.b
 }
+
+// HookGuest assembles a minimal `# @wasm` request-hook guest.
+//
+//	(module
+//	  (memory (export "memory") 4)
+//	  (global $bump (mut i32) (i32.const 1024))
+//	  (func (export "allocate") (param $size i32) (result i32) ...)
+//	  (func (export "handle_request") (param $ptr i32) (param $size i32) (result i32)
+//	    ;; memory[$ptr+i] = payload[i] for every byte, unrolled
+//	    i32.const len(payload)))
+//
+// It ignores the incoming document and replaces it wholesale with payload,
+// which is enough to prove the host writes the request in, calls the guest, and
+// applies the returned JSON. It exports no host imports: the hook sandbox
+// registers nothing, so an importing script can never instantiate.
+func HookGuest(payload []byte) []byte {
+	w := &wasmAsm{b: []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}}
+	i32s := []byte{wi32}
+	w.sec(1, wvec(
+		wft(i32s, i32s),               // 0 allocate
+		wft([]byte{wi32, wi32}, i32s), // 1 handle_request
+	))
+	w.sec(3, wvec(wuleb(0), wuleb(1)))
+	w.sec(5, []byte{0x01, 0x00, 0x04}) // one memory, min 4 pages (64 KiB headroom + payload)
+	w.sec(6, append(append([]byte{0x01, wi32, 0x01, wi32Const}, wsleb(1024)...), wEnd))
+	exp := func(name string, kind byte, idx uint32) []byte {
+		out := wname(name)
+		out = append(out, kind)
+		return append(out, wuleb(idx)...)
+	}
+	w.sec(7, wvec(
+		exp("memory", 0x02, 0),
+		exp("allocate", 0x00, 0),
+		exp("handle_request", 0x00, 1),
+	))
+
+	alloc := []byte{wGlobGet, 0x00, wGlobGet, 0x00, wLocalGet, 0x00, wI32Add, wGlobSet, 0x00, wEnd}
+	var hook []byte
+	for i, b := range payload {
+		wlg(&hook, 0) // ptr
+		wi32c(&hook, int32(i))
+		hook = append(hook, wI32Add)
+		wi32c(&hook, int32(b))
+		hook = append(hook, wStore8, 0x00, 0x00)
+	}
+	wi32c(&hook, int32(len(payload)))
+	hook = append(hook, wEnd)
+
+	code := func(body []byte) []byte {
+		inner := append([]byte{0x00}, body...) // zero local declarations
+		out := wuleb(uint32(len(inner)))
+		return append(out, inner...)
+	}
+	w.sec(10, wvec(code(alloc), code(hook)))
+	return w.b
+}

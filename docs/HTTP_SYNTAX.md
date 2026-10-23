@@ -63,6 +63,7 @@ line is a plain comment and is ignored by the parser.
 | Name | `# @name my-request` | Attaches a name to the next request. |
 | Assert | `# @assert <expr>` | Attaches a check to the next request; evaluated by `pulse test`. |
 | Snapshot | `# @assert snapshot` | Compares the response body with `api.http.snap`; requires `# @name`. |
+| Hook | `# @wasm ./hooks/auth.wasm` | Runs a sandboxed WebAssembly request rewriter before signing and dispatch. Attaches to the next request. |
 
 Assert expressions (see `internal/engine/assert.go`):
 
@@ -155,10 +156,29 @@ sandboxed WASM signer to that request.
 - Requests without the directive never touch the signer. The module
   runs with no filesystem, no network, and no clock.
 
+## Request hooks
+
+A `# @wasm ./hooks/auth.wasm` comment before a request attaches a sandboxed
+request hook to it.
+
+- The path is required; `# @wasm` with no path is a parse error. At most one
+  hook per request. `# @wasm-sign` is a different directive and is never read
+  as a hook.
+- The hook runs after `{{variable}}` interpolation and before signing and the
+  `.pulse-guard` firewall. It may change the method, URL, headers, and body,
+  which is what makes SigV4 and HMAC-over-body scripts possible.
+- It receives the pending request as JSON in guest memory and returns the
+  rewritten JSON; the sandbox has no filesystem, environment, network, clock,
+  or WASI. The full contract is in
+  [Request hooks](FEATURES.md#wasm-request-hooks).
+- A request without the directive never loads the sandbox. If a directive is
+  present and no sandbox can run the script, the run fails closed instead of
+  sending the unmodified request.
+
 ## Canonical form
 
 The serializer emits every request in a fixed order: in-block `@var`
-definitions, `# @name`, `# @assert` lines, `@wasm-sign`, the
+definitions, `# @name`, `# @assert` lines, `# @wasm`, `@wasm-sign`, the
 `METHOD URL` line, headers, one blank line, then the body. Collections
 join requests with `###` separators.
 

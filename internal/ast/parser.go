@@ -150,9 +150,13 @@ type Request struct {
 	// directive attached to this request, or -1/-1 when the request asks for
 	// no signing. Read via Document.WasmSign, never directly.
 	WasmSignStart, WasmSignEnd int32
-	Body                       Body
-	Method                     Method
-	Line                       int32
+	// HookStart/HookEnd span the script path of a `# @wasm <path>` directive
+	// attached to this request, or -1/-1 when the request asks for no hook.
+	// Read via Document.WasmHook, never directly.
+	HookStart, HookEnd int32
+	Body               Body
+	Method             Method
+	Line               int32
 }
 
 // Document is the root AST node. It owns no memory of its own: every byte it
@@ -198,6 +202,47 @@ func (d *Document) BodyText(b Body) []byte { return d.arena.bytes(b.Start, b.End
 
 // wasmSignDirective is the directive name (after '@') selecting Wasm signing.
 const wasmSignDirective = "wasm-sign"
+
+// hookDirective is the comment directive selecting a Wasm request hook. It is
+// deliberately NOT `@wasm-sign`: signing appends headers to a canonical
+// envelope, while a hook rewrites the whole pending request before the policy
+// gate sees it. Two directives keep the narrower, append-only contract as the
+// default for the common SigV4/HMAC case.
+const hookDirective = "# @wasm"
+
+// parseHookLine interprets a `# @wasm <path>` comment and returns the path
+// span. ok is false for every other comment, including `# @wasm-sign ...`
+// (the-next-byte rule below is what separates the two). An explicit `# @wasm`
+// with no path is a hard error, never an empty hook: an empty path would
+// resolve against the working directory by accident.
+func parseHookLine(src []byte, start, end int32) (ps, pe int32, ok bool, err *SyntaxError) {
+	s, e := trimSpan(src, start, end)
+	if !hasPrefixSpan(src, s, e, hookDirective) {
+		return 0, 0, false, nil
+	}
+	rest := s + int32(len(hookDirective))
+	if rest < e && src[rest] != ' ' && src[rest] != '\t' {
+		// `# @wasm-sign` continues with '-', not a blank: not this directive.
+		// Any other suffix (`# @wasmly`) is likewise somebody else's comment.
+		return 0, 0, false, nil
+	}
+	// A bare `# @wasm` reaches here: it names the directive with no path, so it
+	// fails closed below rather than degrading to an inert comment.
+	ps, pe = trimSpan(src, rest, e)
+	if pe <= ps {
+		return 0, 0, true, &SyntaxError{Kind: ErrMalformedVar, Offset: s, Expected: "wasm hook script path"}
+	}
+	return ps, pe, true, nil
+}
+
+// WasmHook returns the `# @wasm` script path attached to r, or "" when the
+// request asks for no hook.
+func (d *Document) WasmHook(r *Request) string {
+	if r == nil || r.HookStart < 0 || r.HookEnd <= r.HookStart {
+		return ""
+	}
+	return d.arena.str(r.HookStart, r.HookEnd)
+}
 
 // parseWasmSignLine interprets a `@...` line (without the '@') as
 // `wasm-sign <path>` and returns the path span. ok is false when the line is
@@ -343,6 +388,7 @@ type parser struct {
 
 	pendingNameStart, pendingNameEnd int32 // -1 when unset
 	pendingWasmStart, pendingWasmEnd int32 // -1 when unset: @wasm-sign path for the next request
+	pendingHookStart, pendingHookEnd int32 // -1 when unset: @wasm hook path for the next request
 
 	collect bool          // ParseDiag mode: record and resync, don't stop
 	diags   []SyntaxError // accumulated diagnostics (collect mode)
@@ -428,6 +474,7 @@ func parseSource(arena *Arena, collect bool, path string) (*Document, []SyntaxEr
 	p.lx.Reset(src)
 	p.pendingNameStart, p.pendingNameEnd = -1, -1
 	p.pendingWasmStart, p.pendingWasmEnd = -1, -1
+	p.pendingHookStart, p.pendingHookEnd = -1, -1
 	p.advance()
 
 	err := p.parseDocument()
@@ -539,6 +586,7 @@ func (p *parser) step() (bool, error) {
 		p.blockAsrtStart = p.nAsrt
 		p.pendingNameStart, p.pendingNameEnd = -1, -1
 		p.pendingWasmStart, p.pendingWasmEnd = -1, -1
+		p.pendingHookStart, p.pendingHookEnd = -1, -1
 		return false, nil
 	case TokMethod:
 		return false, p.parseRequest()
@@ -601,12 +649,23 @@ func (p *parser) parseVariable() error {
 	return nil
 }
 
-// parseComment records a pending `# @name` (attached to the next request) and
-// appends `# @assert` directives. A capacity overflow here means the counting
-// pre-pass and this pass disagree — an invariant violation, reported rather
-// than silently truncated (AGENTS.md §4.4: fail closed, never drop an AST node).
+// parseComment records a pending `# @name` or `# @wasm` (both attached to the
+// next request) and appends `# @assert` directives. A capacity overflow here
+// means the counting pre-pass and this pass disagree — an invariant violation,
+// reported rather than silently truncated (AGENTS.md §4.4: fail closed, never
+// drop an AST node).
 func (p *parser) parseComment() error {
 	tok := p.cur
+	if ps, pe, ok, serr := parseHookLine(p.src, tok.Start, tok.End); serr != nil {
+		serr.Line, serr.Col = tok.Line, tok.Col
+		return serr
+	} else if ok {
+		if p.pendingHookStart >= 0 {
+			return p.errorAt(ErrSyntax, "one @wasm per request", tok)
+		}
+		p.pendingHookStart, p.pendingHookEnd = ps, pe
+		return nil
+	}
 	if hasPrefixSpan(p.src, tok.Start, tok.End, nameDirective) {
 		p.pendingNameStart, p.pendingNameEnd = trimSpan(p.src, tok.Start+int32(len(nameDirective)), tok.End)
 		return nil
@@ -645,10 +704,12 @@ func (p *parser) parseRequest() error {
 		NameStart: p.pendingNameStart, NameEnd: p.pendingNameEnd,
 		VarStart: int32(p.blockVarStart), AsrtStart: int32(p.blockAsrtStart),
 		WasmSignStart: p.pendingWasmStart, WasmSignEnd: p.pendingWasmEnd,
+		HookStart: p.pendingHookStart, HookEnd: p.pendingHookEnd,
 	}
 	p.nReq++
 	p.pendingNameStart, p.pendingNameEnd = -1, -1
 	p.pendingWasmStart, p.pendingWasmEnd = -1, -1
+	p.pendingHookStart, p.pendingHookEnd = -1, -1
 
 	// Target: at least one URL/INTERP token is mandatory.
 	p.advance()

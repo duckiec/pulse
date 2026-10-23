@@ -1,14 +1,15 @@
-# Feature guide — Git-aware environments, snapshots, drift, and the agent firewall
+# Feature guide — Git environments, snapshots, drift, merges, and the agent firewall
 
 > **Role in these docs:** the how-to for the Git-native features. It answers
 > "how do I make the environment follow the branch?", "how do I lock a
 > response shape into the repository?", "is this collection still true to its
-> contract?", and "what may an agent send?". For exact directive grammar see
-> the [HTTP syntax reference](HTTP_SYNTAX.md); for the terminal workflow see
+> contract?", "why did two branches conflict on a request?", and "what may an
+> agent send?". For exact directive grammar see the
+> [HTTP syntax reference](HTTP_SYNTAX.md); for the terminal workflow see
 > the [TUI guide](TUI_GUIDE.md); for the full policy reference see the
 > [MCP guide](MCP_GUIDE.md).
 
-Both features are plain text, offline, and reviewable in a diff. Nothing is
+Every feature here is plain text, offline, and reviewable in a diff. Nothing is
 stored in a database or a cloud account.
 
 ## Git-aware environments
@@ -226,6 +227,135 @@ security requirements are not compared. Drift is a static check: it never
 resolves `{{variables}}`, so a path segment whose value comes from a secret
 matches any segment rather than a specific one.
 
+## Semantic Git merge driver
+
+`.http` files are records, but Git merges them as lines. Two people can add
+unrelated things to the same request — a header on one branch, an assertion on
+the other — and still get a textual conflict. `pulse merge` is a native Git
+merge driver that reconciles the file at the request and field level instead.
+
+### Bind it once per clone
+
+```sh
+git config merge.pulse.driver "pulse merge %O %A %B"
+```
+
+and make `.http` files use it, in `.gitattributes` (committed):
+
+```gitattributes
+*.http merge=pulse
+```
+
+Git then invokes the driver only when both sides changed the file. It writes the
+result to `%A` (the current file), and its exit code tells Git what happened.
+
+```sh
+pulse merge base.http current.http other.http
+```
+
+### What is merged
+
+| Unit | Rule |
+|---|---|
+| Request identity | `# @name` when present, else `METHOD target`. A rename merges as a field, not a delete plus an add. |
+| Headers, in-block `@var`s | Per-key three-way merge. An addition from either side survives; repeated header names are compared as a whole. |
+| `# @assert` | Union of additions; a removal by either side removes it. Assertions never conflict with each other. |
+| Method + target, body, `# @wasm`, `@wasm-sign` | Scalar three-way merge: an unchanged side defers to the changed one. |
+| New or deleted requests | An addition from either side survives; a request one side deleted and the other did not touch is removed. |
+
+Two sides changing the **same** field to different values cannot be reconciled,
+so standard Git markers are written around the smallest owning unit:
+
+```text
+<<<<<<< current
+Accept: application/vnd.pulse+json
+=======
+Accept: text/plain
+>>>>>>> other
+```
+
+A header conflict is marked inside the header block; a conflict in the request
+line, body, hook, or signing directive marks the whole request. The result
+replaces the current file and Pulse exits `1`, so Git stages it as conflicted
+and the usual `git diff`/editor workflow resolves it.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean semantic merge written to `<current>` |
+| `1` | Conflicts written to `<current>`; a human must resolve the markers |
+| `2` | Usage error or a side that is not a valid `.http` document |
+
+Input is parsed before anything is written, and the write is a temp file plus
+rename: a failed merge never truncates `%A`.
+
+### What is preserved
+
+A request that did not change is copied byte-for-byte, comments and spacing
+included, and so is an unchanged file preamble. A request that actually merged
+is re-emitted canonically — free comments and disabled `#` headers have no AST
+node, so they survive only inside an untouched copy. Conflict markers are
+deliberately not valid `.http` syntax, the same way a conflicted source file is
+not valid source.
+
+## Wasm request hooks
+
+A hook rewrites the pending request before Pulse sends it: AWS SigV4 with a body
+digest, an HMAC over a canonical form, a token exchange that needs the final
+URL. It runs in the same zero-capability WebAssembly sandbox as `@wasm-sign`.
+
+```http
+# @wasm ./hooks/sigv4.wasm
+POST https://api.example.com/items
+Content-Type: application/json
+
+{"name":"widget"}
+```
+
+- At most one `# @wasm` per request; it attaches to the following request like
+  `# @name`. A missing path is a parse error, not a silent skip.
+- It runs **after** `{{variable}}` interpolation and **before** signing and the
+  `.pulse-guard` firewall, so the policy judges the request the script
+  produced, not the template the file contained.
+- A request without the directive never loads the sandbox.
+
+### The data contract
+
+The guest exports `memory`, `allocate(size) -> ptr` and
+`handle_request(ptr, len) -> i32`. Pulse writes the pending request into the
+guest's memory as JSON:
+
+```json
+{
+  "method": "POST",
+  "url": "https://api.example.com/items?x=1",
+  "headers": [["Accept", "application/json"], ["X-Trace", "1"]],
+  "body": "{\"name\":\"widget\"}"
+}
+```
+
+Headers are `[name, value]` pairs, so order and repeated names survive. The
+guest rewrites the document in place and returns the new length; Pulse validates
+it strictly (known fields only, a token-shaped method, an absolute `http(s)` URL,
+token-shaped header names, no CR/LF in a value) and replaces the outbound
+request's method, URL, headers and body. A body that is not valid UTF-8 is
+refused rather than corrupted by JSON encoding.
+
+### The sandbox
+
+Instantiated with no secret resolver, a hook has **no host module at all**: no
+filesystem, environment, network, clock, randomness, or WASI. Reading
+`/etc/passwd` or `PULSE_VAULT_FILE` is not blocked by a check that could be
+bypassed — every import fails at load, so there is no capability to misuse.
+Time and calls are bounded by the same deadline and call budget as signing
+(50 ms and 1,000,000 invocations by default), and a guest that exceeds either is
+closed rather than reused.
+
+Use `@wasm-sign` instead when the script only appends signature headers: it has
+a narrower append-only contract, and its `pulse/env` module offers keyed HMAC
+without exposing key material.
+
 ## Agent blast-radius firewall
 
 `pulse mcp` can be sandboxed with a `.pulse-guard` file in the workspace. The
@@ -262,3 +392,4 @@ structured payload, is in the [MCP guide](MCP_GUIDE.md).
 - [TUI guide](TUI_GUIDE.md) — `u`, the response pane, and branch environments
 - [MCP guide](MCP_GUIDE.md) — `.pulse-guard`, defaults, and blocked-request output
 - [Quickstart](QUICKSTART.md) — a first workspace
+- [Wasm sandbox](../ARCHITECTURE.md#15-wasm-sandbox-internalwasm) — the capability boundary both Wasm seams share

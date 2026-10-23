@@ -64,6 +64,12 @@ const (
 	// ABISignRequest signs the envelope at (ptr, size) in place and returns
 	// the number of bytes of OUTPUT written. A negative value is an ABI error.
 	ABISignRequest = "sign_request"
+	// ABIHandleRequest rewrites the pending request at (ptr, size) in place and
+	// returns the number of bytes of OUTPUT written. The payload and the result
+	// are both JSON (the document shape is the caller's contract, documented in
+	// docs/FEATURES.md). Optional: a signing-only guest need not export it, and
+	// a hook-only guest need not export sign_request.
+	ABIHandleRequest = "handle_request"
 	// ABIMemory is the export name of the linear memory.
 	ABIMemory = "memory"
 )
@@ -103,21 +109,49 @@ const OutputHeadroom = 4096
 // sandbox.
 const MaxEnvelopeBytes = 1 << 20 // 1 MiB
 
-// invokeSign performs the full memory round trip. See the ABI note above.
+// HookHeadroom is the output reservation for a `handle_request` call.
+//
+// A hook REWRITES the request document, so its output can be larger than its
+// input (an appended Authorization header, a re-encoded body) in a way a
+// signature never is. 64 KiB is still a fixed host-side cost, and the guest's
+// 4 MiB default linear-memory ceiling remains the hard bound.
+const HookHeadroom = 64 << 10
+
+// invokeSign performs the signing memory round trip.
 func (m *Module) invokeSign(ctx context.Context, payload []byte) ([]byte, error) {
+	if m.sign == nil {
+		return nil, fmt.Errorf("%w: the guest does not export %s", ErrABIViolation, ABISignRequest)
+	}
+	return m.invoke(ctx, m.sign, payload, OutputHeadroom, ABISignRequest)
+}
+
+// invokeHook performs the hook memory round trip.
+func (m *Module) invokeHook(ctx context.Context, payload []byte) ([]byte, error) {
+	if m.hook == nil {
+		return nil, fmt.Errorf("%w: the guest does not export %s", ErrABIViolation, ABIHandleRequest)
+	}
+	return m.invoke(ctx, m.hook, payload, HookHeadroom, ABIHandleRequest)
+}
+
+// invoke is the shared in-place ABI: allocate, write the payload, call the
+// guest's in-place function with the PAYLOAD length, then read back the length
+// the guest reported. Both ABIs are identical bar the headroom and the export
+// name, so they share one bounds-checked implementation rather than drifting
+// copies.
+func (m *Module) invoke(ctx context.Context, fn api.Function, payload []byte, headroom uint32, what string) ([]byte, error) {
 	if len(payload) == 0 {
-		return nil, fmt.Errorf("%w: the envelope is empty; a guest has nothing to sign", ErrABIViolation)
+		return nil, fmt.Errorf("%w: the payload is empty", ErrABIViolation)
 	}
 	if len(payload) > MaxEnvelopeBytes {
-		return nil, fmt.Errorf("wasm: envelope is %d bytes, over the %d-byte ceiling",
+		return nil, fmt.Errorf("wasm: payload is %d bytes, over the %d-byte ceiling",
 			len(payload), MaxEnvelopeBytes)
 	}
 
 	// The reservation is len+headroom, and the two are added as int64 so the
 	// sum cannot wrap uint32 before it is bounds-checked.
-	capacity := uint64(len(payload)) + OutputHeadroom
+	capacity := uint64(len(payload)) + uint64(headroom)
 	if capacity > uint64(^uint32(0)) {
-		return nil, fmt.Errorf("%w: the envelope plus headroom exceeds linear memory",
+		return nil, fmt.Errorf("%w: the payload plus headroom exceeds linear memory",
 			ErrABIViolation)
 	}
 
@@ -130,29 +164,29 @@ func (m *Module) invokeSign(ctx context.Context, payload []byte) ([]byte, error)
 		return nil, err
 	}
 
-	// The guest is told the ENVELOPE length, not the capacity: that is the
-	// boundary between "what you were asked to sign" and "where you may write".
-	// A guest that confuses them can write its header over the request, and the
-	// host cannot distinguish that from a correct signature.
-	res, err := m.sign.Call(ctx, uint64(ptr), uint64(len(payload)))
+	// The guest is told the PAYLOAD length, not the capacity: that is the
+	// boundary between "what you were asked to process" and "where you may
+	// write". A guest that confuses them can write over the request, and the
+	// host cannot distinguish that from a correct answer.
+	res, err := fn.Call(ctx, uint64(ptr), uint64(len(payload)))
 	if err != nil {
 		return nil, err
 	}
 	if len(res) != 1 {
-		return nil, fmt.Errorf("%w: sign_request returned %d values, want 1",
-			ErrABIViolation, len(res))
+		return nil, fmt.Errorf("%w: %s returned %d values, want 1",
+			ErrABIViolation, what, len(res))
 	}
 	n := int64(int32(uint32(res[0])))
 	if n < 0 {
-		return nil, fmt.Errorf("%w: sign_request returned the error code %d",
-			ErrABIViolation, n)
+		return nil, fmt.Errorf("%w: %s returned the error code %d",
+			ErrABIViolation, what, n)
 	}
 	// The output length is the ONLY guest-supplied value that becomes a range,
 	// and it is checked against the RESERVED CAPACITY before it becomes an
 	// address arithmetic operand.
 	if uint64(n) > capacity {
-		return nil, fmt.Errorf("%w: sign_request claims %d output bytes for a %d-byte buffer",
-			ErrABIViolation, n, capacity)
+		return nil, fmt.Errorf("%w: %s claims %d output bytes for a %d-byte buffer",
+			ErrABIViolation, what, n, capacity)
 	}
 
 	return m.read(ptr, uint32(n))

@@ -31,6 +31,7 @@ type PlainRequest struct {
 	Name     string
 	Method   string
 	URL      string
+	WasmHook string
 	WasmSign string
 	Headers  []PlainHeader
 	Vars     []PlainVar
@@ -49,9 +50,9 @@ func (d *Document) RequestName(r *Request) string {
 
 // FormatRequest appends the canonical `.http` block for r (no trailing
 // newline; the caller joins blocks with separators). Emission order is fixed:
-// in-block vars, `# @name`, `# @assert` directives, `@wasm-sign`, the request
-// line, headers, a blank line, then the body. Appends only — zero allocation
-// beyond the growth of b itself.
+// in-block vars, `# @name`, `# @assert` directives, `# @wasm`, `@wasm-sign`,
+// the request line, headers, a blank line, then the body. Appends only — zero
+// allocation beyond the growth of b itself.
 func (d *Document) FormatRequest(b []byte, r *Request) ([]byte, error) {
 	if r == nil || r.Method == MethodUnknown {
 		return b, errFormatUnknownMethod
@@ -70,6 +71,12 @@ func (d *Document) FormatRequest(b []byte, r *Request) ([]byte, error) {
 	for _, a := range d.AssertsOf(r) {
 		b = append(b, "# @assert "...)
 		b = append(b, d.Str(a.Start, a.End)...)
+		b = append(b, '\n')
+	}
+	if h := d.WasmHook(r); h != "" {
+		b = append(b, hookDirective...)
+		b = append(b, ' ')
+		b = append(b, h...)
 		b = append(b, '\n')
 	}
 	if s := d.WasmSign(r); s != "" {
@@ -143,6 +150,12 @@ func FormatPlainRequest(b []byte, p PlainRequest) ([]byte, error) {
 	for _, a := range p.Asserts {
 		b = append(b, "# @assert "...)
 		b = append(b, a...)
+		b = append(b, '\n')
+	}
+	if p.WasmHook != "" {
+		b = append(b, hookDirective...)
+		b = append(b, ' ')
+		b = append(b, p.WasmHook...)
 		b = append(b, '\n')
 	}
 	if p.WasmSign != "" {

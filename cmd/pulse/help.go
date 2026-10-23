@@ -57,6 +57,7 @@ usage:
   pulse mcp
   pulse test <dir> [flags]
   pulse drift <openapi-doc> <file-or-dir>
+  pulse merge <ancestor> <current> <other>
   pulse vault <command> [args] [flags]
   pulse init [file] [--force]
   pulse doctor [--key-id ID]
@@ -67,6 +68,7 @@ commands:
   mcp     serve the MCP server (JSON-RPC over stdio)
   test    run .http collections headless (TAP or JSON)
   drift   check a collection against an OpenAPI document (offline)
+  merge   three-way semantic merge of a .http collection (Git driver)
   vault   seal, list, and remove secrets (.pulse.vault + keychain)
   init    scaffold a workspace (quickstart.http)
   doctor  diagnose workspace, vault, store, and MCP config
@@ -82,6 +84,7 @@ examples:
   pulse quickstart.http
   pulse test . --format tap
   pulse drift openapi.json .
+  pulse merge base.http current.http other.http
   pulse vault set API_TOKEN <value>
   pulse doctor
   pulse help vault set
@@ -135,6 +138,28 @@ Findings, with file and line:
   pulse drift --help
 
 Exit codes: 0 no violations, 1 violations found, 2 usage, spec or collection error.
+`
+
+const mergeHelp = `usage: pulse merge <ancestor> <current> <other>
+
+Three-way semantic merge of a .http collection, written to <current>. Requests
+are matched by # @name (else method + target) and merged field by field, so one
+side adding a header and the other adding # @assert keeps both. Different
+values for the same field stay as standard <<<<<<< / ======= / >>>>>>> markers.
+
+Bind it as a Git merge driver (once per clone):
+
+  git config merge.pulse.driver "pulse merge %O %A %B"
+
+and, in .gitattributes:
+
+  *.http merge=pulse
+
+  pulse merge base.http current.http other.http
+  pulse merge --help
+
+Exit codes: 0 clean semantic merge, 1 unresolved conflicts written to <current>,
+2 usage or input error.
 `
 
 const vaultHelp = `usage: pulse vault <command> [args] [flags]
@@ -318,6 +343,9 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "drift":
 		printHelp(stdout, driftHelp)
+		return exitOK
+	case "merge":
+		printHelp(stdout, mergeHelp)
 		return exitOK
 	case "vault":
 		if len(args) > 1 {

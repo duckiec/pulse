@@ -219,6 +219,10 @@ type App struct {
 	// It is bound here — never constructed by the engine — so the secret
 	// chain it resolves through is the same one every executor uses.
 	Signer engine.Signer
+	// Hook backs the `# @wasm` request-rewrite seam. It runs in the same
+	// sandbox with NO host functions at all: a hook needs the request, never
+	// the keychain.
+	Hook engine.RequestHook
 	// Guard is the MCP blast-radius policy. It is loaded by MCPServer, not by
 	// New, and is nil until then; the TUI and `pulse test` routers are built
 	// without it because their caller is the human, not the agent.
@@ -545,6 +549,7 @@ func (a *App) buildTools() error {
 	// The pre-dispatch signer binds the App's secret chain so hmac_sha256
 	// resolves Vault keys dynamically at sign time (ROADMAP.md §3.4.7).
 	a.Signer = &WasmSigner{Resolver: chainResolver{lookup: a.Chain.Lookup}}
+	a.Hook = &WasmHook{}
 	a.Executor = &mcp.EngineExecutor{
 		Redactor:  a.Redactor,
 		Resolver:  a.resolver(),
@@ -622,6 +627,7 @@ func (a *App) newRouterWith(doc *ast.Document, gate engine.PolicyGate) engine.Pr
 		engine.WithRedactor(a.Redactor),
 		engine.WithResolver(a.resolver()),
 		engine.WithSigner(a.Signer),
+		engine.WithHook(a.Hook),
 		engine.WithTimeout(a.cfg.RunTimeout),
 		engine.WithUserAgent("pulse/" + Version),
 	}

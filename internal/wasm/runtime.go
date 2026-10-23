@@ -185,7 +185,8 @@ type Module struct {
 	mod   api.Module
 	mem   api.Memory
 	alloc api.Function
-	sign  api.Function
+	sign  api.Function // nil when the guest exports no sign_request
+	hook  api.Function // nil when the guest exports no handle_request
 
 	// base is the context the module was INSTANTIATED with, and the one the
 	// fuel listener is bound to. wazero attaches a FunctionListener to a
@@ -356,11 +357,18 @@ func New(ctx context.Context, cfg Config) (*Module, error) {
 		_ = rt.Close(ctx)
 		return nil, fmt.Errorf("wasm: the guest does not export %q", ABIAllocate)
 	}
+	// The two in-place ABIs are INDEPENDENT: a signing guest need not export a
+	// hook, and a hook-only guest need not export a signer. Requiring both would
+	// force every user-supplied script to implement a function it never runs.
+	// A module exporting NEITHER is rejected here, at load, so a user never
+	// discovers the gap as an authentication failure on a live request.
 	sign := mod.ExportedFunction(ABISignRequest)
-	if sign == nil {
+	hook := mod.ExportedFunction(ABIHandleRequest)
+	if sign == nil && hook == nil {
 		cancelBase()
 		_ = rt.Close(ctx)
-		return nil, fmt.Errorf("wasm: the guest does not export %q", ABISignRequest)
+		return nil, fmt.Errorf("wasm: the guest exports neither %q nor %q",
+			ABISignRequest, ABIHandleRequest)
 	}
 
 	m := &Module{
@@ -369,6 +377,7 @@ func New(ctx context.Context, cfg Config) (*Module, error) {
 		mem:     mem,
 		alloc:   alloc,
 		sign:    sign,
+		hook:    hook,
 		base:    base,
 		cancel:  cancelBase,
 		timeout: timeout,
@@ -454,16 +463,37 @@ func resolvePages(p uint32) (uint32, error) {
 // [ErrFuelExhausted] for one that made too many calls, and a bounds or ABI error
 // for one that misbehaved at the memory boundary. See memory.go for the ABI.
 func (m *Module) Sign(ctx context.Context, payload []byte) ([]byte, error) {
+	return m.call(ctx, payload, m.invokeSign, "Sign")
+}
+
+// HandleRequest runs the guest's request-hook ABI over payload (a JSON request
+// document) and returns the rewritten JSON document.
+//
+// It shares the sandbox, the clock/fuel bounds and the in-place memory contract
+// with Sign; only the export name and the output reservation differ. A guest
+// that exports no handle_request is refused here, before any dispatch.
+func (m *Module) HandleRequest(ctx context.Context, payload []byte) ([]byte, error) {
+	return m.call(ctx, payload, m.invokeHook, "HandleRequest")
+}
+
+// CanSign and CanHook report which optional ABIs the guest implemented, so a
+// caller can fail with direction ("this script exports no handle_request")
+// instead of a confusing late error.
+func (m *Module) CanSign() bool { return m.sign != nil }
+func (m *Module) CanHook() bool { return m.hook != nil }
+
+// call wraps one bounded guest invocation. The call context descends from
+// m.base, which is where the fuel listener lives; exhaustion cancels m.base,
+// which cancels this, which closes the module — which is why a spent guest is
+// not reused.
+func (m *Module) call(ctx context.Context, payload []byte, invoke func(context.Context, []byte) ([]byte, error), what string) ([]byte, error) {
 	if ctx == nil {
-		return nil, errors.New("wasm: Sign requires a non-nil context")
+		return nil, fmt.Errorf("wasm: %s requires a non-nil context", what)
 	}
 	if m.closed.Load() {
 		return nil, ErrClosed
 	}
 
-	// The call context descends from m.base, which is where the fuel listener
-	// lives. Exhaustion cancels m.base, which cancels this, which closes the
-	// module — which is why a spent guest is not reused.
 	callCtx, cancel := context.WithTimeout(m.base, m.timeout)
 	defer cancel()
 
@@ -481,7 +511,7 @@ func (m *Module) Sign(ctx context.Context, payload []byte) ([]byte, error) {
 	// request rather than a running total.
 	m.spent.Store(0)
 
-	res, err := m.invokeSign(callCtx, payload)
+	res, err := invoke(callCtx, payload)
 	if err != nil {
 		return nil, m.classifyCallErr(callCtx, err)
 	}

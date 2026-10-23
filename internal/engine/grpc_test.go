@@ -546,7 +546,6 @@ func TestProtocolRouterDispatchesByTarget(t *testing.T) {
 	srv := startTestServer(t, true)
 
 	arena := ast.AcquireArena()
-	defer arena.Release()
 	arena.Reset([]byte("POST " + srv.symbol("Echo") + "\n\n{\"message\": \"routed\"}\n"))
 	doc, err := ast.Parse(arena)
 	if err != nil {
@@ -597,7 +596,6 @@ func TestProtocolRouterDispatchesByTarget(t *testing.T) {
 // send "POST grpc://..." to an HTTP parser.
 func TestRouterWithoutGRPCRefusesCleanly(t *testing.T) {
 	arena := ast.AcquireArena()
-	defer arena.Release()
 	arena.Reset([]byte("POST grpc://127.0.0.1:1/pkg.Svc/Method\n\n{\"a\": 1}\n"))
 	doc, err := ast.Parse(arena)
 	if err != nil {
@@ -671,7 +669,6 @@ func TestSchemaResolutionHappensOnce(t *testing.T) {
 	srv := startTestServer(t, true)
 
 	arena := ast.AcquireArena()
-	defer arena.Release()
 	arena.Reset([]byte("POST " + srv.symbol("Echo") + "\n\n{\"message\": \"a\"}\n"))
 	doc, err := ast.Parse(arena)
 	if err != nil {

@@ -46,6 +46,7 @@ pulse --mcp                 # MCP server over stdio (alias of `pulse mcp`); stdo
 pulse test . --format tap   # headless asserts; exit 0 pass, 1 fail, 2 usage/parse, 3 secret
 pulse test . -u             # accept live responses as snapshot baselines
 pulse drift openapi.json .  # check the collection against the contract; exit 1 on drift
+pulse merge base.http current.http other.http  # semantic 3-way merge (Git driver)
 pulse help                  # help for any command: `pulse help vault set`
 ```
 
@@ -60,7 +61,7 @@ Accept: application/json
 ###
 ```
 
-Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{base}}`, signing is a bare `@wasm-sign ./sign/auth.wasm` line (one per request). Add `# @assert snapshot` to a named request and Pulse keeps its response in an adjacent `.http.snap` file for structural regression runs. A `.env.pulse` file selects `BASE_URL` by branch, so a checkout changes the environment without a toggle. Seal a token without leaving the terminal: `pulse vault set DEMO_TOKEN` (prompts with no echo, or reads piped stdin). Check the workspace: `pulse doctor`.
+Blocks end at `###`. Variables are `@base = https://…`, interpolation is `{{base}}`, signing is a bare `@wasm-sign ./sign/auth.wasm` line (one per request), and `# @wasm ./hooks/auth.wasm` runs a sandboxed request rewriter before the policy gate. Bind the merge driver once with `git config merge.pulse.driver "pulse merge %O %A %B"` and add `*.http merge=pulse` to `.gitattributes`; a header on one branch and an assertion on the other then merge instead of conflicting. Add `# @assert snapshot` to a named request and Pulse keeps its response in an adjacent `.http.snap` file for structural regression runs. A `.env.pulse` file selects `BASE_URL` by branch, so a checkout changes the environment without a toggle. Seal a token without leaving the terminal: `pulse vault set DEMO_TOKEN` (prompts with no echo, or reads piped stdin). Check the workspace: `pulse doctor`.
 
 ## Guarantees
 
@@ -112,9 +113,9 @@ bash scripts/ci/run-with-keyring.sh bash scripts/all-gates.sh
 
 | Package | Purpose |
 |---|---|
-| `cmd/pulse/` | Mode selection (`mcp`, `test`, `vault`, `init`, `doctor`, `sync`), exit codes |
+| `cmd/pulse/` | Mode selection (`mcp`, `test`, `drift`, `merge`, `vault`, `init`, `doctor`, `sync`), exit codes |
 | `internal/ast/` | `.http` lexer and parser, no I/O |
-| `internal/engine/` | Transport, streaming, redaction |
+| `internal/engine/` | Transport, streaming, redaction, drift matcher, three-way merge, pre-dispatch hook and policy seams |
 | `internal/store/` | SQLite history (`modernc.org/sqlite`, CGO-free) |
 | `internal/secrets/` | Keychain bindings, vault, redaction |
 | `internal/rag/` | Local codebase index |

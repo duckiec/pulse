@@ -526,7 +526,6 @@ func TestMemoryCeilingInvariant(t *testing.T) {
 			before := liveChunks.Load()
 
 			arena := ast.AcquireArena()
-			defer arena.Release()
 			arena.Reset([]byte("GET " + srv.URL + "/big HTTP/1.1\n\n###\n"))
 			doc, err := ast.Parse(arena)
 			if err != nil {
@@ -800,7 +799,6 @@ func TestCancellationBeforeStart(t *testing.T) {
 	defer srv.Close()
 
 	arena := ast.AcquireArena()
-	defer arena.Release()
 	arena.Reset([]byte("GET " + srv.URL + "/x HTTP/1.1\n\n###\n"))
 	doc, err := ast.Parse(arena)
 	if err != nil {
@@ -836,7 +834,6 @@ func TestCancelIsIdempotent(t *testing.T) {
 		t.Fatalf("warm-up failed: %v", err)
 	}
 	arena := ast.AcquireArena()
-	defer arena.Release()
 	arena.Reset([]byte("GET " + srv.URL + "/x HTTP/1.1\n\n###\n"))
 	doc, err := ast.Parse(arena)
 	if err != nil {

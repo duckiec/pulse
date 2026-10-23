@@ -238,51 +238,77 @@ type reqSpan struct {
 // and free comments are never absorbed into a request's region.
 func requestSpans(doc *Document, src []byte, ls []int32) []reqSpan {
 	spans := make([]reqSpan, 0, doc.Len())
-	idx := 0
 	for r := range doc.Requests() {
-		minLine := r.Line
-		if r.NameStart >= 0 {
-			if l := offsetLine(ls, r.NameStart); l < minLine {
-				minLine = l
-			}
-		}
-		for _, a := range doc.AssertsOf(r) {
-			if a.Line < minLine {
-				minLine = a.Line
-			}
-		}
-		for _, v := range doc.VarsOf(r) {
-			if v.Line < minLine {
-				minLine = v.Line
-			}
-		}
-		if r.WasmSignStart >= 0 {
-			if l := offsetLine(ls, r.WasmSignStart); l < minLine {
-				minLine = l
-			}
-		}
-		start := ls[minLine-1]
-		var end int32
-		if r.Body.Kind != BodyNone {
-			end = trimRightNewlines(src, r.Body.End)
-		} else {
-			lastLine := r.Line
-			for _, h := range r.Headers {
-				if h.Line > lastLine {
-					lastLine = h.Line
-				}
-			}
-			// Header.Line is stamped after the value tokens advance, so it
-			// may sit on the terminator line; clamp into range.
-			if lastLine > int32(len(ls)) {
-				lastLine = int32(len(ls))
-			}
-			end = lineEnd(src, ls[lastLine-1])
-		}
-		spans = append(spans, reqSpan{start: start, end: end})
-		idx++
+		spans = append(spans, requestSpanOf(doc, src, ls, r))
 	}
 	return spans
+}
+
+// requestSpanOf computes the owned range of ONE request. Keeping it separate
+// lets the merge driver read a single request's exact source text without
+// materialising every sibling's span.
+func requestSpanOf(doc *Document, src []byte, ls []int32, r *Request) reqSpan {
+	minLine := r.Line
+	if r.NameStart >= 0 {
+		if l := offsetLine(ls, r.NameStart); l < minLine {
+			minLine = l
+		}
+	}
+	for _, a := range doc.AssertsOf(r) {
+		if a.Line < minLine {
+			minLine = a.Line
+		}
+	}
+	for _, v := range doc.VarsOf(r) {
+		if v.Line < minLine {
+			minLine = v.Line
+		}
+	}
+	if r.WasmSignStart >= 0 {
+		if l := offsetLine(ls, r.WasmSignStart); l < minLine {
+			minLine = l
+		}
+	}
+	if r.HookStart >= 0 {
+		if l := offsetLine(ls, r.HookStart); l < minLine {
+			minLine = l
+		}
+	}
+	start := ls[minLine-1]
+	var end int32
+	if r.Body.Kind != BodyNone {
+		end = trimRightNewlines(src, r.Body.End)
+	} else {
+		lastLine := r.Line
+		for _, h := range r.Headers {
+			if h.Line > lastLine {
+				lastLine = h.Line
+			}
+		}
+		// Header.Line is stamped after the value tokens advance, so it
+		// may sit on the terminator line; clamp into range.
+		if lastLine > int32(len(ls)) {
+			lastLine = int32(len(ls))
+		}
+		end = lineEnd(src, ls[lastLine-1])
+	}
+	return reqSpan{start: start, end: end}
+}
+
+// RequestText returns the exact source bytes owned by r: its leading attached
+// directives through the end of its body (see requestSpanOf). The merge driver
+// uses it to copy an UNCHANGED request byte-for-byte, so a semantic merge
+// never reformats a block it did not have to touch.
+func (d *Document) RequestText(r *Request) []byte {
+	if d == nil || r == nil {
+		return nil
+	}
+	src := d.Source()
+	if len(src) == 0 {
+		return nil
+	}
+	sp := requestSpanOf(d, src, lineStarts(src), r)
+	return d.arena.bytes(sp.start, sp.end)
 }
 
 // section is one `###`-delimited region: head has no leading separator

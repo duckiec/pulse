@@ -83,6 +83,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return runTest(ctx, args[1:], stdout, stderr)
 		case "drift":
 			return runDrift(args[1:], stdout, stderr)
+		case "merge":
+			return runMerge(args[1:], stdout, stderr)
 		case "vault":
 			return runVault(ctx, args[1:], stdin, stdout, stderr)
 		case "init":
